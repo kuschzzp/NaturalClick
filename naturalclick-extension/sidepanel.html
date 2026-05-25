@@ -1,0 +1,1086 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>NaturalClick Agent</title>
+		<style>
+			:root {
+				color-scheme: light only;
+				--bg-0: #edf1f3;
+				--bg-1: #f6f8fa;
+				--bg-2: #ffffff;
+				--card: #ffffff;
+				--card-soft: #f4f7f9;
+				--line: #d8e0e6;
+				--line-strong: #b8c5ce;
+				--text-main: #17212b;
+				--text-sub: #667684;
+				--accent: #2f8f72;
+				--accent-strong: #1f755d;
+				--soil: #9a6b42;
+				--sky: #3b82a7;
+				--ok: #24865d;
+				--danger: #b45445;
+				--panel-shadow: 0 8px 22px rgba(18, 32, 43, 0.08);
+			}
+			html,
+			body {
+				margin: 0;
+				padding: 0;
+				width: 100%;
+				height: 100%;
+				background:
+					linear-gradient(180deg, #ffffff 0%, var(--bg-1) 42%, var(--bg-0) 100%);
+				color: var(--text-main);
+				font-family: "IBM Plex Sans", "Noto Sans SC", "Segoe UI", sans-serif;
+				position: relative;
+			}
+			body::before {
+				display: none;
+			}
+			#app {
+				height: 100%;
+				max-height: 100%;
+				width: min(100%, 480px);
+				margin: 0 auto;
+				display: flex;
+				flex-direction: column;
+				position: relative;
+				z-index: 1;
+				background: rgba(255, 255, 255, 0.58);
+				box-shadow:
+					-1px 0 0 rgba(184, 197, 206, 0.42),
+					1px 0 0 rgba(184, 197, 206, 0.42),
+					0 16px 42px rgba(18, 32, 43, 0.08);
+			}
+
+			.sp-view {
+				display: none;
+				height: 100%;
+				flex-direction: column;
+			}
+			.sp-view.active {
+				display: flex;
+			}
+
+			.sp-header {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 10px 12px;
+				border-bottom: 1px solid var(--line);
+				background: rgba(255, 255, 255, 0.92);
+				position: relative;
+				overflow: hidden;
+			}
+			.sp-header::after {
+				display: none;
+			}
+			.sp-header-main {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				flex: 1;
+				min-width: 0;
+			}
+			.sp-logo {
+				position: relative;
+				flex: 0 0 auto;
+				width: 24px;
+				height: 24px;
+				border-radius: 8px;
+				background:
+					radial-gradient(circle at 72% 28%, #9ee46f 0 12%, transparent 13%),
+					linear-gradient(135deg, #111c27 0%, #17352e 58%, #2f8f72 100%);
+				box-shadow:
+					0 0 0 1px rgba(23, 33, 43, 0.1),
+					0 6px 14px rgba(31, 117, 93, 0.22);
+				overflow: hidden;
+			}
+			.sp-logo::before {
+				content: "";
+				position: absolute;
+				left: 6px;
+				top: 5px;
+				width: 13px;
+				height: 15px;
+				background: #f7fff8;
+				clip-path: polygon(0 0, 0 100%, 34% 72%, 52% 100%, 72% 88%, 54% 60%, 100% 58%);
+				filter: drop-shadow(0 1px 1px rgba(10, 20, 26, 0.28));
+			}
+			.sp-title {
+				font-size: 12px;
+				font-weight: 600;
+				letter-spacing: 0.02em;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.sp-header-right {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+				min-width: 0;
+			}
+			.sp-status-text {
+				font-size: 11px;
+				color: var(--text-sub);
+				margin-right: 2px;
+				min-width: 34px;
+			}
+			.sp-status-dot {
+				width: 8px;
+				height: 8px;
+				border-radius: 999px;
+				background: #8d9d8a;
+				margin-right: 2px;
+			}
+			.sp-status-dot.running {
+				background: #7eae65;
+				box-shadow: 0 0 0 0 rgba(126, 174, 101, 0.4);
+				animation: pulse 1.5s infinite;
+			}
+			.sp-status-dot.completed {
+				background: var(--ok);
+			}
+			.sp-status-dot.stopped {
+				background: #a17f4e;
+			}
+			.sp-status-dot.error {
+				background: var(--danger);
+			}
+
+			.sp-btn {
+				height: 30px;
+				min-width: 30px;
+				padding: 0 10px;
+				border-radius: 8px;
+				border: 1px solid var(--line);
+				background: #ffffff;
+				color: var(--text-main);
+				font-size: 12px;
+				cursor: pointer;
+				box-shadow: 0 1px 2px rgba(18, 32, 43, 0.05);
+				transition:
+					background-color 0.14s ease,
+					border-color 0.14s ease,
+					transform 0.14s ease;
+			}
+			.sp-btn:hover {
+				background: #f6f8fa;
+				border-color: var(--line-strong);
+			}
+			.sp-btn.primary {
+				background: linear-gradient(120deg, var(--accent), var(--accent-strong));
+				border-color: rgba(31, 117, 93, 0.48);
+				color: #ffffff;
+				font-weight: 700;
+				box-shadow: 0 5px 14px rgba(47, 143, 114, 0.22);
+			}
+			.sp-btn:disabled {
+				opacity: 0.45;
+				cursor: not-allowed;
+				transform: none;
+			}
+			.sp-btn.icon {
+				width: 28px;
+				min-width: 28px;
+				height: 28px;
+				border-radius: 8px;
+				padding: 0;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+			}
+
+			.sp-icon-svg {
+				width: 14px;
+				height: 14px;
+				opacity: 0.92;
+				fill: none;
+				stroke: currentColor;
+				stroke-width: 1.9;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+
+			.sp-main {
+				flex: 1;
+				min-height: 0;
+				display: flex;
+				flex-direction: column;
+				background: linear-gradient(180deg, #f8fafb 0%, #eef2f5 100%);
+			}
+
+			.sp-task {
+				margin: 10px 10px 0;
+				padding: 10px 11px;
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: #ffffff;
+				font-size: 12px;
+				display: none;
+				box-shadow: var(--panel-shadow);
+			}
+			.sp-task.show {
+				display: block;
+			}
+			.sp-task-k {
+				font-size: 9px;
+				text-transform: uppercase;
+				letter-spacing: 0;
+				color: var(--text-sub);
+				margin-bottom: 4px;
+			}
+			.sp-task-v {
+				font-size: 12px;
+				line-height: 1.4;
+				word-break: break-word;
+			}
+
+			.sp-scroll {
+				flex: 1;
+				min-height: 0;
+				overflow: auto;
+				padding: 10px;
+			}
+			.sp-card {
+				padding: 10px 11px;
+				margin-bottom: 8px;
+				border: 1px solid var(--line);
+				border-radius: 8px;
+				background: var(--card);
+				font-size: 12px;
+				line-height: 1.45;
+				box-shadow: 0 2px 8px rgba(18, 32, 43, 0.04);
+			}
+			.sp-card:last-child {
+				margin-bottom: 0;
+			}
+			.sp-card-title {
+				font-size: 11px;
+				font-weight: 600;
+				margin-bottom: 4px;
+				color: #243342;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+			}
+			.sp-card-detail {
+				color: #536574;
+				font-size: 11px;
+				line-height: 1.45;
+				word-break: break-word;
+			}
+			.sp-card.error {
+				border-color: rgba(182, 95, 78, 0.36);
+				background: #f7efec;
+			}
+			.sp-card.event {
+				background: #ffffff;
+				position: relative;
+				margin-left: 12px;
+			}
+			.sp-card.event::before {
+				content: '';
+				position: absolute;
+				left: -13px;
+				top: 16px;
+				bottom: -14px;
+				width: 1px;
+				background: #d6e0e7;
+			}
+			.sp-card.event::after {
+				content: '';
+				position: absolute;
+				left: -17px;
+				top: 15px;
+				width: 8px;
+				height: 8px;
+				border-radius: 999px;
+				background: #8aa0af;
+				box-shadow: 0 0 0 3px #f8fafb;
+			}
+			.sp-card.user {
+				background: #eff7f4;
+				border-color: #c4ddd3;
+			}
+			.sp-card.user::after {
+				background: var(--accent);
+			}
+			.sp-card.error::after {
+				background: var(--danger);
+			}
+			.sp-card.model::after {
+				background: var(--sky);
+			}
+			.sp-card-head {
+				display: flex;
+				align-items: flex-start;
+				gap: 7px;
+				margin-bottom: 6px;
+			}
+			.sp-card-title-wrap {
+				flex: 1;
+				min-width: 0;
+			}
+			.sp-card-type {
+				font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+				font-size: 9px;
+				line-height: 1.2;
+				text-transform: uppercase;
+				color: #7b8d9a;
+				margin-bottom: 2px;
+			}
+			.sp-card-dot {
+				width: 18px;
+				height: 18px;
+				border-radius: 6px;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				font-size: 10px;
+				line-height: 1;
+				background: #eef3f6;
+				color: #4b6476;
+				border: 1px solid #d3dde4;
+				flex: 0 0 auto;
+				margin-top: 1px;
+			}
+			.sp-card.error .sp-card-dot {
+				background: #f6e7e2;
+				border-color: #dbbbb0;
+				color: #9f5546;
+			}
+			.sp-card.user .sp-card-dot {
+				background: #dff2eb;
+				border-color: #b7d8ca;
+				color: #1f755d;
+			}
+			.sp-card.model .sp-card-dot {
+				background: #e7f2f8;
+				border-color: #bfd7e5;
+				color: #2f6f90;
+			}
+			.sp-card.step .sp-card-dot {
+				background: #f1f5f8;
+				border-color: #d4dee5;
+				color: #536878;
+			}
+			.sp-card.activity {
+				background: #17212b;
+				color: #edf5f2;
+				border-color: #17212b;
+				position: sticky;
+				bottom: 0;
+				box-shadow: 0 -4px 18px rgba(18, 32, 43, 0.1);
+			}
+			.sp-reflection {
+				display: grid;
+				gap: 5px;
+				margin: 8px 0;
+			}
+			.sp-ref-item {
+				display: grid;
+				grid-template-columns: 16px 1fr;
+				align-items: start;
+				gap: 6px;
+				padding: 5px 7px;
+				border-radius: 7px;
+				background: #f5f8fa;
+			}
+			.sp-ref-icon {
+				font-size: 10px;
+				line-height: 1.2;
+				opacity: 0.82;
+				margin-top: 1px;
+			}
+			.sp-ref-text {
+				font-size: 11px;
+				color: #506371;
+				display: -webkit-box;
+				-webkit-box-orient: vertical;
+				-webkit-line-clamp: 2;
+				overflow: hidden;
+			}
+			.sp-action {
+				margin: 8px 0;
+				padding: 8px 9px;
+				border: 1px solid #d9e3ea;
+				border-radius: 7px;
+				background: #f8fafb;
+			}
+			.sp-action-head {
+				font-size: 11px;
+				font-weight: 600;
+				color: #263746;
+				margin-bottom: 3px;
+			}
+			.sp-action-line {
+				font-size: 11px;
+				color: #5c6d7a;
+				line-height: 1.4;
+				word-break: break-word;
+			}
+			.sp-io {
+				margin-top: 8px;
+				border: 1px solid var(--line);
+				border-radius: 7px;
+				background: #f6f8fa;
+				overflow: hidden;
+			}
+			.sp-io-summary {
+				padding: 7px 9px;
+				font-size: 11px;
+				font-weight: 600;
+				color: #263746;
+				cursor: pointer;
+				user-select: none;
+				list-style: none;
+			}
+			.sp-io-summary::-webkit-details-marker {
+				display: none;
+			}
+			.sp-io-summary::after {
+				content: '展开';
+				float: right;
+				font-size: 10px;
+				font-weight: 500;
+				color: var(--text-sub);
+			}
+			.sp-io[open] .sp-io-summary::after {
+				content: '收起';
+			}
+			.sp-io-body {
+				border-top: 1px solid #d9e3ea;
+			}
+			.sp-io-tabs {
+				display: flex;
+				gap: 4px;
+				padding: 6px 8px 0;
+			}
+			.sp-io-tab {
+				height: 23px;
+				padding: 0 8px;
+				border-radius: 7px;
+				border: 1px solid transparent;
+				background: transparent;
+				font-size: 11px;
+				color: #5c6d7a;
+				cursor: pointer;
+			}
+			.sp-io-tab.active {
+				background: #eaf3f7;
+				border-color: #c6d8e2;
+				color: #263746;
+				font-weight: 600;
+			}
+			.sp-io-copybar {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 5px;
+				padding: 5px 8px 0;
+			}
+			.sp-io-copy {
+				height: 20px;
+				padding: 0 7px;
+				border-radius: 6px;
+				border: 1px solid #d4dee5;
+				background: #ffffff;
+				font-size: 10px;
+				color: #536878;
+				cursor: pointer;
+			}
+			.sp-io-copy:hover {
+				background: #f2f6f8;
+				border-color: #b8c8d3;
+			}
+			.sp-io-pre {
+				margin: 6px 8px 8px;
+				padding: 8px 9px;
+				border: 1px solid #d4dee5;
+				border-radius: 7px;
+				background: #111a22;
+				color: #dce8ef;
+				font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+				font-size: 11px;
+				line-height: 1.45;
+				white-space: pre-wrap;
+				word-break: break-word;
+				max-height: 220px;
+				overflow: auto;
+			}
+			.sp-empty {
+				color: var(--text-sub);
+				text-align: center;
+				margin-top: 24px;
+				font-size: 12px;
+			}
+			.sp-empty-state {
+				height: 100%;
+				min-height: 180px;
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 10px;
+				text-align: center;
+				color: var(--text-sub);
+			}
+			.sp-empty-mark {
+				width: 48px;
+				height: 48px;
+				border-radius: 10px;
+				border: 1px solid var(--line);
+				background: linear-gradient(145deg, #ffffff, #eef3f6);
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				color: #2f8f72;
+				box-shadow: var(--panel-shadow);
+			}
+			.sp-empty-title {
+				font-size: 12px;
+				font-weight: 600;
+				color: #263746;
+			}
+			.sp-empty-desc {
+				font-size: 11px;
+				max-width: 220px;
+				line-height: 1.45;
+			}
+
+			.sp-footer {
+				border-top: 1px solid var(--line);
+				padding: 10px;
+				background: rgba(255, 255, 255, 0.94);
+			}
+			.sp-composer {
+				position: relative;
+				border: 1px solid var(--line);
+				border-radius: 10px;
+				background: #ffffff;
+				box-shadow: 0 2px 10px rgba(18, 32, 43, 0.06);
+			}
+
+			.sp-input {
+				width: 100%;
+				height: 82px;
+				min-height: 82px;
+				max-height: 82px;
+				resize: none;
+				border-radius: 10px;
+				border: 0;
+				background: transparent;
+				color: var(--text-main);
+				padding: 10px 44px 10px 11px;
+				font-size: 12px;
+				font-family: inherit;
+				box-sizing: border-box;
+				outline: none;
+				overflow-y: auto;
+			}
+			.sp-input::placeholder {
+				color: #8a98a4;
+			}
+
+			.sp-row {
+				display: flex;
+				gap: 8px;
+				margin-top: 8px;
+			}
+			.sp-row.sp-between {
+				justify-content: space-between;
+				align-items: center;
+			}
+			.sp-note {
+				font-size: 11px;
+				color: var(--text-sub);
+			}
+			.sp-send-btn {
+				position: absolute;
+				right: 8px;
+				bottom: 8px;
+				width: 28px;
+				height: 28px;
+				border-radius: 8px;
+				border: 1px solid rgba(31, 117, 93, 0.35);
+				background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+				color: #ffffff;
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				cursor: pointer;
+				box-shadow: 0 3px 8px rgba(105, 141, 83, 0.22);
+			}
+			.sp-send-btn.stop {
+				background: #f5e9e5;
+				border-color: #d6b8af;
+				color: #9a4f41;
+				box-shadow: 0 3px 8px rgba(143, 87, 72, 0.18);
+			}
+			.sp-send-btn:disabled {
+				opacity: 0.45;
+				cursor: not-allowed;
+				box-shadow: none;
+			}
+			.sp-send-btn .sp-icon-svg {
+				width: 13px;
+				height: 13px;
+			}
+
+			.sp-history-item {
+				display: flex;
+				flex-direction: column;
+				gap: 9px;
+				padding: 10px;
+				background:
+					radial-gradient(circle at 92% 8%, rgba(160, 195, 142, 0.14), transparent 42%),
+					linear-gradient(165deg, #fbfef9, #f2f8ee);
+				border-color: #c9dbc1;
+				box-shadow: 0 6px 14px rgba(80, 104, 71, 0.1);
+			}
+			.sp-history-main {
+				min-width: 0;
+				cursor: pointer;
+			}
+			.sp-history-title {
+				font-size: 12px;
+				font-weight: 600;
+				line-height: 1.35;
+				word-break: break-word;
+				display: -webkit-box;
+				-webkit-line-clamp: 2;
+				-webkit-box-orient: vertical;
+				overflow: hidden;
+			}
+			.sp-history-meta {
+				font-size: 10px;
+				color: var(--text-sub);
+				margin-top: 6px;
+				line-height: 1.45;
+				word-break: break-word;
+			}
+			.sp-badge {
+				display: inline-flex;
+				align-items: center;
+				height: 16px;
+				padding: 0 6px;
+				border-radius: 999px;
+				font-size: 10px;
+				font-weight: 600;
+				margin-right: 6px;
+				border: 1px solid transparent;
+			}
+			.sp-badge.completed {
+				background: rgba(63, 143, 85, 0.14);
+				border-color: rgba(63, 143, 85, 0.28);
+				color: #3f8f55;
+			}
+			.sp-badge.error {
+				background: rgba(182, 95, 78, 0.14);
+				border-color: rgba(182, 95, 78, 0.28);
+				color: #a75648;
+			}
+			.sp-badge.running {
+				background: rgba(126, 174, 101, 0.17);
+				border-color: rgba(126, 174, 101, 0.28);
+				color: #5d8e47;
+			}
+			.sp-badge.stopped {
+				background: rgba(161, 127, 78, 0.15);
+				border-color: rgba(161, 127, 78, 0.3);
+				color: #8a6738;
+			}
+
+			.sp-history-actions {
+				display: flex;
+				gap: 8px;
+			}
+			.sp-history-action {
+				flex: 1 1 0;
+				min-width: 0;
+				height: 28px;
+				padding: 0 10px;
+				border-radius: 9px;
+				font-size: 11px;
+				font-weight: 600;
+				white-space: nowrap;
+			}
+			.sp-history-action.danger {
+				background: #f8ede9;
+				border-color: #debbb1;
+				color: #a65f50;
+			}
+			.sp-history-action.danger:hover {
+				background: #f4e4df;
+				border-color: #d5aba0;
+			}
+			.sp-history-detail-tools .sp-btn {
+				flex: 1 1 0;
+				min-width: 0;
+				white-space: nowrap;
+			}
+			#view-history .sp-header-right,
+			#view-history-detail .sp-header-right {
+				gap: 4px;
+				flex-wrap: wrap;
+				justify-content: flex-end;
+			}
+			#view-history .sp-header-right .sp-btn,
+			#view-history-detail .sp-header-right .sp-btn {
+				height: 28px;
+				padding: 0 8px;
+				font-size: 11px;
+				border-radius: 9px;
+				white-space: nowrap;
+			}
+
+			.sp-form {
+				padding: 10px;
+				overflow: auto;
+				display: flex;
+				flex-direction: column;
+				gap: 8px;
+			}
+			.sp-section {
+				padding: 12px;
+				border: 1px solid var(--line);
+				border-radius: 14px;
+				background: var(--card-soft);
+				box-shadow: 0 4px 10px rgba(95, 118, 83, 0.07);
+			}
+			.sp-section-title {
+				font-size: 12px;
+				font-weight: 600;
+				margin-bottom: 8px;
+			}
+			.sp-field {
+				display: flex;
+				flex-direction: column;
+				gap: 5px;
+			}
+			.sp-field label {
+				font-size: 11px;
+				color: var(--text-sub);
+			}
+			.sp-inline-tools {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				margin-top: 4px;
+			}
+			.sp-inline-tools .sp-btn {
+				flex: 0 0 auto;
+				white-space: nowrap;
+			}
+			.sp-input-inline {
+				display: flex;
+				align-items: center;
+				gap: 6px;
+			}
+			.sp-input-inline .sp-text {
+				flex: 1;
+				min-width: 0;
+			}
+			.sp-eye {
+				width: 30px;
+				min-width: 30px;
+				height: 30px;
+				padding: 0;
+				border-radius: 10px;
+				border: 1px solid var(--line);
+				background: #f5faf2;
+				color: var(--text-main);
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				cursor: pointer;
+			}
+			.sp-eye:hover {
+				background: #eff7eb;
+				border-color: var(--line-strong);
+			}
+			.sp-test-result {
+				flex: 1;
+				min-width: 0;
+				display: block;
+				font-size: 11px;
+				color: var(--text-sub);
+				white-space: nowrap;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+			.sp-test-result.pending {
+				color: #5c7f93;
+			}
+			.sp-test-result.success {
+				color: #4c8755;
+			}
+			.sp-test-result.error {
+				color: #a75d4f;
+			}
+			.sp-text,
+			.sp-select {
+				height: 33px;
+				border-radius: 10px;
+				border: 1px solid var(--line);
+				background: #fbfef9;
+				color: var(--text-main);
+				padding: 0 9px;
+				font-size: 12px;
+				font-family: inherit;
+			}
+			.sp-text[type="number"]::-webkit-outer-spin-button,
+			.sp-text[type="number"]::-webkit-inner-spin-button {
+				-webkit-appearance: none;
+				margin: 0;
+			}
+
+			.sp-confirm-overlay {
+				position: fixed;
+				inset: 0;
+				display: none;
+				align-items: center;
+				justify-content: center;
+				background: rgba(84, 100, 71, 0.28);
+				backdrop-filter: blur(2px);
+				padding: 16px;
+				z-index: 9999;
+			}
+			.sp-confirm {
+				width: 100%;
+				border: 1px solid var(--line);
+				background: #f8fcf5;
+				border-radius: 14px;
+				padding: 12px;
+				display: flex;
+				flex-direction: column;
+				gap: 10px;
+				box-shadow: 0 10px 28px rgba(76, 93, 64, 0.22);
+			}
+			.sp-confirm-title {
+				font-size: 13px;
+				font-weight: 600;
+			}
+			.sp-confirm-desc {
+				font-size: 12px;
+				line-height: 1.45;
+				white-space: pre-wrap;
+				max-height: 200px;
+				overflow: auto;
+				color: #425643;
+			}
+
+			@keyframes pulse {
+				0% {
+					box-shadow: 0 0 0 0 rgba(126, 174, 101, 0.42);
+				}
+				70% {
+					box-shadow: 0 0 0 8px rgba(126, 174, 101, 0);
+				}
+				100% {
+					box-shadow: 0 0 0 0 rgba(126, 174, 101, 0);
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<div id="app">
+			<section id="view-chat" class="sp-view active">
+				<header class="sp-header">
+					<div class="sp-header-main">
+						<div class="sp-logo"></div>
+						<div id="sp-title" class="sp-title">NaturalClick Agent</div>
+					</div>
+					<div class="sp-header-right">
+						<span id="sp-status-dot" class="sp-status-dot"></span>
+						<span id="sp-status-text" class="sp-status-text">空闲</span>
+						<button id="sp-copy-session" class="sp-btn icon" type="button" title="复制会话信息">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1" /></svg>
+						</button>
+						<button id="sp-download-session" class="sp-btn icon" type="button" title="下载会话 TXT">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="M12 3v11" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></svg>
+						</button>
+						<button id="sp-new-conversation" class="sp-btn icon" type="button" title="新建会话">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+						</button>
+						<button id="sp-open-history" class="sp-btn icon" type="button" title="历史">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="M3 5h18M3 12h18M3 19h18" /></svg>
+						</button>
+						<button id="sp-open-settings" class="sp-btn icon" type="button" title="设置">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" /><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V20a2 2 0 0 1-4 0v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H4a2 2 0 0 1 0-4h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a2 2 0 0 1 2.8-2.8l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V4a2 2 0 0 1 4 0v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a2 2 0 0 1 2.8 2.8l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6h.2a2 2 0 0 1 0 4h-.2a1 1 0 0 0-.9.6Z" /></svg>
+						</button>
+					</div>
+				</header>
+
+				<main class="sp-main">
+					<div id="sp-current-task" class="sp-task">
+						<div class="sp-task-k">Task</div>
+						<div id="sp-current-task-value" class="sp-task-v"></div>
+					</div>
+					<div id="sp-chat-stream" class="sp-scroll"></div>
+				</main>
+
+				<footer class="sp-footer">
+					<div class="sp-composer">
+						<textarea id="sp-task-input" class="sp-input" placeholder="描述你的任务...（Enter 发送，Shift+Enter 换行）"></textarea>
+						<button id="sp-send-stop" class="sp-send-btn" type="button" aria-label="发送任务">
+							<svg id="sp-send-stop-icon" class="sp-icon-svg" viewBox="0 0 24 24">
+								<path d="M4 12h13" />
+								<path d="m13 5 7 7-7 7" />
+							</svg>
+						</button>
+					</div>
+				</footer>
+			</section>
+
+			<section id="view-history" class="sp-view">
+				<header class="sp-header">
+					<div class="sp-header-main">
+						<button id="sp-history-back" class="sp-btn icon" type="button" title="返回聊天">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
+						</button>
+						<div class="sp-title">历史会话</div>
+					</div>
+					<div class="sp-header-right">
+						<button id="sp-clear-history" class="sp-btn" type="button">清空</button>
+					</div>
+				</header>
+				<div id="sp-history-list" class="sp-scroll"></div>
+			</section>
+
+			<section id="view-history-detail" class="sp-view">
+				<header class="sp-header">
+					<div class="sp-header-main">
+						<button id="sp-detail-back" class="sp-btn icon" type="button" title="返回历史">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
+						</button>
+						<div class="sp-title">历史详情</div>
+					</div>
+					<div class="sp-header-right">
+						<button id="sp-copy-history-session" class="sp-btn" type="button">复制会话</button>
+						<button id="sp-download-history-session" class="sp-btn" type="button">下载TXT</button>
+						<button id="sp-clear-history-all" class="sp-btn" type="button">清空全部</button>
+					</div>
+				</header>
+
+				<div id="sp-history-detail-task" class="sp-task show">
+					<div class="sp-task-k">Task</div>
+					<div id="sp-history-detail-task-value" class="sp-task-v"></div>
+					<div class="sp-row sp-history-detail-tools">
+						<button id="sp-rerun-history" class="sp-btn" type="button">再次执行</button>
+						<button id="sp-delete-history" class="sp-btn" type="button">删除</button>
+					</div>
+				</div>
+				<div id="sp-history-detail-list" class="sp-scroll"></div>
+			</section>
+
+			<section id="view-settings" class="sp-view">
+				<header class="sp-header">
+					<div class="sp-header-main">
+						<button id="sp-settings-back" class="sp-btn icon" type="button" title="返回聊天">
+							<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
+						</button>
+						<div class="sp-title">设置</div>
+					</div>
+				</header>
+
+				<form id="sp-config-form" class="sp-form">
+					<div class="sp-section">
+						<div class="sp-section-title">文本模型（主执行）</div>
+						<div class="sp-field"><label>Base URL</label><input id="cfg-text-base" class="sp-text" /></div>
+						<div class="sp-field">
+							<label>Model（自动从 /models 获取）</label>
+							<select id="cfg-text-model" class="sp-select">
+								<option value="">请先填写 Base URL + API Key</option>
+							</select>
+						</div>
+						<div class="sp-field">
+							<label>API Key</label>
+							<div class="sp-input-inline">
+								<input id="cfg-text-key" class="sp-text" type="password" />
+								<button id="sp-toggle-text-key" class="sp-eye" type="button" title="显示/隐藏 API Key">
+									<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z" /><circle cx="12" cy="12" r="2.5" /></svg>
+								</button>
+							</div>
+						</div>
+						<div class="sp-inline-tools">
+							<button id="sp-test-text-conn" class="sp-btn" type="button">检测</button>
+							<span id="sp-test-text-result" class="sp-test-result"></span>
+						</div>
+					</div>
+
+					<div class="sp-section">
+						<div class="sp-section-title">多模态模型（视觉优先回退）</div>
+						<div class="sp-field"><label>Base URL</label><input id="cfg-mm-base" class="sp-text" /></div>
+						<div class="sp-field">
+							<label>Model（自动从 /models 获取）</label>
+							<select id="cfg-mm-model" class="sp-select">
+								<option value="">请先填写 Base URL + API Key</option>
+							</select>
+						</div>
+						<div class="sp-field">
+							<label>API Key</label>
+							<div class="sp-input-inline">
+								<input id="cfg-mm-key" class="sp-text" type="password" />
+								<button id="sp-toggle-mm-key" class="sp-eye" type="button" title="显示/隐藏 API Key">
+									<svg class="sp-icon-svg" viewBox="0 0 24 24"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z" /><circle cx="12" cy="12" r="2.5" /></svg>
+								</button>
+							</div>
+						</div>
+						<div class="sp-inline-tools">
+							<button id="sp-test-mm-conn" class="sp-btn" type="button">检测</button>
+							<span id="sp-test-mm-result" class="sp-test-result"></span>
+						</div>
+					</div>
+
+					<div class="sp-section">
+						<div class="sp-section-title">执行参数</div>
+						<div class="sp-field">
+							<label>最大步数</label>
+							<input id="cfg-max-steps" class="sp-text" type="number" min="1" max="200" />
+						</div>
+						<div class="sp-field">
+							<label>输入拟真模式</label>
+							<select id="cfg-input-mode" class="sp-select">
+								<option value="realistic">realistic（推荐）</option>
+								<option value="standard">standard（兼容优先）</option>
+							</select>
+						</div>
+						<div class="sp-field">
+							<label>包含全部非固定标签页</label>
+							<select id="cfg-all-tabs" class="sp-select">
+								<option value="true">true</option>
+								<option value="false">false</option>
+							</select>
+						</div>
+						<div class="sp-field">
+							<label>禁用视觉截图域名（每行一个）</label>
+							<textarea id="cfg-vision-disabled-domains" class="sp-text" rows="3" placeholder="example.com&#10;bank.example"></textarea>
+						</div>
+					</div>
+
+					<div class="sp-row" style="margin-top: 2px">
+						<button class="sp-btn primary" type="submit">保存配置</button>
+					</div>
+				</form>
+			</section>
+		</div>
+
+		<div id="sp-confirm-overlay" class="sp-confirm-overlay">
+			<div class="sp-confirm">
+				<div id="sp-confirm-title" class="sp-confirm-title">请确认</div>
+				<div id="sp-confirm-desc" class="sp-confirm-desc"></div>
+				<div class="sp-row">
+					<button id="sp-confirm-approve" class="sp-btn primary" type="button">继续执行</button>
+					<button id="sp-confirm-reject" class="sp-btn" type="button">拒绝</button>
+				</div>
+			</div>
+		</div>
+
+		<script src="shared/protocol.js"></script>
+		<script src="sidepanel.js"></script>
+	</body>
+</html>

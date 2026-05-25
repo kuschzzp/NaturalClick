@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="NaturalClick Agent">
+  <defs>
+    <linearGradient id="bg" x1="18" y1="16" x2="110" y2="114" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111C27"/>
+      <stop offset="0.58" stop-color="#17352E"/>
+      <stop offset="1" stop-color="#2F8F72"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#0A141A" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#bg)"/>
+  <circle cx="91" cy="36" r="13" fill="#9EE46F"/>
+  <path filter="url(#shadow)" fill="#F7FFF8" d="M38 23v76l24-21 14 28 19-10-15-28 34-1L38 23Z"/>
+  <path fill="none" stroke="#0C181F" stroke-opacity="0.3" stroke-width="5" stroke-linejoin="round" d="M38 23v76l24-21 14 28 19-10-15-28 34-1L38 23Z"/>
+</svg>
