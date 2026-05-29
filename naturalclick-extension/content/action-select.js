@@ -261,24 +261,18 @@
 				}
 				await bringCascaderOptionIntoView(option, inputMode)
 				if (i < path.length - 1) {
-					await hoverElement(option, inputMode)
-					let nextLevelReady = await waitForCascaderMenuLevel(i + 1, inputMode)
-					if (!nextLevelReady) {
-						await humanLikeClick(option, null, inputMode)
-						await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 120)
-						nextLevelReady = await waitForCascaderMenuLevel(i + 1, inputMode)
-					}
+					const nextLevelReady = await expandCascaderParentOption(option, i + 1, inputMode)
 					if (!nextLevelReady) {
 						const nextLabel = path[i + 1] || label
 						return buildSelectionFailureResult({
 							index: Number.isFinite(index) ? index : null,
 							requestedText: nextLabel,
 							visibleOptions: [],
-							reason: `级联选择失败：已悬浮第 ${i + 1} 级 "${label}"，但第 ${i + 2} 级菜单未展开，停止继续滚动上一级菜单。${summarizeCascaderLevel(i)}`,
+							reason: `级联选择失败：已尝试悬浮并点击第 ${i + 1} 级 "${label}" 的展开区域/父级行，但第 ${i + 2} 级菜单仍未展开，停止继续滚动上一级菜单。${summarizeCascaderLevel(i)}`,
 							source: `cascader_level_${i + 2}`,
 							candidateLabel: `第 ${i + 2} 级可见候选`,
 							emptyCandidateText: `当前第 ${i + 2} 级没有展开出候选。`,
-							advice: '下一步建议：保持父级悬浮后等待，或选择页面实际存在的父级路径。',
+							advice: '下一步建议：保持当前父级菜单状态后重新观察，或选择页面实际存在的父级路径。',
 						})
 					}
 				} else {
@@ -298,6 +292,89 @@
 				message: appendStateChange(`已按路径选择级联选项：${path.join(' > ')}。`, before, after),
 				meta: { before, after, optionAfter, outcome },
 			}
+		}
+
+		async function expandCascaderParentOption(option, nextLevelIndex, inputMode) {
+			if (!(option instanceof HTMLElement)) return false
+			await hoverElement(option, inputMode)
+			if (await waitForCascaderMenuLevel(nextLevelIndex, inputMode)) return true
+
+			const expandTarget = resolveCascaderExpandTarget(option)
+			if (expandTarget) {
+				await dispatchCascaderElementClick(expandTarget, inputMode)
+				if (await waitForCascaderMenuLevel(nextLevelIndex, inputMode)) return true
+			}
+
+			await dispatchCascaderElementClick(option, inputMode, { rightEdge: true })
+			if (await waitForCascaderMenuLevel(nextLevelIndex, inputMode)) return true
+
+			await hoverElement(option, inputMode)
+			await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 120)
+			return !!(await waitForCascaderMenuLevel(nextLevelIndex, inputMode))
+		}
+
+		function resolveCascaderExpandTarget(option) {
+			if (!(option instanceof HTMLElement)) return null
+			const selector = [
+				'.el-cascader-node__postfix',
+				'.el-icon-arrow-right',
+				'.ant-cascader-menu-item-expand-icon',
+				'.arco-cascader-option-expand-icon',
+				'.n-cascader-option__suffix',
+				'[class*="arrow-right"]',
+				'[class*="expand-icon"]',
+				'[class*="postfix"]',
+				'[class*="suffix"]',
+			].join(',')
+			try {
+				const target = option.querySelector(selector)
+				if (target instanceof HTMLElement) return target
+				const parent = target?.parentElement
+				if (parent instanceof HTMLElement && option.contains(parent)) return parent
+			} catch (_) {}
+			return null
+		}
+
+		async function dispatchCascaderElementClick(element, inputMode, options = {}) {
+			if (!(element instanceof HTMLElement)) return
+			try {
+				element.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })
+			} catch (_) {
+				element.scrollIntoView()
+			}
+			const rect = element.getBoundingClientRect()
+			if (rect.width <= 1 || rect.height <= 1) return
+			const x = options.rightEdge ? rect.left + rect.width * 0.82 : rect.left + rect.width / 2
+			const y = rect.top + rect.height / 2
+			const clientX = Math.max(1, Math.min(window.innerWidth - 1, x))
+			const clientY = Math.max(1, Math.min(window.innerHeight - 1, y))
+			const hit = document.elementFromPoint(clientX, clientY)
+			const target = hit instanceof Element && element.contains(hit) ? hit : element
+			const pointerOpts = {
+				bubbles: true,
+				cancelable: true,
+				clientX,
+				clientY,
+				pointerType: 'mouse',
+			}
+			const mouseOpts = {
+				bubbles: true,
+				cancelable: true,
+				clientX,
+				clientY,
+				button: 0,
+			}
+			target.dispatchEvent(new PointerEvent('pointerover', pointerOpts))
+			target.dispatchEvent(new PointerEvent('pointerenter', { ...pointerOpts, bubbles: false }))
+			target.dispatchEvent(new MouseEvent('mouseover', mouseOpts))
+			target.dispatchEvent(new MouseEvent('mouseenter', { ...mouseOpts, bubbles: false }))
+			target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts))
+			target.dispatchEvent(new MouseEvent('mousedown', mouseOpts))
+			target.dispatchEvent(new PointerEvent('pointerup', pointerOpts))
+			target.dispatchEvent(new MouseEvent('mouseup', mouseOpts))
+			if (typeof target.click === 'function') target.click()
+			else if (target !== element && typeof element.click === 'function') element.click()
+			await sleep(inputMode === 'realistic' ? randomBetween(140, 260) : 140)
 		}
 
 		async function openCascaderField(field, inputMode) {

@@ -7253,6 +7253,19 @@ function assertActionsReturnStructuredOutcomes() {
 	if (!actionSelect.includes('function openCascaderField') || !/openCascaderField\(field,\s*inputMode\)/.test(cascaderFn) || !/resolveDropdownTrigger\(field\)/.test(actionSelect)) {
 		throw new Error('cascader path selection should explicitly open the field trigger before searching menu levels')
 	}
+	if (!/expandCascaderParentOption\(option,\s*i \+ 1,\s*inputMode\)/.test(cascaderFn)) {
+		throw new Error('cascader path selection should use the shared parent expansion helper before searching child levels')
+	}
+	const cascaderExpandFn = extractFunctionSource(actionSelect, 'expandCascaderParentOption')
+	if (!cascaderExpandFn.includes('resolveCascaderExpandTarget(option)') || !cascaderExpandFn.includes('dispatchCascaderElementClick(expandTarget') || !cascaderExpandFn.includes('dispatchCascaderElementClick(option, inputMode, { rightEdge: true })')) {
+		throw new Error('cascader parent expansion should fall back from hover to arrow click and then parent row click')
+	}
+	const cascaderExpandTargetFn = extractFunctionSource(actionSelect, 'resolveCascaderExpandTarget')
+	for (const expected of ['.el-cascader-node__postfix', 'arrow-right', 'expand-icon', 'postfix', 'suffix']) {
+		if (!cascaderExpandTargetFn.includes(expected)) {
+			throw new Error(`cascader parent expansion target should include generic selector ${expected}`)
+		}
+	}
 	const checkboxFn = extractFunctionSource(actionSelect, 'selectCheckboxOptionAction')
 	if (/inferInteractionOutcome\(before,\s*after,\s*OUTCOME_KIND\.STATE_CHANGED\)/.test(checkboxFn)) {
 		throw new Error('checkbox option selection must not unconditionally report state_changed')
