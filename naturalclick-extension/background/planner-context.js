@@ -295,10 +295,12 @@
 	function buildContextChunk(observation, input) {
 		const source = normalizeContextSource(input.source || input.target || 'simplified_dom')
 		const region = String(input.region || '').trim()
-		const query = normalizeSearchText(input.query || input.label || '')
+		const queryText = String(input.query || input.label || '')
+		const query = normalizeSearchText(queryText)
+		const queryTerms = splitContextQueryTerms(queryText)
 		const allRows = buildSectionRows(observation, source, { region })
 		const rows = query
-			? allRows.filter((line) => normalizeSearchText(line).includes(query))
+			? allRows.filter((line) => rowMatchesContextQuery(line, query, queryTerms))
 			: allRows
 		const limit = clampInteger(input.limit, 1, 80, 40)
 		const cursor = clampInteger(input.cursor, -1, Number.MAX_SAFE_INTEGER, 0)
@@ -310,6 +312,22 @@
 			...(slice.length ? slice : ['(empty)']),
 			'</context_chunk>',
 		].join('\n')
+	}
+
+	function splitContextQueryTerms(value) {
+		return String(value || '')
+			.split(/[\s,，;；|/、]+/)
+			.map(normalizeSearchText)
+			.filter((item) => item.length >= 2)
+	}
+
+	function rowMatchesContextQuery(line, query, terms) {
+		const text = normalizeSearchText(line)
+		if (!text) return false
+		if (Array.isArray(terms) && terms.length) {
+			return terms.some((term) => text.includes(term))
+		}
+		return text.includes(query)
 	}
 
 	function buildIndexInspection(observation, input) {
@@ -570,6 +588,14 @@
 	function scoreObservationItem(item) {
 		if (!item || typeof item !== 'object') return 99
 		let score = 0
+		const actionText = normalizeSearchText([
+			item.label,
+			item.text,
+			item.placeholder,
+			item.actionIntent,
+			item.navigationTarget,
+			item.target,
+		].filter(Boolean).join(' '))
 		if (item.newSinceLastObservation) score -= 3
 		const region = String(item.region || '')
 		if (['content', 'dialog', 'popover'].includes(region)) score -= 2
@@ -577,6 +603,8 @@
 		if (region === 'header' || region === 'sidebar') score += 2
 		if (item.selectionControl || item.fieldType || item.actionIntent) score -= 1
 		if (item.actionIntent === 'open_filter' || item.actionIntent === 'search') score -= 1
+		if (item.actionIntent === 'create') score -= 10
+		if (/(新增|新建|创建|添加|增加|add|create|new|plus)/i.test(actionText)) score -= 8
 		const rect = item.rect || {}
 		return score * 1000000 + (Number(rect.top) || 0) * 1000 + (Number(rect.left) || 0)
 	}

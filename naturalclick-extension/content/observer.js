@@ -335,6 +335,7 @@
 	function shouldKeepNestedCandidate(parent, child) {
 		if (!(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return true
 		if (isNativeFormControl(child) || isNativeFormControl(parent)) return true
+		if (shouldKeepNestedNavigationCandidate(parent, child)) return true
 		if (isOptionLike(child) || isSelectableControl(child)) return true
 		if (isOptionLike(parent) && isSelectableControl(child)) return true
 		if (isComboboxLike(parent) && isOptionLike(child)) return true
@@ -447,6 +448,37 @@
 			return type === 'checkbox' || type === 'radio'
 		}
 		return /(checkbox|radio|switch)/i.test(cls) || element.hasAttribute('aria-checked')
+	}
+
+	function shouldKeepNestedNavigationCandidate(parent, child) {
+		if (!(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return false
+		if (!isNavigationLikeCandidate(parent) || !isNavigationLikeCandidate(child)) return false
+		const parentText = getElementText(parent)
+		const childText = getElementText(child)
+		const parentKey = normalizeCompactText(parentText)
+		const childKey = normalizeCompactText(childText)
+		if (!parentKey || !childKey || parentKey === childKey) return false
+		if (!parentKey.includes(childKey)) return false
+		const parentRect = parent.getBoundingClientRect()
+		const childRect = child.getBoundingClientRect()
+		const parentArea = Math.max(0, parentRect.width) * Math.max(0, parentRect.height)
+		const childArea = Math.max(0, childRect.width) * Math.max(0, childRect.height)
+		if (parentArea > 0 && childArea > parentArea * 0.92) return false
+		return true
+	}
+
+	function isNavigationLikeCandidate(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const role = String(element.getAttribute('role') || '').toLowerCase()
+		const tag = element.tagName.toLowerCase()
+		const cls = String(element.className || '')
+		if (['menuitem', 'tab', 'link'].includes(role)) return true
+		if (tag === 'a') return true
+		return /(menu-item|submenu|nav-item|tab-|tabs__item|el-menu-item|el-submenu)/i.test(cls)
+	}
+
+	function normalizeCompactText(value) {
+		return String(value || '').replace(/\s+/g, '').trim().toLowerCase()
 	}
 
 	function isElementVisible(element) {

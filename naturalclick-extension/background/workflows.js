@@ -46,11 +46,6 @@
 				deriveTaskNavigationWorkflowDecision(session, observation),
 		},
 		{
-			name: 'create-record',
-			run: (session, observation) =>
-				deriveCreateRecordWorkflowDecision(session, observation),
-		},
-		{
 			name: 'search-fields',
 			run: (session, observation) =>
 				deriveSearchWorkflowDecisionIfAllowed(session, observation),
@@ -62,11 +57,6 @@
 			name: 'task-navigation',
 			run: (session, observation) =>
 				deriveUnresolvedNavigationTimeoutDecision(session, observation),
-		},
-		{
-			name: 'create-record',
-			run: (session, observation) =>
-				deriveCreateRecordWorkflowDecision(session, observation),
 		},
 	]
 
@@ -93,6 +83,9 @@
 			? searchWorkflow.buildSearchWorkflowHintLines(session, observation)
 			: []
 		for (const line of searchHints) {
+			if (String(line || '').trim()) lines.push(line)
+		}
+		for (const line of buildCreateRecordHintLines(session, observation, expectedKeys)) {
 			if (String(line || '').trim()) lines.push(line)
 		}
 		if (!lines.length) return ''
@@ -171,30 +164,21 @@
 		const attempted = getReservedNavigationKeys(state)
 		const unresolved = getExpectedNavigationKeys(session, state)
 			.filter((key) => !isNavigationTargetReached(observation, key))
-			.filter((key) => !attempted.includes(key))
-		for (const key of unresolved) {
+		const unattempted = unresolved.filter((key) => !attempted.includes(key))
+		for (const key of unattempted) {
 			const candidate = findNavigationCandidateForKey(observation, key)
 			if (!candidate) continue
-			addUnique(state.plannedKeys, key)
-			const label = getObservedItemLabel(candidate) || key
-			return {
-				evaluation_previous_goal: `任务目标模块 "${label}" 尚未到达，当前观察中存在同名导航入口。`,
-				memory: '使用通用任务导航流程只点击一次同名导航；执行结果会进入 workflow 历史，失败后不重复同一目标。',
-				thought: '先进入任务点名的目标模块，再测试页面内搜索区域。',
-				next_goal: `进入目标模块：${label}`,
-				action: {
-					name: 'click_element_by_index',
-					input: {
-						index: Number(candidate.index),
-						target_label: label,
-						workflow_step: 'navigate_to_task_target',
-						workflow_nav_key: key,
-					},
-				},
-			}
+			return buildNavigationCandidateDecision(state, candidate, key, '当前观察中存在同名导航入口。')
 		}
-		if (!unresolved.length) return null
-		const revealDecision = buildNavigationRevealDecision(state, observation, unresolved, '目标导航尚未直接可见')
+		for (const key of unresolved.filter((item) => attempted.includes(item))) {
+			const candidate = findConcreteNavigationAliasCandidateForKey(observation, key)
+			if (!candidate) continue
+			return buildNavigationCandidateDecision(state, candidate, key, '之前点击的是导航组，现在观察到更具体的子菜单入口。')
+		}
+		const visionDecision = buildCompositeNavigationVisionDecision(state, observation, unresolved, '目标导航组已展开但目标页面仍未到达')
+		if (visionDecision) return visionDecision
+		if (!unattempted.length) return null
+		const revealDecision = buildNavigationRevealDecision(state, observation, unattempted, '目标导航尚未直接可见')
 		if (revealDecision) return revealDecision
 		return null
 	}
@@ -202,35 +186,28 @@
 	function deriveCreateRecordWorkflowDecision(session, observation) {
 		const taskText = String(session?.latestTask || session?.task || '')
 		if (!isCreateRecordTask(taskText)) return null
-		const navState = syncNavigationState(session)
-		const unresolved = getExpectedNavigationKeys(session, navState)
+		return null
+	}
+
+	function buildCreateRecordHintLines(session, observation, expectedKeys = []) {
+		const taskText = String(session?.latestTask || session?.task || '')
+		if (!isCreateRecordTask(taskText)) return []
+		const unresolved = (Array.isArray(expectedKeys) ? expectedKeys : [])
 			.filter((key) => !isNavigationTargetReached(observation, key))
-		if (unresolved.length) return null
-		const state = syncCreateRecordState(session)
-		const form = findCreateRecordForm(observation)
-		if (form) return deriveCreateFormWorkflowDecision(session, observation, state, form, taskText)
-		if (state.openAttempted) return null
-		if (hasLikelyCreateDialogOrForm(observation)) return null
-		const candidate = findCreateEntryCandidate(observation, taskText)
-		if (!candidate) return null
-		const label = getObservedItemLabel(candidate) || '新增'
-		state.openAttempted = true
-		state.openCandidateKey = buildCreateCandidateKey(candidate)
-		return {
-			evaluation_previous_goal: '目标模块已到达，任务要求创建/新增记录。',
-			memory: '使用通用创建入口流程只打开一次新增/创建入口；后续表单填写继续交给模型和页面观察。',
-			thought: '先打开页面内创建入口，避免模型在大表格页面上超时。',
-			next_goal: `打开创建入口：${label}`,
-			action: {
-				name: 'click_element_by_index',
-				input: {
-					index: Number(candidate.index),
-					target_label: label,
-					target_region: String(candidate.region || ''),
-					workflow_step: 'open_create_entry',
-				},
-			},
+		if (unresolved.length) return []
+		const lines = [
+			'- create_task status="active" guidance="任务包含创建/新增意图；页面动作仍由模型根据当前元素分析后决定。若紧凑观察未展示创建入口，先 request_context source=actions region=content query=\'新增\' 或 inspect_region content，不要直接 done。"',
+		]
+		const candidates = collectCreateEntryItems(observation)
+			.filter((item) => Number.isFinite(Number(item?.index)))
+			.filter((item) => isCreateEntryCandidateItem(item))
+			.sort((a, b) => scoreCreateEntryCandidate(a, extractCreateEntityHints(taskText)) - scoreCreateEntryCandidate(b, extractCreateEntityHints(taskText)))
+			.slice(0, 5)
+			.map((item) => `index=${Number(item.index)} label="${escapeAttr(getObservedItemLabel(item) || '')}" region="${escapeAttr(item.region || '')}" intent="${escapeAttr(item.actionIntent || item.intent || '')}"`)
+		if (candidates.length) {
+			lines.push(`- create_candidates ${candidates.join('; ')}`)
 		}
+		return lines
 	}
 
 	function deriveCreateFormWorkflowDecision(session, observation, state, form, taskText) {
@@ -540,6 +517,8 @@
 	}
 
 	function buildNavigationRevealDecision(state, observation, unresolved, reason) {
+		const visionDecision = buildCompositeNavigationVisionDecision(state, observation, unresolved, reason)
+		if (visionDecision) return visionDecision
 		const revealCandidate = findNavigationRevealCandidate(observation, state, unresolved)
 		if (!revealCandidate) return null
 		const label = getObservedItemLabel(revealCandidate) || '更多'
@@ -561,6 +540,55 @@
 		}
 	}
 
+	function buildNavigationCandidateDecision(state, candidate, key, previousGoalSuffix) {
+		addUnique(state.plannedKeys, key)
+		const label = getObservedItemLabel(candidate) || key
+		return {
+			evaluation_previous_goal: `任务目标模块 "${label}" 尚未到达，${previousGoalSuffix}`,
+			memory: '使用通用任务导航流程只点击一次同名导航；执行结果会进入 workflow 历史，失败后不重复同一目标。',
+			thought: '先进入任务点名的目标模块，再测试页面内搜索区域。',
+			next_goal: `进入目标模块：${label}`,
+			action: {
+				name: 'click_element_by_index',
+				input: {
+					index: Number(candidate.index),
+					target_label: label,
+					workflow_step: 'navigate_to_task_target',
+					workflow_nav_key: key,
+				},
+			},
+		}
+	}
+
+	function buildCompositeNavigationVisionDecision(state, observation, unresolved, reason) {
+		const target = findExpandedCompositeNavigationTarget(observation, state, unresolved)
+		if (!target) return null
+		addUnique(state.visionAttemptKeys, target.attemptKey)
+		const parentLabel = getObservedItemLabel(target.item) || '导航组'
+		const childLabel = target.alias || target.key
+		const description = `左侧侧边栏中已展开的「${parentLabel}」导航组里的「${childLabel}」子菜单项`
+		return {
+			evaluation_previous_goal: `${reason}: ${target.key}。`,
+			memory: '当前观察把父菜单和子菜单合并成一个导航项，改用视觉定位点击具体子菜单，避免重复点击父菜单导致跳转到错误模块。',
+			thought: '导航组已经展开，但目标子菜单没有稳定索引；直接按屏幕语义定位具体子菜单。',
+			next_goal: `视觉定位并进入子菜单：${childLabel}`,
+			action: {
+				name: 'locate_by_vision',
+				input: {
+					target_description: description,
+					action_name: 'click_element_by_index',
+					target_label: childLabel,
+					target_region: String(target.item?.region || 'sidebar'),
+					parent_label: parentLabel,
+					workflow_step: 'navigate_to_task_target',
+					workflow_nav_key: target.key,
+					workflow_nav_alias: childLabel,
+					navigation_vision_attempt_key: target.attemptKey,
+				},
+			},
+		}
+	}
+
 	function deriveSearchWorkflowDecisionIfAllowed(session, observation) {
 		const state = syncNavigationState(session)
 		const unresolved = getExpectedNavigationKeys(session, state)
@@ -577,8 +605,76 @@
 			.filter((item) => Number.isFinite(Number(item?.index)))
 			.filter((item) => isNavigationCandidateItem(item))
 			.filter((item) => labelMatchesNavigationKey(getObservedItemLabel(item), targetKey))
+			.filter((item) => !isExpandedCompositeNavigationParentForTarget(item, targetKey))
 		if (!items.length) return null
 		return items.sort((a, b) => scoreNavigationCandidate(a, targetKey) - scoreNavigationCandidate(b, targetKey))[0]
+	}
+
+	function findConcreteNavigationAliasCandidateForKey(observation, key) {
+		const targetKey = getNavigationKey(key)
+		if (!targetKey) return null
+		const items = collectObservedNavigationStateItems(observation)
+			.filter((item) => Number.isFinite(Number(item?.index)))
+			.filter((item) => isNavigationCandidateItem(item))
+			.filter((item) => labelMatchesNavigationKey(getObservedItemLabel(item), targetKey))
+			.filter((item) => isConcreteNavigationAliasCandidate(item, targetKey))
+		if (!items.length) return null
+		return items.sort((a, b) => scoreNavigationCandidate(a, targetKey) - scoreNavigationCandidate(b, targetKey))[0]
+	}
+
+	function isConcreteNavigationAliasCandidate(item, targetKey) {
+		const label = getNavigationKey(getObservedItemLabel(item))
+		const target = getNavigationKey(targetKey)
+		if (!label || !target || label === target) return false
+		if (isExpandedCompositeNavigationParentForTarget(item, target)) return false
+		const alias = getBestNavigationTargetAlias(label, target)
+		return !!alias && alias !== target
+	}
+
+	function findExpandedCompositeNavigationTarget(observation, state, targetKeys = []) {
+		const attempts = new Set((Array.isArray(state?.visionAttemptKeys) ? state.visionAttemptKeys : [])
+			.map((value) => String(value || '')))
+		const candidates = []
+		for (const item of collectObservedNavigationStateItems(observation)) {
+			if (!Number.isFinite(Number(item?.index))) continue
+			if (getNavigationKey(item?.region) !== 'sidebar') continue
+			for (const key of (Array.isArray(targetKeys) ? targetKeys : [])) {
+				const target = getNavigationKey(key)
+				if (!target || !isExpandedCompositeNavigationParentForTarget(item, target)) continue
+				const alias = getConcreteNavigationVisionAlias(getObservedItemLabel(item), target)
+				if (!alias) continue
+				const attemptKey = buildNavigationVisionAttemptKey(item, target, alias)
+				if (attempts.has(attemptKey)) continue
+				candidates.push({ item, key: target, alias, attemptKey })
+			}
+		}
+		if (!candidates.length) return null
+		return candidates.sort((a, b) =>
+			scoreNavigationCandidate(a.item, a.key) - scoreNavigationCandidate(b.item, b.key)
+		)[0]
+	}
+
+	function isExpandedCompositeNavigationParentForTarget(item, targetKey) {
+		const label = getNavigationKey(getObservedItemLabel(item))
+		const target = getNavigationKey(targetKey)
+		if (!label || !target || !isExpandedNavigationItem(item)) return false
+		return isCompositeNavigationParentLabel(label, target)
+	}
+
+	function isExpandedNavigationItem(item) {
+		const expanded = getNavigationKey(item?.expandedState || item?.expanded || '')
+		const stateText = getNavigationKey(item?.stateHints || item?.state || '')
+		return expanded === 'expanded' || /(is-opened|expanded|open=true|opened|展开)/i.test(stateText)
+	}
+
+	function getConcreteNavigationVisionAlias(label, targetKey) {
+		const labelKey = getNavigationKey(label)
+		const target = getNavigationKey(targetKey)
+		const aliases = getNavigationTargetAliases(target)
+			.filter((alias) => alias && alias !== target && labelKey.includes(alias))
+			.sort((a, b) => a.length - b.length)
+		if (aliases.length) return aliases[0]
+		return labelKey.includes(target) ? target : ''
 	}
 
 	function findNavigationRevealCandidate(observation, state, targetKeys = []) {
@@ -699,6 +795,17 @@
 		].join(':')
 	}
 
+	function buildNavigationVisionAttemptKey(item, targetKey, alias) {
+		const input = item || {}
+		return [
+			'vision',
+			getNavigationKey(input.region || input.target_region || 'sidebar') || '-',
+			getNavigationKey(targetKey || input.workflow_nav_key || ''),
+			getNavigationKey(alias || input.workflow_nav_alias || input.target_label || ''),
+			getNavigationKey(getObservedItemLabel(input) || input.parent_label || ''),
+		].join(':')
+	}
+
 	function isNavigationCandidateItem(item) {
 		const role = getNavigationKey(item?.role)
 		const region = getNavigationKey(item?.region)
@@ -716,15 +823,21 @@
 	function labelMatchesNavigationKey(label, targetKey) {
 		const labelKey = getNavigationKey(label)
 		if (!labelKey || !targetKey) return false
-		if (labelKey === targetKey) return true
-		if (labelKey.endsWith(targetKey)) return true
-		return targetKey.length >= 3 && labelKey.includes(targetKey)
+		return getNavigationTargetAliases(targetKey).some((alias) => {
+			if (!alias) return false
+			if (labelKey === alias) return true
+			if (labelKey.endsWith(alias)) return true
+			return alias.length >= 3 && labelKey.includes(alias)
+		})
 	}
 
 	function scoreNavigationCandidate(item, targetKey) {
 		const labelKey = getNavigationKey(getObservedItemLabel(item))
+		const matchedAlias = getBestNavigationTargetAlias(labelKey, targetKey)
 		let score = 0
-		if (labelKey !== targetKey) score += 20
+		if (matchedAlias && labelKey !== matchedAlias) score += 20
+		else if (!matchedAlias && labelKey !== targetKey) score += 20
+		if (isCompositeNavigationParentLabel(labelKey, targetKey)) score += 30
 		const region = getNavigationKey(item?.region)
 		const role = getNavigationKey(item?.role)
 		if (region === 'sidebar') score -= 5
@@ -735,6 +848,46 @@
 		else if (role === 'link') score -= 1
 		const rect = item?.rect || {}
 		return score * 1000000 + (Number(rect.top) || 0) * 1000 + (Number(rect.left) || 0)
+	}
+
+	function getNavigationTargetAliases(key) {
+		const target = getNavigationKey(key)
+		if (!target) return []
+		const aliases = [target]
+		const stem = stripNavigationSuffix(target)
+		if (
+			stem &&
+			stem !== target &&
+			stem.length >= 2 &&
+			!isGenericNavigationAlias(stem)
+		) {
+			aliases.push(stem)
+		}
+		return [...new Set(aliases)]
+	}
+
+	function getBestNavigationTargetAlias(labelKey, targetKey) {
+		const label = getNavigationKey(labelKey)
+		if (!label) return ''
+		const aliases = getNavigationTargetAliases(targetKey)
+		return aliases.find((alias) => label === alias) ||
+			aliases.find((alias) => label.endsWith(alias)) ||
+			aliases.find((alias) => alias.length >= 3 && label.includes(alias)) ||
+			''
+	}
+
+	function isCompositeNavigationParentLabel(labelKey, targetKey) {
+		const label = getNavigationKey(labelKey)
+		const target = getNavigationKey(targetKey)
+		if (!label || !target || label === target) return false
+		if (!label.includes(target)) return false
+		const stem = stripNavigationSuffix(target)
+		if (!stem || stem === target) return false
+		return label.length >= target.length + Math.max(2, stem.length)
+	}
+
+	function isGenericNavigationAlias(value) {
+		return /^(管理|中心|模块|页面|列表|系统|业务|数据|信息|设置|配置)$/.test(getNavigationKey(value))
 	}
 
 	function isCreateRecordTask(taskText) {
@@ -750,6 +903,12 @@
 		return items.sort((a, b) =>
 			scoreCreateEntryCandidate(a, entityHints) - scoreCreateEntryCandidate(b, entityHints)
 		)[0]
+	}
+
+	function buildCreateEntryVisionDescription(taskText) {
+		const entityHint = extractCreateEntityHints(taskText)[0] || ''
+		const entityPart = entityHint ? `或“新建${entityHint}”` : '或“新建”'
+		return `页面内容区上方工具栏中的“新增”${entityPart}按钮，通常带有加号图标`
 	}
 
 	function collectCreateEntryItems(observation) {
@@ -1251,6 +1410,7 @@
 		if (!state.failedCounts || typeof state.failedCounts !== 'object') state.failedCounts = {}
 		if (!state.createOptionsByKey || typeof state.createOptionsByKey !== 'object') state.createOptionsByKey = {}
 		if (!state.requiredOptionsByKey || typeof state.requiredOptionsByKey !== 'object') state.requiredOptionsByKey = {}
+		state.openVisionAttempted = !!state.openVisionAttempted
 		state.submitAttempted = !!state.submitAttempted
 		session.workflowState.createRecord = state
 		if (!state.seededFromHistory) {
@@ -1290,12 +1450,13 @@
 
 	function createNavigationState() {
 		return {
-			version: 3,
+			version: 4,
 			plannedKeys: [],
 			attemptedKeys: [],
 			succeededKeys: [],
 			failedKeys: [],
 			revealAttemptKeys: [],
+			visionAttemptKeys: [],
 			seededFromHistory: false,
 		}
 	}
@@ -1307,7 +1468,8 @@
 		if (!Array.isArray(state.succeededKeys)) state.succeededKeys = []
 		if (!Array.isArray(state.failedKeys)) state.failedKeys = []
 		if (!Array.isArray(state.revealAttemptKeys)) state.revealAttemptKeys = []
-		state.version = 3
+		if (!Array.isArray(state.visionAttemptKeys)) state.visionAttemptKeys = []
+		state.version = 4
 	}
 
 	function seedNavigationStateFromHistory(state, session) {
@@ -1321,6 +1483,9 @@
 		if (String(input.workflow_step || '') === 'reveal_navigation_options') {
 			addUnique(state.revealAttemptKeys, buildNavigationRevealAttemptKey(input))
 			return
+		}
+		if (decision?.action?.name === 'locate_by_vision' && String(input.workflow_step || '') === 'navigate_to_task_target') {
+			addUnique(state.visionAttemptKeys, input.navigation_vision_attempt_key || buildNavigationVisionAttemptKey(input, input.workflow_nav_key, input.workflow_nav_alias))
 		}
 		const item = {
 			action: decision?.action?.name || '',
@@ -1419,11 +1584,22 @@
 		const targetKey = getNavigationKey(key)
 		if (!targetKey) return true
 		const title = getNavigationKey(observation?.title || '')
-		if (title.includes(targetKey)) return true
+		if (titleMatchesNavigationTarget(title, targetKey)) return true
 		return collectObservedNavigationStateItems(observation).some((item) => {
 			if (!isSelectedOrActiveObservedItem(item)) return false
-			return getNavigationKey(getObservedItemLabel(item)) === targetKey
+			const label = getNavigationKey(getObservedItemLabel(item))
+			return getNavigationTargetAliases(targetKey).some((alias) => label === alias)
 		})
+	}
+
+	function titleMatchesNavigationTarget(title, targetKey) {
+		const titleKey = getNavigationKey(title)
+		const target = getNavigationKey(targetKey)
+		if (!titleKey || !target) return false
+		if (titleKey.includes(target)) return true
+		return getNavigationTargetAliases(target)
+			.filter((alias) => alias && alias !== target)
+			.some((alias) => titleKey === alias || titleKey.startsWith(`${alias}-`) || titleKey.startsWith(`${alias}_`) || titleKey.startsWith(`${alias}|`) || titleKey.startsWith(`${alias}｜`))
 	}
 
 	function collectObservedNavigationStateItems(observation) {
@@ -1554,7 +1730,7 @@
 
 	function isNavigationClickHistory(item) {
 		const action = String(item?.action || '').replace(/\..*$/, '')
-		if (action !== 'click_element_by_index' && action !== 'click') return false
+		if (action !== 'click_element_by_index' && action !== 'click' && action !== 'locate_by_vision') return false
 		const input = item?.input || {}
 		if (
 			String(input.workflow || '') === 'task-navigation' ||

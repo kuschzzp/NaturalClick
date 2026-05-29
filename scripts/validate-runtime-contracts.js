@@ -74,6 +74,7 @@ async function main() {
 	assertCompositeSelectDoesNotResolveNestedInput()
 	assertReadonlyPickerInputsExposeDropdownSemantics()
 	assertCompositePickerWrappersAreObserved()
+	assertObserverPreservesNestedNavigationItems()
 	assertVisionHitTestClickableSemantics()
 	assertVisionCandidatesUseSemanticTargetDescription()
 	assertVisionCaptureHidesNaturalClickOverlays()
@@ -339,6 +340,22 @@ function assertCompositePickerWrappersAreObserved() {
 	}
 	if (!collectFn.includes('.el-input--suffix') || !primaryControlFn.includes('.el-input--suffix')) {
 		throw new Error('observer should collect Element suffix picker wrappers and use them for field semantics')
+	}
+}
+
+function assertObserverPreservesNestedNavigationItems() {
+	const observer = read('naturalclick-extension/content/observer.js')
+	const keepFn = extractFunctionSource(observer, 'shouldKeepNestedCandidate')
+	const nestedFn = extractFunctionSource(observer, 'shouldKeepNestedNavigationCandidate')
+	const navLikeFn = extractFunctionSource(observer, 'isNavigationLikeCandidate')
+	if (!keepFn.includes('shouldKeepNestedNavigationCandidate(parent, child)')) {
+		throw new Error('observer should check nested navigation items before compacting parent/child candidates')
+	}
+	if (!nestedFn.includes('parentKey.includes(childKey)') || !nestedFn.includes('childArea > parentArea * 0.92')) {
+		throw new Error('nested navigation preservation should keep distinct child menu labels without duplicating full-size parents')
+	}
+	if (!navLikeFn.includes('menuitem') || !navLikeFn.includes('el-menu-item') || !navLikeFn.includes('el-submenu')) {
+		throw new Error('nested navigation preservation should cover common menuitem and Element menu classes')
 	}
 }
 
@@ -1406,6 +1423,35 @@ function assertPlannerObservationOmissionHints() {
 	})
 	if (!compactNavText.includes('index="429"') || !compactNavText.includes('用户管理')) {
 		throw new Error(`compact observation should promote simplified_dom rows matching unresolved task targets, got ${compactNavText}`)
+	}
+	const createObservation = buildTestObservation()
+	createObservation.forms = []
+	createObservation.panels = []
+	createObservation.popups = []
+	createObservation.options = []
+	createObservation.actions = Array.from({ length: 36 }, (_, index) => ({
+		index: 500 + index,
+		region: 'content',
+		role: index === 28 ? 'button' : 'checkbox',
+		label: index === 28 ? '新 增' : (index % 2 ? '详情' : '(empty)'),
+		actionIntent: index === 28 ? 'create' : 'toggle_option',
+		rect: { left: 20 + index, top: 200 + index * 8, width: 80, height: 28 },
+	}))
+	const compactCreateText = context.buildObservationText(createObservation, {
+		task: '找到客户管理，新建一条客户数据',
+		compact: true,
+		maxChars: 4200,
+	})
+	if (!compactCreateText.includes('index=528') || !compactCreateText.includes('新 增')) {
+		throw new Error(`compact observation should promote visible create buttons above noisy table actions, got ${compactCreateText}`)
+	}
+	const createActionsChunk = context.resolvePlanningContextRequest(
+		createObservation,
+		{ name: 'request_context', input: { source: 'actions', region: 'content', query: '新增 新建 创建', limit: 10 } },
+		0
+	).text
+	if (!createActionsChunk.includes('index=528') || !createActionsChunk.includes('新 增')) {
+		throw new Error(`request_context should match any create-query term so the model can recover visible add buttons, got ${createActionsChunk}`)
 	}
 	if (!text.includes('<more_context source="simplified_dom" cursor="22" limit="40" action="request_context"')) {
 		throw new Error(`simplified_dom omission should include an explicit request_context hint, got ${text}`)
@@ -4795,6 +4841,14 @@ function assertPlannerPromptExtractedFromPlanner() {
 	) {
 		throw new Error('planner prompt module is missing ReAct or dropdown recovery guidance')
 	}
+	if (
+		!prompt.includes('通用规划流程') ||
+		!prompt.includes('真正的业务页面动作仍需要你结合当前页面元素和用户任务自行判断') ||
+		!prompt.includes('request_context source=actions region=content query="新增"') ||
+		!prompt.includes('创建/新增类任务应由你')
+	) {
+		throw new Error('planner prompt should keep business actions model-owned while guiding context requests for create tasks')
+	}
 }
 
 function assertLoginWorkflowBehavior() {
@@ -5206,6 +5260,126 @@ function assertTaskNavigationWorkflowBehavior() {
 	if (simplifiedTarget.action.input.index !== 42 || simplifiedTarget.action.input.workflow_nav_key !== '用户管理') {
 		throw new Error(`task-navigation should resolve exact targets from simplified_dom rows: ${JSON.stringify(simplifiedTarget)}`)
 	}
+	const customerCreateTask = '打开 http://example.test/ 找到客户管理。新建一条客户数据，客户名称是张三。'
+	const customerChildDecision = workflow.derivePreModelWorkflowDecision(
+		{ task: customerCreateTask, latestTask: customerCreateTask, history: [], workflowState: {} },
+		{
+			url: 'http://example.test/#/wel/index',
+			title: '首页',
+			forms: [],
+			actions: [
+				{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机 公海 合同 销售订单 物料申请', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded', rect: { left: 0, top: 120, width: 180, height: 44 } },
+				{ index: 7, region: 'sidebar', role: 'menuitem', label: '客户', rect: { left: 0, top: 210, width: 180, height: 44 } },
+				{ index: 8, region: 'sidebar', role: 'menuitem', label: '商机', rect: { left: 0, top: 250, width: 180, height: 44 } },
+			],
+			popups: [],
+			elements: [],
+		},
+		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/wel/index', current: true }] }
+	)
+	assertAction(customerChildDecision, 'click_element_by_index')
+	if (
+		customerChildDecision.action.input.index !== 7 ||
+		customerChildDecision.action.input.workflow_nav_key !== '客户管理'
+	) {
+		throw new Error(`task-navigation should treat the customer submenu as the concrete target for 客户管理 create tasks: ${JSON.stringify(customerChildDecision)}`)
+	}
+	const attemptedCustomerParentSession = {
+		task: customerCreateTask,
+		latestTask: customerCreateTask,
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: {
+					index: 5,
+					target_label: '客户管理',
+					workflow_step: 'navigate_to_task_target',
+					workflow_nav_key: '客户管理',
+				},
+				success: true,
+				output: '已展开客户管理。',
+			},
+		],
+		workflowState: {},
+	}
+	const attemptedCustomerChildDecision = workflow.derivePreModelWorkflowDecision(
+		attemptedCustomerParentSession,
+		{
+			url: 'http://example.test/#/crm/business',
+			title: '商机-CRM',
+			forms: [],
+			actions: [
+				{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机 公海 合同 销售订单 物料申请', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded', rect: { left: 0, top: 120, width: 180, height: 44 } },
+				{ index: 7, region: 'sidebar', role: 'menuitem', label: '客户', rect: { left: 0, top: 210, width: 180, height: 44 } },
+				{ index: 8, region: 'sidebar', role: 'menuitem', label: '商机', stateHints: 'classState=is-active', rect: { left: 0, top: 250, width: 180, height: 44 } },
+			],
+			popups: [],
+			elements: [],
+		},
+		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/crm/business', current: true }] }
+	)
+	assertAction(attemptedCustomerChildDecision, 'click_element_by_index')
+	if (attemptedCustomerChildDecision.action.input.index !== 7) {
+		throw new Error(`task-navigation should still click the concrete customer submenu after the parent group was attempted: ${JSON.stringify(attemptedCustomerChildDecision)}`)
+	}
+	const compositeOnlyCustomerDecision = workflow.derivePreModelWorkflowDecision(
+		{
+			task: customerCreateTask,
+			latestTask: customerCreateTask,
+			history: attemptedCustomerParentSession.history,
+			workflowState: {},
+		},
+		{
+			url: 'http://example.test/#/crm/business',
+			title: '商机-CRM',
+			forms: [],
+			actions: [
+				{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机 公海 合同 销售订单 物料申请', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded', rect: { left: 0, top: 120, width: 180, height: 300 } },
+			],
+			popups: [],
+			elements: [],
+		},
+		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/crm/business', current: true }] }
+	)
+	assertAction(compositeOnlyCustomerDecision, 'locate_by_vision')
+	if (
+		compositeOnlyCustomerDecision.action.input.workflow_nav_key !== '客户管理' ||
+		compositeOnlyCustomerDecision.action.input.workflow_nav_alias !== '客户' ||
+		!String(compositeOnlyCustomerDecision.action.input.target_description || '').includes('客户')
+	) {
+		throw new Error(`task-navigation should use vision to click a concrete submenu when observation only exposes a merged menu group: ${JSON.stringify(compositeOnlyCustomerDecision)}`)
+	}
+	const customerReachedHint = workflow.buildWorkflowContextText(
+		{ task: customerCreateTask, latestTask: customerCreateTask, history: [], workflowState: {} },
+		{
+			url: 'http://example.test/#/crm/customer',
+			title: '客户-CRM',
+			forms: [],
+			actions: [
+				{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机 公海 合同 销售订单 物料申请', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded' },
+				{ index: 7, region: 'sidebar', role: 'menuitem', label: '客户', valueState: 'selected' },
+			],
+			popups: [],
+			elements: [],
+		}
+	)
+	if (!customerReachedHint.includes('key="客户管理" status="reached"') || customerReachedHint.includes('named task target is unresolved')) {
+		throw new Error(`task-navigation should mark 客户管理 reached on the concrete 客户 page, got ${customerReachedHint}`)
+	}
+	const systemToolHint = workflow.buildWorkflowContextText(
+		{ task: '打开 http://example.test/ 找到系统管理部分。', latestTask: '打开 http://example.test/ 找到系统管理部分。', history: [], workflowState: {} },
+		{
+			url: 'http://example.test/#/system/tool',
+			title: '系统工具-CRM',
+			forms: [],
+			actions: [],
+			popups: [],
+			elements: [],
+		}
+	)
+	if (!systemToolHint.includes('key="系统管理" status="unresolved"')) {
+		throw new Error(`task-navigation aliases should not treat 系统工具 as reaching 系统管理, got ${systemToolHint}`)
+	}
 	const collapsedNavSession = {
 		task: '打开 http://example.test/ 找到用户管理部分。',
 		latestTask: '打开 http://example.test/ 找到用户管理部分。',
@@ -5244,6 +5418,18 @@ function assertTaskNavigationWorkflowBehavior() {
 	if (repeatedCollapsedNav !== null) {
 		throw new Error(`task-navigation should not repeat the same collapsed nav reveal: ${JSON.stringify(repeatedCollapsedNav)}`)
 	}
+	const reachedCreateObservation = {
+		url: 'http://example.test/#/system/user',
+		title: '用户管理-CRM',
+		forms: [],
+		actions: [
+			{ index: 16, region: 'sidebar', role: 'menuitem', label: '用户管理', valueState: 'selected' },
+		],
+		popups: [
+			{ index: 20, region: 'header', role: 'button', label: '更多', rel: 'aria-controls=menu haspopup=list' },
+		],
+		elements: [],
+	}
 	const reachedCreateWithoutEntry = workflow.derivePreModelWorkflowDecision(
 		{
 			task: '打开 http://example.test/ 找到用户管理部分，创建一个用户。',
@@ -5251,22 +5437,23 @@ function assertTaskNavigationWorkflowBehavior() {
 			history: [],
 			workflowState: {},
 		},
-		{
-			url: 'http://example.test/#/system/user',
-			title: '用户管理-CRM',
-			forms: [],
-			actions: [
-				{ index: 16, region: 'sidebar', role: 'menuitem', label: '用户管理', valueState: 'selected' },
-			],
-			popups: [
-				{ index: 20, region: 'header', role: 'button', label: '更多', rel: 'aria-controls=menu haspopup=list' },
-			],
-			elements: [],
-		},
+		reachedCreateObservation,
 		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/system/user', current: true }] }
 	)
 	if (reachedCreateWithoutEntry !== null) {
-		throw new Error(`task-navigation should not reveal generic nav after the target module is reached: ${JSON.stringify(reachedCreateWithoutEntry)}`)
+		throw new Error(`create-record should not perform deterministic page actions before model planning after target arrival: ${JSON.stringify(reachedCreateWithoutEntry)}`)
+	}
+	const reachedCreateHint = workflow.buildWorkflowContextText(
+		{
+			task: '打开 http://example.test/ 找到用户管理部分，创建一个用户。',
+			latestTask: '打开 http://example.test/ 找到用户管理部分，创建一个用户。',
+			history: [],
+			workflowState: {},
+		},
+		reachedCreateObservation
+	)
+	if (!reachedCreateHint.includes('create_task status="active"') || !reachedCreateHint.includes('request_context source=actions')) {
+		throw new Error(`create-record should expose model guidance instead of a deterministic action, got ${reachedCreateHint}`)
 	}
 	const createEntrySession = {
 		task: '打开 http://example.test/ 找到用户管理部分，创建一个用户。',
@@ -5291,13 +5478,49 @@ function assertTaskNavigationWorkflowBehavior() {
 		},
 		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/system/user', current: true }] }
 	)
-	assertAction(createEntryDecision, 'click_element_by_index')
-	if (
-		createEntryDecision.action.input.index !== 40 ||
-		createEntryDecision.action.input.workflow !== 'create-record' ||
-		createEntryDecision.action.input.workflow_step !== 'open_create_entry'
-	) {
-		throw new Error(`create-record workflow should open a generic create entry after target arrival: ${JSON.stringify(createEntryDecision)}`)
+	if (createEntryDecision !== null) {
+		throw new Error(`create-record should leave visible create entry choice to the model, got ${JSON.stringify(createEntryDecision)}`)
+	}
+	const createEntryHint = workflow.buildWorkflowContextText(createEntrySession, {
+		url: 'http://example.test/#/system/user',
+		title: '用户管理-CRM',
+		forms: [],
+		actions: [
+			{ index: 16, region: 'sidebar', role: 'menuitem', label: '用户管理', valueState: 'selected' },
+			{ index: 40, region: 'content', role: 'button', label: '新增', actionIntent: 'create', rect: { left: 20, top: 100, width: 72, height: 32 } },
+		],
+		popups: [],
+		elements: [],
+	})
+	if (!createEntryHint.includes('create_candidates') || !createEntryHint.includes('index=40')) {
+		throw new Error(`create-record hints should surface create candidates for model analysis, got ${createEntryHint}`)
+	}
+	const customerToolbarCreateDecision = workflow.derivePreModelWorkflowDecision(
+		{
+			task: '打开 http://example.test/ 找到客户管理。你现在帮我新建一条客户数据，客户名称是张三。',
+			latestTask: '打开 http://example.test/ 找到客户管理。你现在帮我新建一条客户数据，客户名称是张三。',
+			history: [],
+			workflowState: {},
+		},
+		{
+			url: 'http://example.test/#/crm/customer',
+			title: '客户-CRM',
+			forms: [{ id: 'page_form', name: '页面表单', fields: [] }],
+			actions: [
+				{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded' },
+				{ index: 7, region: 'sidebar', role: 'menuitem', label: '客户', valueState: 'selected' },
+				{ index: 28, region: 'content', role: 'button', label: '新 增', actionIntent: 'create', rect: { left: 20, top: 100, width: 82, height: 36 } },
+				{ index: 36, region: 'content', role: 'button', label: '展开搜索', actionIntent: 'open_filter' },
+				{ index: 58, region: 'content', role: 'button', label: '详情' },
+				{ index: 59, region: 'content', role: 'button', label: '删除' },
+			],
+			popups: [],
+			elements: [],
+		},
+		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/crm/customer', current: true }] }
+	)
+	if (customerToolbarCreateDecision !== null) {
+		throw new Error(`customer toolbar add button should be model-chosen, not deterministically clicked: ${JSON.stringify(customerToolbarCreateDecision)}`)
 	}
 	const repeatedCreateEntryDecision = workflow.derivePreModelWorkflowDecision(
 		createEntrySession,
@@ -5313,7 +5536,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/system/user', current: true }] }
 	)
 	if (repeatedCreateEntryDecision !== null) {
-		throw new Error(`create-record workflow should not repeat the same create entry before model planning: ${JSON.stringify(repeatedCreateEntryDecision)}`)
+		throw new Error(`create-record should not run a deterministic repeated create entry before model planning: ${JSON.stringify(repeatedCreateEntryDecision)}`)
 	}
 	const createFormTask = '打开 http://example.test/ 找到账号管理部分，创建一个用户，用户名是 nanobot，密码是 123456，性别男，江苏南京江宁人，角色为管理员。'
 	const createFormObservation = {
@@ -5346,189 +5569,15 @@ function assertTaskNavigationWorkflowBehavior() {
 	const firstCreateField = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
 		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
 	})
-	assertAction(firstCreateField, 'input_text')
-	if (
-		firstCreateField.action.input.index !== 3 ||
-		firstCreateField.action.input.text !== 'nanobot' ||
-		firstCreateField.action.input.workflow !== 'create-record' ||
-		firstCreateField.action.input.workflow_step !== 'fill_create_field'
-	) {
-		throw new Error(`create-record workflow should fill create-form username before relying on the model, got ${JSON.stringify(firstCreateField)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, firstCreateField, {
-		success: true,
-		output: '已在索引 3 输入文本。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const passwordDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(passwordDecision, 'input_text')
-	if (passwordDecision.action.input.index !== 4 || passwordDecision.action.input.text !== '123456') {
-		throw new Error(`create-record workflow should continue with password after username success, got ${JSON.stringify(passwordDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, passwordDecision, {
-		success: true,
-		output: '已在索引 4 输入文本。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const confirmPasswordDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(confirmPasswordDecision, 'input_text')
-	if (confirmPasswordDecision.action.input.index !== 5 || confirmPasswordDecision.action.input.text !== '123456') {
-		throw new Error(`create-record workflow should fill confirm password, got ${JSON.stringify(confirmPasswordDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, confirmPasswordDecision, {
-		success: true,
-		output: '已在索引 5 输入文本。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const roleDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(roleDecision, 'select_checkbox_option')
-	if (
-		roleDecision.action.input.index !== 8 ||
-		roleDecision.action.input.text !== '管理员' ||
-		roleDecision.action.input.workflow_step !== 'select_create_option'
-	) {
-		throw new Error(`create-record workflow should use a one-shot checkbox selection for role dropdowns, got ${JSON.stringify(roleDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, roleDecision, {
-		success: true,
-		output: '已选择复选项 管理员。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const regionDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(regionDecision, 'select_cascader_path')
-	if (
-		regionDecision.action.input.index !== 10 ||
-		JSON.stringify(regionDecision.action.input.path) !== JSON.stringify(['江苏', '南京', '江宁']) ||
-		regionDecision.action.input.workflow_step !== 'select_create_cascader'
-	) {
-		throw new Error(`create-record workflow should derive a cascader path from natural-language region text, got ${JSON.stringify(regionDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, regionDecision, {
-		success: false,
-		output: '级联选择失败：未找到第 1 级选项 "江苏"。 当前可见级联菜单列数: 0。',
-		outcome: { kind: 'failed', progress: false, reason: '级联菜单未展开', requestedText: '江苏' },
-	})
-	const retriedRegionDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(retriedRegionDecision, 'select_cascader_path')
-	if (
-		retriedRegionDecision.action.input.index !== 10 ||
-		JSON.stringify(retriedRegionDecision.action.input.path) !== JSON.stringify(['江苏', '南京', '江宁'])
-	) {
-		throw new Error(`create-record workflow should retry a failed cascader field instead of skipping to submit, got ${JSON.stringify(retriedRegionDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, regionDecision, {
-		success: true,
-		output: '已选择 江苏 / 南京 / 江宁。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const nameDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(nameDecision, 'input_text')
-	if (nameDecision.action.input.index !== 13 || nameDecision.action.input.text !== 'nanobot') {
-		throw new Error(`create-record workflow should fill a visible name field from username when no separate name is provided, got ${JSON.stringify(nameDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, nameDecision, {
-		success: true,
-		output: '已在索引 13 输入文本。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const openGenderDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(openGenderDecision, 'open_dropdown')
-	if (
-		openGenderDecision.action.input.index !== 14 ||
-		openGenderDecision.action.input.workflow_step !== 'open_create_option_field'
-	) {
-		throw new Error(`create-record workflow should expand gender dropdown before selecting, got ${JSON.stringify(openGenderDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, openGenderDecision, {
-		success: true,
-		output: '已展开下拉框索引 14。 当前候选: 男、女、未知',
-		meta: {
-			visibleOptions: ['男', '女', '未知'],
-			outcome: { kind: 'options_visible', progress: true, visibleOptions: ['男', '女', '未知'] },
-		},
-	})
-	const genderDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(genderDecision, 'choose_dropdown_option')
-	if (
-		genderDecision.action.input.index !== 14 ||
-		genderDecision.action.input.text !== '男' ||
-		genderDecision.action.input.workflow_step !== 'select_create_option'
-	) {
-		throw new Error(`create-record workflow should not treat collapsed option text as an already-selected gender, got ${JSON.stringify(genderDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, genderDecision, {
-		success: true,
-		output: '已选择 男。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const openRequiredDeptDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(openRequiredDeptDecision, 'open_dropdown')
-	if (
-		openRequiredDeptDecision.action.input.index !== 6 ||
-		openRequiredDeptDecision.action.input.workflow_step !== 'open_create_required_field'
-	) {
-		throw new Error(`create-record workflow should expand missing required dropdowns before submit, got ${JSON.stringify(openRequiredDeptDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, openRequiredDeptDecision, {
-		success: true,
-		output: '已展开下拉框索引 6。 当前候选: 北方安防',
-		meta: {
-			visibleOptions: ['北方安防'],
-			outcome: { kind: 'options_visible', progress: true, visibleOptions: ['北方安防'] },
-		},
-	})
-	const selectRequiredDeptDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(selectRequiredDeptDecision, 'choose_dropdown_option')
-	if (
-		selectRequiredDeptDecision.action.input.index !== 6 ||
-		selectRequiredDeptDecision.action.input.text !== '北方安防' ||
-		selectRequiredDeptDecision.action.input.workflow_step !== 'select_create_required_option'
-	) {
-		throw new Error(`create-record workflow should choose a remembered required dropdown candidate before submit, got ${JSON.stringify(selectRequiredDeptDecision)}`)
-	}
-	workflow.recordWorkflowOutcome(createFormSession, selectRequiredDeptDecision, {
-		success: true,
-		output: '已选择 北方安防。',
-		outcome: { kind: 'value_changed', progress: true },
-	})
-	const submitCreateDecision = workflow.derivePreModelWorkflowDecision(createFormSession, createFormObservation, {
-		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
-	})
-	assertAction(submitCreateDecision, 'click_element_by_index')
-	if (
-		submitCreateDecision.action.input.index !== 18 ||
-		submitCreateDecision.action.input.workflow !== 'create-record' ||
-		submitCreateDecision.action.input.workflow_step !== 'submit_create_record'
-	) {
-		throw new Error(`create-record workflow should submit after known task fields are filled, got ${JSON.stringify(submitCreateDecision)}`)
+	if (firstCreateField !== null) {
+		throw new Error(`create forms should be filled by model-planned actions, not deterministic create-record workflow: ${JSON.stringify(firstCreateField)}`)
 	}
 	const timeoutCreateSession = { task: createFormTask, latestTask: createFormTask, history: [], workflowState: {} }
 	const timeoutCreateDecision = workflow.deriveTimeoutRecoveryWorkflowDecision(timeoutCreateSession, createFormObservation, {
 		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
 	})
-	assertAction(timeoutCreateDecision, 'input_text')
-	if (timeoutCreateDecision.action.input.index !== 3 || timeoutCreateDecision.action.input.workflow !== 'create-record') {
-		throw new Error(`timeout recovery should continue safe create-form filling instead of stopping immediately, got ${JSON.stringify(timeoutCreateDecision)}`)
+	if (timeoutCreateDecision !== null) {
+		throw new Error(`timeout recovery should not run deterministic create-form filling: ${JSON.stringify(timeoutCreateDecision)}`)
 	}
 	const inferredParentSession = {
 		task: '打开 http://example.test/ 找到用户管理部分。',
@@ -5584,6 +5633,30 @@ function assertTaskNavigationWorkflowBehavior() {
 		revealDecision.action.input.workflow_step !== 'reveal_navigation_options'
 	) {
 		throw new Error(`timeout recovery should reveal a nav overflow once before failing unresolved navigation: ${JSON.stringify(revealDecision)}`)
+	}
+	const compositeTimeoutSession = {
+		task: customerCreateTask,
+		latestTask: customerCreateTask,
+		history: attemptedCustomerParentSession.history,
+		workflowState: {},
+	}
+	const compositeTimeoutDecision = workflow.deriveTimeoutRecoveryWorkflowDecision(
+		compositeTimeoutSession,
+		{
+			url: 'http://example.test/#/crm/business',
+			title: '商机-CRM',
+			forms: [],
+			actions: [
+				{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机 公海 合同 销售订单 物料申请', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded', rect: { left: 0, top: 120, width: 180, height: 300 } },
+			],
+			popups: [],
+			elements: [],
+		},
+		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/crm/business', current: true }] }
+	)
+	assertAction(compositeTimeoutDecision, 'locate_by_vision')
+	if (compositeTimeoutDecision.action.input.workflow_nav_alias !== '客户') {
+		throw new Error(`timeout recovery should use vision for a merged expanded nav group instead of clicking the group again: ${JSON.stringify(compositeTimeoutDecision)}`)
 	}
 	workflow.recordWorkflowOutcome(revealSession, revealDecision, {
 		success: true,
