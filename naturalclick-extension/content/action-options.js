@@ -436,7 +436,7 @@
 		function resolveDropdownTrigger(element) {
 			if (!(element instanceof HTMLElement)) return null
 			const composite = element.closest?.(
-				'.el-select,.el-cascader,.ant-select,.ant-cascader-picker,.arco-select,.arco-cascader,.n-base-selection,[class*="select-wrapper"],[class*="combobox"],[class*="picker"],[role="combobox"]'
+				'.el-select,.el-select-v2,.el-select__wrapper,.el-cascader,.el-date-editor,.el-input--suffix,.ant-select,.ant-cascader-picker,.ant-picker,.arco-select,.arco-cascader,.arco-picker,.n-base-selection,.n-date-picker,.avue-select,.avue-cascader,.avue-date,.avue-time,[class*="select-wrapper"],[class*="select__wrapper"],[class*="date-editor"],[class*="time-picker"],[class*="combobox"],[class*="picker"],[role="combobox"]'
 			)
 			const target = composite instanceof HTMLElement ? composite : element
 			if (
@@ -447,7 +447,7 @@
 				return element
 			}
 			const inner = target.querySelector?.(
-				'.el-input,.el-select__caret,.el-input__suffix,.ant-select-selector,.arco-select-view,.n-base-selection-label,input'
+				'.el-select__caret,.el-input__suffix,.el-input,.ant-select-selector,.arco-select-view,.n-base-selection-label,input'
 			)
 			return inner instanceof HTMLElement ? inner : target
 		}

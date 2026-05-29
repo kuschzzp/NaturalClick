@@ -453,17 +453,18 @@
 		}
 
 		function hasEnabledSelectionTrigger(field, trigger) {
-			if (trigger instanceof HTMLElement && trigger !== field && !isDisabledElement(trigger)) return true
 			const composite = field?.closest?.(
-				'.el-select,.el-cascader,.ant-select,.ant-cascader-picker,.arco-select,.arco-cascader,.n-base-selection,[class*="select-wrapper"],[class*="combobox"],[class*="picker"],[role="combobox"]'
+				'.el-select,.el-select-v2,.el-select__wrapper,.el-cascader,.el-date-editor,.el-input--suffix,.ant-select,.ant-cascader-picker,.ant-picker,.arco-select,.arco-cascader,.arco-picker,.n-base-selection,.n-date-picker,.avue-select,.avue-cascader,.avue-date,.avue-time,[class*="select-wrapper"],[class*="select__wrapper"],[class*="date-editor"],[class*="time-picker"],[class*="combobox"],[class*="picker"],[role="combobox"]'
 			)
-			if (!(composite instanceof HTMLElement) || composite === field) return false
-			const disabledText = String(composite.className || '')
+			const disabledRoot = composite instanceof HTMLElement ? composite : field
+			const disabledText = String(disabledRoot?.className || '')
 			const explicitlyDisabled =
-				composite.hasAttribute('disabled') ||
-				String(composite.getAttribute('aria-disabled') || '').toLowerCase() === 'true' ||
+				disabledRoot?.hasAttribute?.('disabled') ||
+				String(disabledRoot?.getAttribute?.('aria-disabled') || '').toLowerCase() === 'true' ||
 				/(^|\s)(is-disabled|disabled|el-select--disabled)(\s|$)/i.test(disabledText)
-			return !explicitlyDisabled
+			if (explicitlyDisabled) return false
+			if (trigger instanceof HTMLElement && trigger !== field && !isDisabledElement(trigger)) return true
+			return composite instanceof HTMLElement && composite !== field
 		}
 
 		function inferDropdownSelectionOutcome(before, after, optionAfter) {

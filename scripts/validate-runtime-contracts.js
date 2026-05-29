@@ -74,6 +74,7 @@ async function main() {
 	assertCompositeSelectDoesNotResolveNestedInput()
 	assertReadonlyPickerInputsExposeDropdownSemantics()
 	assertCompositePickerWrappersAreObserved()
+	assertDropdownActionsUseCompositePickerTriggers()
 	assertObserverPreservesNestedNavigationItems()
 	assertVisionHitTestClickableSemantics()
 	assertVisionCandidatesUseSemanticTargetDescription()
@@ -340,6 +341,27 @@ function assertCompositePickerWrappersAreObserved() {
 	}
 	if (!collectFn.includes('.el-input--suffix') || !primaryControlFn.includes('.el-input--suffix')) {
 		throw new Error('observer should collect Element suffix picker wrappers and use them for field semantics')
+	}
+}
+
+function assertDropdownActionsUseCompositePickerTriggers() {
+	const actionOptions = read('naturalclick-extension/content/action-options.js')
+	const actionSelect = read('naturalclick-extension/content/action-select.js')
+	const triggerFn = extractFunctionSource(actionOptions, 'resolveDropdownTrigger')
+	const enabledTriggerFn = extractFunctionSource(actionSelect, 'hasEnabledSelectionTrigger')
+	for (const expected of ['.el-input--suffix', '.el-select__wrapper', '.el-date-editor', '.avue-select', '.avue-cascader']) {
+		if (!triggerFn.includes(expected) || !enabledTriggerFn.includes(expected)) {
+			throw new Error(`dropdown actions should treat composite picker wrapper ${expected} as a trigger container`)
+		}
+	}
+	if (!triggerFn.includes("'.el-select__caret,.el-input__suffix,.el-input")) {
+		throw new Error('dropdown trigger resolution should prefer picker suffix/caret targets before nested readonly inputs')
+	}
+	if (!/const\s+disabledRoot\s*=/.test(enabledTriggerFn) || !/if\s*\(explicitlyDisabled\)\s*return false/.test(enabledTriggerFn)) {
+		throw new Error('dropdown enabled-trigger fallback should reject truly disabled composite controls before clicking child triggers')
+	}
+	if (!/trigger instanceof HTMLElement && trigger !== field && !isDisabledElement\(trigger\)/.test(enabledTriggerFn)) {
+		throw new Error('dropdown enabled-trigger fallback should allow usable wrapper/suffix triggers when the observed field is a readonly picker input')
 	}
 }
 
