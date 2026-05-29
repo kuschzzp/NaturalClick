@@ -9,6 +9,7 @@
 		ACT: 'NC_ACT',
 		ACT_COORD: 'NC_ACT_COORD',
 		HIT_TEST: 'NC_HIT_TEST',
+		SET_VISUAL_CAPTURE_MODE: 'NC_SET_VISUAL_CAPTURE_MODE',
 		VERIFY_INPUT: 'NC_VERIFY_INPUT',
 		VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT',
 	}
@@ -44,16 +45,34 @@
 		const createPageObserver = window.NC_CONTENT_OBSERVER?.createPageObserver
 		const createVerification = window.NC_CONTENT_VERIFICATION?.createVerification
 		const createActions = window.NC_CONTENT_ACTIONS?.createActions
+		const actionContract = window.NC_ACTION_CONTRACT
+		const controlSemantics = window.NC_CONTROL_SEMANTICS
+		const contentSemantics = window.NC_CONTENT_SEMANTICS
+		const actionState = window.NC_CONTENT_ACTION_STATE
+		const actionInput = window.NC_CONTENT_ACTION_INPUT
+		const actionScroll = window.NC_CONTENT_ACTION_SCROLL
+		const actionOptions = window.NC_CONTENT_ACTION_OPTIONS
+		const actionCascader = window.NC_CONTENT_ACTION_CASCADER
+		const actionSelect = window.NC_CONTENT_ACTION_SELECT
 		const createVisualRuntime =
 			window.NC_CONTENT_VISUAL?.createVisualRuntime || createNoopVisualRuntime
 		const status = {
+			contract: !!actionContract,
+			controlSemantics: !!controlSemantics,
+			semantics: !!contentSemantics,
+			actionState: !!actionState,
+			actionInput: !!actionInput,
+			actionScroll: !!actionScroll,
+			actionOptions: !!actionOptions,
+			actionCascader: !!actionCascader,
+			actionSelect: !!actionSelect,
 			observer: !!createPageObserver,
 			verification: !!createVerification,
 			actions: !!createActions,
 			visual: !!window.NC_CONTENT_VISUAL?.createVisualRuntime,
 		}
 		return {
-			ready: status.observer && status.verification && status.actions,
+			ready: status.contract && status.controlSemantics && status.semantics && status.actionState && status.actionInput && status.actionScroll && status.actionOptions && status.actionCascader && status.actionSelect && status.observer && status.verification && status.actions,
 			status,
 			createPageObserver,
 			createVerification,
@@ -126,6 +145,16 @@
 				return
 			}
 
+			if (message.type === TYPES.SET_VISUAL_CAPTURE_MODE) {
+				const setter = visual?.setCaptureHidden
+				if (typeof setter !== 'function') {
+					sendResponse({ success: true, hidden: false })
+					return
+				}
+				sendResponse(setter(!!message.hidden))
+				return
+			}
+
 			if (message.type === TYPES.VERIFY_INPUT) {
 				const payload = message.payload || {}
 				sendResponse(verification.verifyInputByIndex(payload.index, payload.text))
@@ -146,7 +175,12 @@
 	function getActionTimeoutMs(action) {
 		const name = String(action?.name || '')
 		if (name === 'select_cascader_path') return 16500
-		if (name === 'select_dropdown_option' || name === 'select_checkbox_option') return 6200
+		if (
+			name === 'open_dropdown' ||
+			name === 'choose_dropdown_option' ||
+			name === 'select_dropdown_option' ||
+			name === 'select_checkbox_option'
+		) return 6200
 		if (name === 'input_text' || name === 'type') return 6200
 		if (name === 'scroll' || name === 'scroll_horizontally') return 5200
 		return 4700
@@ -191,6 +225,7 @@
 			movePointerTo: asyncNoop,
 			clickPointer: asyncNoop,
 			markActionTarget: noop,
+			setCaptureHidden: () => ({ success: true, hidden: false }),
 			dispose: noop,
 		}
 	}

@@ -1,6 +1,7 @@
 ;(function (g) {
 	const { TYPES: MSG_TYPES } = g.NC_BG_CONSTANTS
 	const { sendTabMessage, normalizeUrl, createTabAndWaitLoaded, sendRuntimeMessage } = g.NC_BG_UTILS
+	const ASK_USER_DEFAULT_TIMEOUT_MS = 120000
 
 	const registry = new Map()
 
@@ -9,6 +10,7 @@
 		registry.set(tool.name, {
 			description: '',
 			inputSchema: {},
+			plannerVisible: true,
 			target: 'background',
 			...tool,
 		})
@@ -22,12 +24,16 @@
 		return Array.from(registry.values())
 	}
 
+	function listPlannerTools() {
+		return listTools().filter((tool) => tool?.plannerVisible !== false)
+	}
+
 	function hasTool(name) {
 		return registry.has(String(name || '').trim())
 	}
 
 	function getToolPromptLines() {
-		return listTools().map((tool) => {
+		return listPlannerTools().map((tool) => {
 			const schema = formatSchema(tool.inputSchema)
 			return `- ${tool.name}: ${tool.description}${schema ? ` input=${schema}` : ''}`
 		})
@@ -45,12 +51,13 @@
 		return entries.length ? `{${entries.join(', ')}}` : ''
 	}
 
-	function pageActionTool(name, description, inputSchema) {
+	function pageActionTool(name, description, inputSchema, options = {}) {
 		registerTool({
 			name,
 			description,
 			inputSchema,
 			target: 'content',
+			plannerVisible: options.plannerVisible !== false,
 			execute: async (session, input) => executePageAction(session, name, input),
 		})
 	}
@@ -83,7 +90,12 @@
 	function getPageActionTimeoutMs(name) {
 		const actionName = String(name || '')
 		if (actionName === 'select_cascader_path') return 18000
-		if (actionName === 'select_dropdown_option' || actionName === 'select_checkbox_option') return 7000
+		if (
+			actionName === 'open_dropdown' ||
+			actionName === 'choose_dropdown_option' ||
+			actionName === 'select_dropdown_option' ||
+			actionName === 'select_checkbox_option'
+		) return 7000
 		if (actionName === 'input_text' || actionName === 'type') return 7000
 		if (actionName === 'scroll' || actionName === 'scroll_horizontally') return 6000
 		return 5500
@@ -159,20 +171,24 @@
 	registerTool({
 		name: 'ask_user',
 		description: '当缺少验证码、账号、确认信息或出现无法判断的选项时，向用户提问并等待回答。',
-		inputSchema: { question: 'string|required', placeholder: 'string|optional' },
+		inputSchema: { question: 'string|required', placeholder: 'string|optional', timeout_ms: 'number|optional' },
 		execute: async (session, input) => {
 			const question = String(input.question || input.text || '').trim()
 			if (!question) return { success: false, message: 'ask_user 缺少 question 参数。' }
 			try {
-				const response = await sendRuntimeMessage({
-					type: MSG_TYPES.ASK_USER_REQUEST,
-					payload: {
-						sessionId: session.id,
-						title: 'Agent 需要你确认',
-						question,
-						placeholder: String(input.placeholder || ''),
-					},
-				})
+				const response = await withTimeout(
+					sendRuntimeMessage({
+						type: MSG_TYPES.ASK_USER_REQUEST,
+						payload: {
+							sessionId: session.id,
+							title: 'Agent 需要你确认',
+							question,
+							placeholder: String(input.placeholder || ''),
+						},
+					}),
+					getAskUserTimeoutMs(input),
+					'等待用户回答超时。'
+				)
 				if (!response?.ok) {
 					return { success: false, message: response?.error || '用户未提供回答。' }
 				}
@@ -216,15 +232,26 @@
 	pageActionTool('hover_element_by_index', '悬浮指定元素索引，用于展开级联选择器、菜单或 tooltip。', {
 		index: 'number|required',
 	})
-	pageActionTool('select_dropdown_option', '打开下拉框后，按可见文本选择匹配的选项。', {
-		index: 'number|optional',
+	pageActionTool('open_dropdown', '展开指定 index 的下拉框并返回真实可见候选；不负责选择选项。', {
+		index: 'number|required',
+	})
+	pageActionTool('choose_dropdown_option', '在指定字段的已知候选中按真实可见文本选择下拉选项；必须提供 index，禁止只按文本全局选择。', {
+		index: 'number|required',
 		text: 'string|required',
+		label: 'string|optional',
+	})
+	pageActionTool('select_dropdown_option', '兼容旧动作：有 text/label 时选择下拉选项；只有 index 时仅展开下拉框。新规划优先使用 open_dropdown/choose_dropdown_option。', {
+		index: 'number|optional',
+		text: 'string|optional',
+		label: 'string|optional',
+	}, {
+		plannerVisible: false,
 	})
 	pageActionTool('select_checkbox_option', '按文本选择多选下拉或列表中的复选项，优先点击左侧复选框。', {
 		text: 'string|required',
 		index: 'number|optional',
 	})
-pageActionTool('select_cascader_path', '按路径逐级选择级联选项；父级持续悬浮展开下一列，禁止滚动上一级菜单查找下一级。', {
+	pageActionTool('select_cascader_path', '按路径逐级选择级联选项；父级持续悬浮展开下一列，禁止滚动上一级菜单查找下一级。', {
 		path: 'string[]|required',
 		index: 'number|optional',
 	})
@@ -233,10 +260,25 @@ pageActionTool('select_cascader_path', '按路径逐级选择级联选项；父�
 		pixels: 'number|optional',
 		index: 'number|optional',
 	})
-	pageActionTool('locate_by_vision', '手动触发视觉定位回退并执行当前动作。', {
-		target_description: 'string|optional',
-		index: 'number|optional',
-		text: 'string|optional',
+	registerTool({
+		name: 'locate_by_vision',
+		description: '按语义描述手动触发视觉定位；有 text 时执行输入，否则执行点击，不依赖旧 index。',
+		inputSchema: {
+			target_description: 'string|required',
+			action_name: 'string|optional',
+			index: 'number|optional',
+			text: 'string|optional',
+		},
+		target: 'background',
+		execute: async (session, input) => {
+			if (!g.NC_BG_EXECUTOR?.executeAction) {
+				return { success: false, message: '视觉执行器未就绪。' }
+			}
+			return g.NC_BG_EXECUTOR.executeAction(session, {
+				name: 'locate_by_vision',
+				input: input || {},
+			})
+		},
 	})
 
 	async function waitForPageBridgeSoft(tabId) {
@@ -258,12 +300,34 @@ pageActionTool('select_cascader_path', '按路径逐级选择级联选项；父�
 		}
 	}
 
+	function getAskUserTimeoutMs(input) {
+		const configured = Number(input?.timeout_ms || input?.timeoutMs)
+		if (Number.isFinite(configured) && configured > 0) {
+			return Math.max(50, Math.min(300000, Math.floor(configured)))
+		}
+		return ASK_USER_DEFAULT_TIMEOUT_MS
+	}
+
+	function withTimeout(promise, timeoutMs, message) {
+		let timer = null
+		const timeout = new Promise((_, reject) => {
+			timer = setTimeout(() => reject(new Error(message)), Math.max(50, Number(timeoutMs) || ASK_USER_DEFAULT_TIMEOUT_MS))
+		})
+		return Promise.race([promise, timeout]).finally(() => {
+			if (timer) clearTimeout(timer)
+		})
+	}
+
 	g.NC_BG_TOOLS = {
 		registerTool,
 		getTool,
 		listTools,
+		listPlannerTools,
 		hasTool,
 		getToolPromptLines,
 		executeTool,
+	}
+	g.NC_BG_TOOLS_TESTS = {
+		getAskUserTimeoutMs,
 	}
 })(globalThis)

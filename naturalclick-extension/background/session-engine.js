@@ -1,6 +1,56 @@
 ;(function (g) {
-	const { MAX_CONSECUTIVE_FAILURES, MAX_TRACE_ITEMS } = g.NC_BG_CONSTANTS
-	const { generateId } = g.NC_BG_UTILS
+	const { MAX_CONSECUTIVE_FAILURES } = g.NC_BG_CONSTANTS
+	const sessionRecords = g.NC_BG_SESSION_RECORDS
+	if (!sessionRecords) throw new Error('NC_BG_SESSION_RECORDS 未加载。')
+	const sessionRecovery = g.NC_BG_SESSION_RECOVERY
+	if (!sessionRecovery) throw new Error('NC_BG_SESSION_RECOVERY 未加载。')
+	const sessionTiming = g.NC_BG_SESSION_TIMING
+	if (!sessionTiming) throw new Error('NC_BG_SESSION_TIMING 未加载。')
+	const sessionLifecycle = g.NC_BG_SESSION_LIFECYCLE
+	if (!sessionLifecycle) throw new Error('NC_BG_SESSION_LIFECYCLE 未加载。')
+	const loopGuard = g.NC_BG_LOOP_GUARD
+	if (!loopGuard) throw new Error('NC_BG_LOOP_GUARD 未加载。')
+	const {
+		appendExecutionOutcomeSummary,
+		appendOutcomeSummary,
+		appendVerificationFailureOutcome,
+		buildReflection,
+		createActionOutcome,
+		createVerificationFailureOutcome,
+		derivePlanItems,
+		getExecutionOutcome,
+		recordVerificationSuccess,
+		summarizeExecutionOutcome,
+	} = sessionRecords
+	const {
+		attemptExecutionVisionFallback,
+		attemptVerificationRecovery,
+		buildExecutionVisionFallbackActivityText,
+		shouldAttemptExecutionVisionFallback,
+		shouldAttemptVisionFallbackForFailure,
+	} = sessionRecovery
+	const {
+		getEffectiveModelRoundTimeoutMs,
+		getPlanningTimeoutMs,
+		settleAfterAction,
+		withTimeout,
+	} = sessionTiming
+	const {
+		appendTrace,
+		failSession,
+		finalizeIfAborted,
+		finalizeStoppedSession,
+		publishPlanningProgress,
+		publishSession,
+	} = sessionLifecycle
+	const {
+		countRecentLoopGuardFailures,
+		detectActionLoop,
+		detectRedundantInputRewrite,
+		getUnsafeDoneSuccessReason,
+		hasVerifiedProgress,
+		stableActionInputSignature,
+	} = loopGuard
 
 	async function runSession(session, sessions) {
 		publishSession(session)
@@ -19,7 +69,19 @@
 			session.activityText = `第 ${session.step} 步：规划动作...`
 			publishSession(session)
 
-			const decision = await g.NC_BG_PLANNER.planAction(session, observation.data)
+			let decision = null
+			try {
+				decision = await withTimeout(
+					g.NC_BG_PLANNER.planAction(session, observation.data, {
+						onProgress: (event) => publishPlanningProgress(session, event),
+					}),
+					getPlanningTimeoutMs(session),
+					`第 ${session.step} 步规划动作超时`
+				)
+			} catch (error) {
+				failSession(session, `规划动作失败: ${String(error?.message || error || '未知错误')}`, sessions)
+				return
+			}
 			if (finalizeIfAborted(session, sessions)) return
 			if (!decision?.action?.name) {
 				failSession(session, '模型返回了无效动作', sessions)
@@ -27,22 +89,61 @@
 			}
 
 			if (decision.action.name === 'done') {
-				session.status = 'completed'
-				session.activityText = decision.action.input?.text || '任务完成。'
+				const unsafeDone = getUnsafeDoneSuccessReason(session, decision)
+				const doneSuccess = decision.action.input?.success !== false && !unsafeDone
+				session.status = doneSuccess ? 'completed' : 'error'
+				const doneText = decision.action.input?.text || '任务完成。'
+				session.activityText = unsafeDone ? `${doneText}（已拦截: ${unsafeDone}）` : doneText
+				const doneOutcome = doneSuccess
+					? null
+					: createActionOutcome('no_effect', {
+						progress: false,
+						reason: unsafeDone || doneText || 'done 失败结束',
+					})
+				const doneOutput = doneOutcome
+					? appendOutcomeSummary(session.activityText, doneOutcome)
+					: session.activityText
+				session.history.push({
+					stepIndex: session.step,
+					thought: decision.thought || '',
+					evaluationPreviousGoal: decision.evaluation_previous_goal || '',
+					memory: decision.memory || '',
+					nextGoal: decision.next_goal || '',
+					action: 'done',
+					input: decision.action.input || {},
+					success: doneSuccess,
+					output: doneOutput,
+					outcome: doneOutcome,
+				})
 				appendTrace(session, {
 					title: `步骤 ${session.step}: done`,
-					detail: session.activityText,
-					kind: 'step',
+					detail: doneOutput,
+					kind: doneSuccess ? 'step' : 'error',
 					reflection: buildReflection(decision),
 					action: {
 						name: 'done',
 						input: decision.action.input || {},
-						output: session.activityText,
+						output: doneOutput,
+						outcome: doneOutcome,
 					},
+				})
+				session.planItems = derivePlanItems(session)
+				recordWorkflowOutcome(session, decision, {
+					success: doneSuccess,
+					output: doneOutput,
+					outcome: doneOutcome,
+					reason: unsafeDone || doneText,
+					stage: 'done',
 				})
 				publishSession(session)
 				sessions.delete(session.id)
 				return
+			}
+
+			const loopGuard = detectActionLoop(session, decision)
+			if (loopGuard.blocked) {
+				if (recordLoopGuardReplan(session, decision, loopGuard, sessions)) return
+				continue
 			}
 
 			session.activityText = `第 ${session.step} 步：执行 ${decision.action.name}...`
@@ -77,42 +178,25 @@
 				execution = await g.NC_BG_EXECUTOR.executeAction(session, decision.action)
 			}
 			if (finalizeIfAborted(session, sessions)) return
-			if (
-				!execution.success &&
-				g.NC_BG_VISION.canUseVisionFallback(decision.action) &&
-				shouldAttemptVisionFallbackForFailure(execution.message)
-			) {
-				const domFailureReason = summarizeFailureReason(
-					execution?.message || 'DOM 执行失败',
-					120
-				)
-				session.activityText = `第 ${session.step} 步：DOM 失败（${domFailureReason}），尝试视觉回退...`
+			if (shouldAttemptExecutionVisionFallback(decision.action, execution)) {
+				session.activityText = buildExecutionVisionFallbackActivityText(session, execution)
 				publishSession(session)
 				if (finalizeIfAborted(session, sessions)) return
 
-				const visionFallback = await g.NC_BG_VISION.attemptVisionFallback(
+				execution = await attemptExecutionVisionFallback(
 					session,
 					decision,
-					observation.data
+					observation.data,
+					execution
 				)
 				if (finalizeIfAborted(session, sessions)) return
-				if (visionFallback.success) {
-					execution = {
-						success: true,
-						message: `${execution.message} | 视觉回退成功: ${visionFallback.message}`,
-						meta: visionFallback.meta,
-					}
-				} else {
-					execution = {
-						success: false,
-						message: `${execution.message} | 视觉回退失败: ${visionFallback.message}`,
-					}
-				}
 			}
 
 			await settleAfterAction(decision.action)
 			if (finalizeIfAborted(session, sessions)) return
 
+			const executionOutput = appendExecutionOutcomeSummary(execution.message, execution)
+			const executionOutcome = getExecutionOutcome(execution)
 			session.history.push({
 				stepIndex: session.step,
 				thought: decision.thought || '',
@@ -122,29 +206,36 @@
 				action: decision.action.name,
 				input: decision.action.input || {},
 				success: execution.success,
-				output: execution.message,
+				output: executionOutput,
+				outcome: executionOutcome,
 			})
 			appendTrace(session, {
 				title: `步骤 ${session.step}: ${decision.action.name}`,
-				detail: execution.message,
+				detail: executionOutput,
 				kind: execution.success ? 'step' : 'error',
 				reflection: buildReflection(decision),
 				action: {
 					name: decision.action.name,
 					input: decision.action.input || {},
-					output: execution.message,
+					output: executionOutput,
 				},
 			})
 			session.planItems = derivePlanItems(session)
 
 			if (!execution.success) {
+				recordWorkflowOutcome(session, decision, {
+					success: false,
+					output: executionOutput,
+					outcome: executionOutcome,
+					stage: 'execution',
+				})
 				session.consecutiveFailures += 1
-				session.activityText = execution.message
+				session.activityText = executionOutput
 				publishSession(session)
 				if (session.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
 					failSession(
 						session,
-						`连续失败 ${session.consecutiveFailures} 次，任务终止。最后错误: ${execution.message}`,
+						`连续失败 ${session.consecutiveFailures} 次，任务终止。最后错误: ${executionOutput}`,
 						sessions
 					)
 					return
@@ -152,7 +243,8 @@
 				continue
 			}
 
-			if (g.NC_BG_VERIFIER.shouldVerifyAction(decision.action)) {
+			const shouldVerify = g.NC_BG_VERIFIER.shouldVerifyAction(decision.action)
+			if (shouldVerify) {
 				if (finalizeIfAborted(session, sessions)) return
 				const verify = await g.NC_BG_VERIFIER.verifyExecutionOutcome(
 					session,
@@ -162,15 +254,70 @@
 				)
 				if (finalizeIfAborted(session, sessions)) return
 				if (!verify.ok) {
-					const verifyMsg = `动作校验失败: ${verify.reason}`
+					const recovery = await attemptVerificationRecovery(
+						session,
+						decision,
+						observation.data,
+						verify.reason,
+						{
+							onProgress: (text) => {
+								session.activityText = text
+								publishSession(session)
+							},
+						}
+					)
+					if (finalizeIfAborted(session, sessions)) return
+					if (recovery.success) {
+						const recoveryOutput = appendExecutionOutcomeSummary(recovery.message, recovery)
+						const recoveryOutcome = getExecutionOutcome(recovery)
+						session.history.push({
+							stepIndex: `${session.step}.r`,
+							thought: 'post-action verification recovery',
+							evaluationPreviousGoal: `动作校验失败后已恢复: ${verify.reason}`,
+							memory: decision.memory || '',
+							nextGoal: decision.next_goal || '继续执行任务',
+							action: `${decision.action.name}.vision_recovery`,
+							input: decision.action.input || {},
+							success: true,
+							output: recoveryOutput,
+							outcome: recoveryOutcome,
+						})
+						appendTrace(session, {
+							title: `步骤 ${session.step}: 视觉恢复`,
+							detail: recoveryOutput,
+							kind: 'step',
+							reflection: buildReflection(decision),
+							action: {
+								name: `${decision.action.name}.vision_recovery`,
+								input: decision.action.input || {},
+								output: recoveryOutput,
+							},
+						})
+						session.planItems = derivePlanItems(session)
+						recordWorkflowOutcome(session, decision, {
+							success: true,
+							output: recoveryOutput,
+							outcome: recoveryOutcome,
+							stage: 'verification_recovery',
+						})
+						session.consecutiveFailures = 0
+						session.activityText = recoveryOutput
+						publishSession(session)
+						continue
+					}
+					const verifyMsg = appendVerificationFailureOutcome(`动作校验失败: ${verify.reason}`, verify.reason)
+					const verifyOutcome = createVerificationFailureOutcome(verify.reason)
 					session.history.push({
 						stepIndex: `${session.step}.v`,
 						thought: 'post-action verification',
-						nextGoal: 'replan',
-						action: `${decision.action.name}.verify`,
+						evaluationPreviousGoal: verifyMsg,
+						memory: decision.memory || '',
+						nextGoal: decision.next_goal || 'replan',
+						action: decision.action.name,
 						input: decision.action.input || {},
 						success: false,
 						output: verifyMsg,
+						outcome: verifyOutcome,
 					})
 					appendTrace(session, {
 						title: `步骤 ${session.step}: 校验失败`,
@@ -181,6 +328,13 @@
 							input: decision.action.input || {},
 							output: verifyMsg,
 						},
+					})
+					recordWorkflowOutcome(session, decision, {
+						success: false,
+						output: verifyMsg,
+						outcome: verifyOutcome,
+						reason: verify.reason,
+						stage: 'verification',
 					})
 					session.consecutiveFailures += 1
 					session.activityText = verifyMsg
@@ -195,8 +349,15 @@
 					}
 					continue
 				}
+				recordVerificationSuccess(session, decision, verify)
 			}
 
+			recordWorkflowOutcome(session, decision, {
+				success: true,
+				output: session.history[session.history.length - 1]?.output || executionOutput,
+				outcome: session.history[session.history.length - 1]?.outcome || executionOutcome,
+				stage: shouldVerify ? 'verification' : 'execution',
+			})
 			session.consecutiveFailures = 0
 			publishSession(session)
 		}
@@ -214,174 +375,106 @@
 		sessions.delete(session.id)
 	}
 
-	function publishSession(session) {
-		const payload = {
-			sessionId: session.id,
-			status: session.status,
-			currentTask: session.task,
-			activityText: session.activityText,
-			currentTabId: session.currentTabId,
-			planItems: session.planItems,
-			traceItems: session.traceItems,
-		}
-		chrome.runtime.sendMessage(
-			{
-				type: g.NC_BG_CONSTANTS.TYPES.SESSION_UPDATE,
-				payload,
-			},
-			() => {
-				// Side panel may be closed; consume lastError to avoid noisy MV3 runtime errors.
-				void chrome.runtime.lastError
-			}
-		)
-	}
-
-	function failSession(session, errorText, sessions) {
-		session.status = 'error'
-		session.activityText = errorText
-		appendTrace(session, { title: '错误', detail: errorText, kind: 'error' })
-		publishSession(session)
-		sessions.delete(session.id)
-	}
-
-	function finalizeIfAborted(session, sessions) {
-		if (!session?.aborted) return false
-		finalizeStoppedSession(session, sessions)
-		return true
-	}
-
-	function finalizeStoppedSession(session, sessions) {
-		session.status = 'stopped'
-		session.activityText = '任务已中止。'
-		if (!session.stopTraceAdded) {
+	function recordWorkflowOutcome(session, decision, outcome) {
+		const recorder = g.NC_BG_PLANNER_WORKFLOWS?.recordWorkflowOutcome
+		if (typeof recorder !== 'function') return
+		try {
+			recorder(session, decision, outcome)
+		} catch (error) {
 			appendTrace(session, {
-				title: '任务中止',
-				detail: session.activityText,
-				kind: 'step',
+				title: '工作流状态记录失败',
+				detail: String(error?.message || error || '未知错误'),
+				kind: 'error',
 			})
-			session.stopTraceAdded = true
-		}
-		publishSession(session)
-		sessions.delete(session.id)
-	}
-
-	function appendTrace(session, traceItem) {
-		session.traceItems.push({ id: generateId('t'), ...traceItem })
-		session.traceItems = session.traceItems.slice(-MAX_TRACE_ITEMS)
-	}
-
-	function buildReflection(decision) {
-		return {
-			evaluation_previous_goal: String(decision?.evaluation_previous_goal || '').trim(),
-			memory: String(decision?.memory || '').trim(),
-			next_goal: String(decision?.next_goal || '').trim(),
 		}
 	}
 
-	function derivePlanItems(session) {
-		if (!session.history.length) {
-			return [{ id: 'boot', title: '解析任务与页面状态', status: 'running' }]
-		}
-
-		return session.history.map((item, idx) => {
-			const isLast = idx === session.history.length - 1
-			const title = item.nextGoal || `执行 ${item.action}`
-			let status = 'done'
-			if (isLast && session.status === 'running') status = 'running'
-			if (isLast && !item.success) status = 'failed'
-			return {
-				id: `p_${item.stepIndex}`,
-				title,
-				status,
-			}
+	function recordLoopGuardReplan(session, decision, loopGuard, sessions) {
+		const reason = String(loopGuard?.reason || '检测到可能重复动作，已阻断并要求重规划。')
+		const outcome = createActionOutcome('no_effect', {
+			progress: false,
+			reason,
 		})
-	}
-
-	function summarizeFailureReason(text, maxLen) {
-		const raw = String(text || '').replace(/\s+/g, ' ').trim()
-		if (!raw) return '未知原因'
-		if (raw.length <= maxLen) return raw
-		return `${raw.slice(0, Math.max(12, maxLen - 3))}...`
-	}
-
-	function shouldAttemptVisionFallbackForFailure(message) {
-		const text = String(message || '')
-		if (!text) return true
-		if (text.includes('页面动作超时')) return true
-		return !(
-			text.includes('页面通信超时') ||
-			text.includes('已放弃等待') ||
-			text.includes('执行脚本未响应') ||
-			text.includes('message port closed') ||
-			text.includes('未连接扩展执行脚本')
+		const output = appendOutcomeSummary(
+			`${reason} 已记录为失败反馈，下一轮将重新观察并规划不同动作。`,
+			outcome
 		)
-	}
-
-	function detectRedundantInputRewrite(session, action) {
-		if (!action || !['input_text', 'type'].includes(String(action.name || ''))) {
-			return { blocked: false, reason: '' }
+		const replanGoal = '重新规划，避免重复动作'
+		session.history.push({
+			stepIndex: `${session.step}.loop`,
+			thought: decision?.thought || 'loop guard',
+			evaluationPreviousGoal: reason,
+			memory: decision?.memory || '',
+			nextGoal: replanGoal,
+			action: `${decision?.action?.name || 'unknown'}.loop_guard`,
+			input: decision?.action?.input || {},
+			success: false,
+			output,
+			outcome,
+		})
+		appendTrace(session, {
+			title: `步骤 ${session.step}: 循环保护`,
+			detail: output,
+			kind: 'error',
+			reflection: buildReflection({
+				...decision,
+				evaluation_previous_goal: reason,
+				next_goal: replanGoal,
+			}),
+			action: {
+				name: `${decision?.action?.name || 'unknown'}.loop_guard`,
+				input: decision?.action?.input || {},
+				output,
+				outcome,
+			},
+		})
+		recordWorkflowOutcome(session, decision, {
+			success: false,
+			output,
+			outcome,
+			reason,
+			stage: 'loop_guard',
+		})
+		session.planItems = derivePlanItems(session)
+		session.consecutiveFailures += 1
+		const recentLoopGuardFailures = countRecentLoopGuardFailures(session)
+		session.activityText = output
+		publishSession(session)
+		if (recentLoopGuardFailures >= MAX_CONSECUTIVE_FAILURES) {
+			failSession(
+				session,
+				`短窗口内触发循环保护 ${recentLoopGuardFailures} 次，任务终止。最后原因: ${reason}`,
+				sessions
+			)
+			return true
 		}
-		const index = Number(action?.input?.index)
-		if (!Number.isFinite(index)) return { blocked: false, reason: '' }
-		const text = String(action?.input?.text || '').trim()
-		if (!text) return { blocked: false, reason: '' }
-
-		const recent = session.history.slice(-4)
-		const consecutiveSameIndexSuccess = recent.filter(
-			(item) =>
-				item &&
-				item.success === true &&
-				(item.action === 'input_text' || item.action === 'type') &&
-				Number(item?.input?.index) === index
-		)
-		if (consecutiveSameIndexSuccess.length < 2) {
-			return { blocked: false, reason: '' }
+		if (session.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+			failSession(
+				session,
+				`连续触发循环保护 ${session.consecutiveFailures} 次，任务终止。最后原因: ${reason}`,
+				sessions
+			)
+			return true
 		}
-		return {
-			blocked: true,
-			reason: `检测到同一输入框索引 ${index} 连续重复改写，已阻断当前输入并要求重规划。`,
-		}
-	}
-
-	async function settleAfterAction(action) {
-		const name = String(action?.name || '')
-		if (!name) return
-		if (['open_new_tab', 'switch_to_tab'].includes(name)) {
-			await sleep(420)
-			return
-		}
-		if (name === 'select_cascader_path') {
-			await sleep(320)
-			return
-		}
-		if (
-			[
-				'click',
-				'click_element_by_index',
-				'keypress',
-				'close_tab',
-				'scroll',
-				'scroll_horizontally',
-				'hover_element_by_index',
-				'select_dropdown_option',
-				'select_checkbox_option',
-			].includes(name)
-		) {
-			await sleep(220)
-			return
-		}
-		if (['input_text', 'type'].includes(name)) {
-			await sleep(120)
-		}
-	}
-
-	function sleep(ms) {
-		return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)))
+		return false
 	}
 
 	g.NC_BG_SESSION_ENGINE = {
 		runSession,
 		publishSession,
 		failSession,
+	}
+	g.NC_BG_SESSION_ENGINE_TESTS = {
+		countRecentLoopGuardFailures,
+		detectActionLoop,
+		detectRedundantInputRewrite,
+		getUnsafeDoneSuccessReason,
+		getEffectiveModelRoundTimeoutMs,
+		getPlanningTimeoutMs,
+		hasVerifiedProgress,
+		getExecutionOutcome,
+		summarizeExecutionOutcome,
+		shouldAttemptVisionFallbackForFailure,
+		stableActionInputSignature,
 	}
 })(globalThis)

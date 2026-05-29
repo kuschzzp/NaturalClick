@@ -18,11 +18,11 @@
 					},
 				}
 			}
-			const editable = !!observer.resolveEditableTarget(target)
+			const editableTarget = observer.resolveEditableTarget(target)
+			const editable = !!editableTarget
 			const clickable = isProbablyClickable(target)
 			const ignored = observer.isIgnoredElement(target)
-			const value =
-				target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ? target.value : ''
+			const value = editableTarget ? readElementValue(editableTarget) : ''
 			return {
 				success: true,
 				message: 'ok',
@@ -47,7 +47,8 @@
 			if (!element || !(element instanceof HTMLElement)) {
 				return { success: false, matched: false, message: '索引对应元素不存在' }
 			}
-			const value = readElementValue(element)
+			const editable = observer.resolveEditableTarget(element)
+			const value = readElementValue(editable || element)
 			return {
 				success: true,
 				matched: normalizeForMatch(value).includes(normalizeForMatch(expectedText)),
@@ -88,6 +89,12 @@
 		if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
 			return String(element.value || '')
 		}
+		if (element instanceof HTMLSelectElement) {
+			const selected = Array.from(element.selectedOptions || [])
+				.map((option) => String(option.label || option.textContent || option.value || '').trim())
+				.filter(Boolean)
+			return selected.length ? selected.join(' ') : String(element.value || '')
+		}
 		if (element.isContentEditable) return String(element.innerText || '')
 		return String(element.textContent || '')
 	}
@@ -97,20 +104,56 @@
 	}
 
 	function isProbablyClickable(element) {
-		const tag = element.tagName.toLowerCase()
-		if (tag === 'a' || tag === 'button') return true
+		const target = resolveClickableTarget(element)
+		if (!target) return false
+		if (target instanceof HTMLSelectElement) return true
+		const tag = target.tagName.toLowerCase()
+		if (tag === 'a' || tag === 'button' || tag === 'summary' || tag === 'select') return true
 		if (
-			element instanceof HTMLInputElement &&
-			['button', 'submit', 'checkbox', 'radio'].includes(element.type)
+			target instanceof HTMLInputElement &&
+			['button', 'submit', 'checkbox', 'radio', 'file'].includes(target.type)
 		)
 			return true
-		if (element.getAttribute('role') === 'button') return true
-		if (typeof element.onclick === 'function') return true
-		if (element.hasAttribute('tabindex')) return true
-		const style = window.getComputedStyle(element)
+		const role = String(target.getAttribute('role') || '').toLowerCase()
+		if (['button', 'link', 'menuitem', 'tab', 'combobox', 'option', 'checkbox', 'radio', 'switch'].includes(role)) return true
+		if (typeof target.onclick === 'function') return true
+		if (target.hasAttribute('tabindex')) return true
+		if (target.hasAttribute('aria-expanded') || target.hasAttribute('aria-haspopup') || target.hasAttribute('aria-controls')) return true
+		const style = window.getComputedStyle(target)
 		return style.cursor === 'pointer'
+	}
+
+	function resolveClickableTarget(element) {
+		if (!(element instanceof HTMLElement)) return null
+		const selector = [
+			'a[href]',
+			'a',
+			'button',
+			'summary',
+			'select',
+			'input[type="button"]',
+			'input[type="submit"]',
+			'input[type="checkbox"]',
+			'input[type="radio"]',
+			'input[type="file"]',
+			'[role="button"]',
+			'[role="link"]',
+			'[role="menuitem"]',
+			'[role="tab"]',
+			'[role="combobox"]',
+			'[role="option"]',
+			'[role="checkbox"]',
+			'[role="radio"]',
+			'[role="switch"]',
+			'[aria-expanded]',
+			'[aria-haspopup]',
+			'[aria-controls]',
+			'[onclick]',
+			'[tabindex]',
+		].join(',')
+		const closest = element.closest?.(selector)
+		return closest instanceof HTMLElement ? closest : element
 	}
 
 	g.NC_CONTENT_VERIFICATION = { createVerification }
 })(window)
-

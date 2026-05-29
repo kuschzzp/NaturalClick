@@ -38,6 +38,7 @@
 	let currentConversationTitle = ''
 	let currentConversationTurnCount = 0
 	let activeRun = null
+	let activeAskResolve = null
 	let taskStarting = false
 	let taskStopping = false
 	const connectivity = {
@@ -99,6 +100,12 @@
 		confirmDesc: mustGet('sp-confirm-desc'),
 		confirmApprove: mustGet('sp-confirm-approve'),
 		confirmReject: mustGet('sp-confirm-reject'),
+		askOverlay: mustGet('sp-ask-overlay'),
+		askTitle: mustGet('sp-ask-title'),
+		askDesc: mustGet('sp-ask-desc'),
+		askInput: mustGet('sp-ask-input'),
+		askSubmit: mustGet('sp-ask-submit'),
+		askCancel: mustGet('sp-ask-cancel'),
 	}
 
 	bindEvents()
@@ -315,6 +322,18 @@
 
 		el.confirmApprove.addEventListener('click', () => resolveConfirm(true))
 		el.confirmReject.addEventListener('click', () => resolveConfirm(false))
+		el.askSubmit.addEventListener('click', () => resolveAskUser(true))
+		el.askCancel.addEventListener('click', () => resolveAskUser(false))
+		el.askInput.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+				event.preventDefault()
+				resolveAskUser(true)
+			}
+			if (event.key === 'Escape') {
+				event.preventDefault()
+				resolveAskUser(false)
+			}
+		})
 	}
 
 	function bindRuntimeMessages() {
@@ -353,16 +372,8 @@
 
 			if (message.type === TYPES.ASK_USER_REQUEST) {
 				const payload = message.payload || {}
-				const question = String(payload.question || payload.description || '').trim()
-				const title = String(payload.title || 'Agent 需要你确认').trim()
-				const placeholder = String(payload.placeholder || '').trim()
-				const answer = window.prompt(`${title}\n\n${question}`, placeholder)
-				if (answer === null) {
-					sendResponse({ ok: false, error: '用户取消了回答。' })
-				} else {
-					sendResponse({ ok: true, answer: String(answer || '') })
-				}
-				return
+				showAskUserDialog(payload).then(sendResponse)
+				return true
 			}
 		})
 	}
@@ -471,6 +482,45 @@
 		await sendRuntimeMessage({ type: TYPES.CONFIRM_RESPONSE, confirmId, approved: !!approved })
 	}
 
+	function showAskUserDialog(payload) {
+		if (activeAskResolve) {
+			activeAskResolve({ ok: false, error: '新的用户确认请求覆盖了上一条请求。' })
+			activeAskResolve = null
+		}
+		const question = String(payload.question || payload.description || '').trim()
+		const title = String(payload.title || 'Agent 需要你确认').trim()
+		const placeholder = String(payload.placeholder || '').trim()
+		el.askTitle.textContent = title
+		el.askDesc.textContent = question
+		el.askInput.value = placeholder
+		el.askOverlay.style.display = 'flex'
+		state.activityText = question ? `等待用户回答：${question}` : '等待用户回答...'
+		render()
+		setTimeout(() => {
+			try {
+				el.askInput.focus()
+				el.askInput.select()
+			} catch (_) {}
+		}, 30)
+		return new Promise((resolve) => {
+			activeAskResolve = resolve
+		})
+	}
+
+	function resolveAskUser(approved) {
+		if (!activeAskResolve) return
+		const resolve = activeAskResolve
+		activeAskResolve = null
+		el.askOverlay.style.display = 'none'
+		const answer = String(el.askInput.value || '').trim()
+		el.askInput.value = ''
+		if (!approved) {
+			resolve({ ok: false, error: '用户取消了回答。' })
+			return
+		}
+		resolve({ ok: true, answer })
+	}
+
 	function render() {
 		renderViews()
 		renderChatHeader()
@@ -569,6 +619,16 @@
 			card.appendChild(renderActionSummary(item.action))
 		}
 
+		const modelReasoning = String(item?.modelThought || '').trim() || normalizeModelReasoning(item?.io)
+		if (modelReasoning) {
+			card.appendChild(renderReflection([{ icon: 'R', value: clampText(`模型思考: ${modelReasoning}`, 520) }]))
+		}
+
+		const modelError = getModelErrorSummary(item)
+		if (modelError) {
+			card.appendChild(renderModelErrorSummary(modelError))
+		}
+
 		const shouldShowDetail =
 			detail.textContent &&
 			String(item?.action?.output || '').trim() !== String(detail.textContent || '').trim()
@@ -582,6 +642,60 @@
 			card.appendChild(renderModelIO(item.io))
 		}
 		return card
+	}
+
+	function normalizeModelReasoning(io) {
+		const thought = String(io?.response?.thought || io?.response?.displayThought || '').trim()
+		if (thought) return thought
+		const reasoning = String(io?.response?.reasoning || io?.response?.reasoning_content || '').trim()
+		if (reasoning) return reasoning
+		const content = String(io?.response?.content || '').trim()
+		try {
+			const parsed = JSON.parse(content)
+			return String(parsed?.thought || parsed?.reasoning || parsed?.analysis || '').trim()
+		} catch (_) {
+			return ''
+		}
+	}
+
+	function getModelErrorSummary(item) {
+		const io = item?.io
+		if (!io || typeof io !== 'object') return null
+		const responseError = String(io?.response?.error || '').trim()
+		const detailError = item?.kind === 'error' ? String(item?.detail || '').trim() : ''
+		const message = responseError || detailError
+		if (!message) return null
+		const request = io.request || {}
+		const diagnostics = request.diagnostics || {}
+		return {
+			message: clampText(message, 320),
+			model: String(request.model || ''),
+			timeoutMs: Number(request.timeoutMs || 0),
+			totalMessageChars: Number(diagnostics.totalMessageChars || 0),
+			truncatedMessages: Number(diagnostics.truncatedMessages || 0),
+		}
+	}
+
+	function renderModelErrorSummary(summary) {
+		const wrap = document.createElement('div')
+		wrap.className = 'sp-model-error'
+		const title = document.createElement('div')
+		title.className = 'sp-model-error-title'
+		title.textContent = `模型错误: ${summary.message}`
+		wrap.appendChild(title)
+		const meta = [
+			summary.model ? `模型 ${summary.model}` : '',
+			summary.timeoutMs ? `超时 ${Math.round(summary.timeoutMs / 1000)} 秒` : '',
+			summary.totalMessageChars ? `请求 ${summary.totalMessageChars} 字符` : '',
+			summary.truncatedMessages ? `日志预览截断 ${summary.truncatedMessages} 段` : '',
+		].filter(Boolean)
+		if (meta.length) {
+			const line = document.createElement('div')
+			line.className = 'sp-model-error-meta'
+			line.textContent = meta.join(' · ')
+			wrap.appendChild(line)
+		}
+		return wrap
 	}
 
 	function getTraceMark(kind) {
@@ -722,9 +836,11 @@
 		const pick = (k1, k2) => String(value?.[k1] || value?.[k2] || '').trim()
 		const evaluation = pick('evaluation_previous_goal', 'evaluationPreviousGoal')
 		const memory = pick('memory', 'memo')
+		const thought = pick('thought', 'reasoning')
 		const nextGoal = pick('next_goal', 'nextGoal')
 		if (evaluation) rows.push({ icon: '☑', value: clampText(evaluation, 260) })
 		if (memory) rows.push({ icon: '🧠', value: clampText(memory, 320) })
+		if (thought) rows.push({ icon: '💭', value: clampText(thought, 320) })
 		if (nextGoal) rows.push({ icon: '🎯', value: clampText(nextGoal, 260) })
 		return rows
 	}
@@ -921,7 +1037,38 @@
 			traceCount: traceItems.length,
 			activityText: String(session?.activityText || state.activityText || ''),
 			planItems: cloneJson(session?.planItems || []),
+			diagnostics: buildSessionDiagnostics(traceItems),
 			traceItems: cloneJson(traceItems),
+		}
+	}
+
+	function buildSessionDiagnostics(traceItems) {
+		const items = Array.isArray(traceItems) ? traceItems : []
+		const modelItems = items.filter((item) => item?.io)
+		const errorItems = items.filter((item) => item?.kind === 'error')
+		const modelThoughts = modelItems
+			.map((item) => ({
+				title: String(item?.title || ''),
+				detail: String(item?.detail || ''),
+				thought: clampText(String(item?.modelThought || '').trim() || normalizeModelReasoning(item?.io), 520),
+			}))
+			.filter((item) => item.thought)
+			.slice(-6)
+		const lastError = [...errorItems].reverse()[0] || null
+		const lastModelErrorItem = [...modelItems].reverse().find((item) => getModelErrorSummary(item))
+		return {
+			modelCallCount: modelItems.length,
+			modelErrorCount: modelItems.filter((item) => item.kind === 'error').length,
+			timeoutCount: items.filter((item) => /超时|timeout/i.test(`${item?.title || ''} ${item?.detail || ''}`)).length,
+			loopGuardCount: items.filter((item) => /循环保护|loop_guard/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
+			verificationFailureCount: items.filter((item) => /校验失败|verify/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
+			lastError: lastError ? {
+				title: String(lastError.title || ''),
+				detail: clampText(String(lastError.detail || ''), 800),
+				action: String(lastError.action?.name || ''),
+			} : null,
+			lastModelError: lastModelErrorItem ? getModelErrorSummary(lastModelErrorItem) : null,
+			modelThoughts,
 		}
 	}
 
@@ -1071,6 +1218,9 @@
 			createdAt: currentConversationStartedAt || Date.now(),
 			updatedAt: Date.now(),
 			turnCount: Math.max(currentConversationTurnCount, inferTurnCount({ traceItems: state.traceItems })),
+			runtimeSessionId: sessionId,
+			activityText: state.activityText,
+			planItems: cloneJson(state.planItems || []),
 			traceItems: state.traceItems.slice(-600),
 		}
 		const existingIndex = state.sessions.findIndex((item) => item.id === record.id)

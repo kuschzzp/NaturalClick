@@ -404,6 +404,27 @@
 				-webkit-line-clamp: 2;
 				overflow: hidden;
 			}
+			.sp-model-error {
+				margin: 8px 0;
+				padding: 8px 9px;
+				border: 1px solid #e8c2bd;
+				border-radius: 7px;
+				background: #fff4f2;
+			}
+			.sp-model-error-title {
+				font-size: 11px;
+				font-weight: 600;
+				color: #9f3e35;
+				line-height: 1.35;
+				word-break: break-word;
+			}
+			.sp-model-error-meta {
+				margin-top: 4px;
+				font-size: 10px;
+				color: #8d625d;
+				line-height: 1.35;
+				word-break: break-word;
+			}
 			.sp-action {
 				margin: 8px 0;
 				padding: 8px 9px;
@@ -872,6 +893,26 @@
 				overflow: auto;
 				color: #425643;
 			}
+			.sp-ask-input {
+				width: 100%;
+				min-height: 92px;
+				max-height: 180px;
+				resize: vertical;
+				box-sizing: border-box;
+				border: 1px solid var(--line);
+				border-radius: 10px;
+				background: #ffffff;
+				color: var(--text-main);
+				padding: 9px 10px;
+				font-size: 12px;
+				font-family: inherit;
+				line-height: 1.45;
+				outline: none;
+			}
+			.sp-ask-input:focus {
+				border-color: rgba(47, 143, 114, 0.58);
+				box-shadow: 0 0 0 3px rgba(47, 143, 114, 0.12);
+			}
 
 			@keyframes pulse {
 				0% {
@@ -1076,6 +1117,18 @@
 				<div class="sp-row">
 					<button id="sp-confirm-approve" class="sp-btn primary" type="button">继续执行</button>
 					<button id="sp-confirm-reject" class="sp-btn" type="button">拒绝</button>
+				</div>
+			</div>
+		</div>
+
+		<div id="sp-ask-overlay" class="sp-confirm-overlay">
+			<div class="sp-confirm">
+				<div id="sp-ask-title" class="sp-confirm-title">Agent 需要你确认</div>
+				<div id="sp-ask-desc" class="sp-confirm-desc"></div>
+				<textarea id="sp-ask-input" class="sp-ask-input" placeholder="输入回答后提交"></textarea>
+				<div class="sp-row">
+					<button id="sp-ask-submit" class="sp-btn primary" type="button">提交回答</button>
+					<button id="sp-ask-cancel" class="sp-btn" type="button">取消</button>
 				</div>
 			</div>
 		</div>

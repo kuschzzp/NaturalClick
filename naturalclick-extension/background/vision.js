@@ -115,10 +115,17 @@
 					timeoutMs: 4500,
 				})
 				if (result?.success) {
+					const actionMeta = result?.meta && typeof result.meta === 'object' ? result.meta : {}
 					return {
 						success: true,
 						message: `${source} 定位成功并完成动作 (x=${Math.round(point.x)}, y=${Math.round(point.y)}, conf=${located.confidence.toFixed(2)}, attempt=${i + 1})`,
-						meta: { point: { x: point.x, y: point.y }, source, vision: located.meta || null },
+						meta: {
+							...actionMeta,
+							point: { x: point.x, y: point.y },
+							source,
+							vision: located.meta || null,
+							coordinateOutcome: actionMeta.outcome || null,
+						},
 					}
 				}
 				errors.push(`attempt${i + 1}: ${result?.message || 'action failed'}`)
@@ -156,12 +163,14 @@
 			].join('\n')
 
 			const shortDom = String(observation?.content || '').slice(0, 3600)
-			const domCandidates = buildVisionCandidateSummary(observation, decision?.action)
+			const domCandidates = buildVisionCandidateSummary(observation, decision)
+			const targetDescription = getVisionTargetDescription(decision)
 			const actionHint = buildActionHint(actionName, decision?.action?.input)
 			const userText = [
 				`任务: ${decision?.next_goal || decision?.thought || '定位当前应执行目标'}`,
 				`动作: ${actionName}`,
 				`动作输入: ${JSON.stringify(decision?.action?.input || {})}`,
+				`目标语义描述: ${targetDescription || '-'}`,
 				`动作定位约束: ${actionHint}`,
 				`当前URL: ${observation?.url || ''}`,
 				`当前标题: ${observation?.title || ''}`,
@@ -243,12 +252,32 @@
 	}
 
 	async function captureCurrentTab(session) {
+		let visualHidden = false
 		try {
 			await chrome.tabs.update(session.currentTabId, { active: true })
+			visualHidden = await setVisualCaptureHidden(session.currentTabId, true)
+			if (visualHidden) await sleep(50)
 			const dataUrl = await captureVisibleTab(session.windowId)
 			return { success: true, dataUrl }
 		} catch (error) {
 			return { success: false, message: `截图失败: ${String(error)}` }
+		} finally {
+			if (visualHidden) await setVisualCaptureHidden(session.currentTabId, false)
+		}
+	}
+
+	async function setVisualCaptureHidden(tabId, hidden) {
+		try {
+			const result = await sendTabMessage(tabId, {
+				type: MSG_TYPES.SET_VISUAL_CAPTURE_MODE,
+				hidden: !!hidden,
+			}, {
+				maxRetries: 0,
+				timeoutMs: 1200,
+			})
+			return result?.success !== false
+		} catch (_) {
+			return false
 		}
 	}
 
@@ -262,6 +291,10 @@
 				resolve(dataUrl)
 			})
 		})
+	}
+
+	function sleep(ms) {
+		return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)))
 	}
 
 	function buildCandidatePoints(located) {
@@ -404,31 +437,74 @@
 		return true
 	}
 
-	function buildVisionCandidateSummary(observation, action) {
+	function buildVisionCandidateSummary(observation, decisionOrAction) {
+		const action = decisionOrAction?.action || decisionOrAction || {}
+		const targetText = getVisionTargetText(decisionOrAction, action)
 		const actionIndex = Number(action?.input?.index)
 		const actionText = normalizeTextForCompare(action?.input?.text || action?.input?.label || '')
 		const elements = Array.isArray(observation?.elements) ? observation.elements : []
-		const rows = []
+		const primaryRows = []
+		const secondaryRows = []
 		for (const item of elements) {
 			if (!item || typeof item !== 'object') continue
 			const label = String(item.label || item.placeholder || item.text || '')
 			const normalizedLabel = normalizeTextForCompare(label)
 			const isIndexMatch = Number.isFinite(actionIndex) && Number(item.index) === actionIndex
 			const isTextMatch = actionText && normalizedLabel.includes(actionText)
+			const isTargetMatch = matchesVisionTargetText(item, targetText)
 			const isUseful =
 				isIndexMatch ||
 				isTextMatch ||
+				isTargetMatch ||
 				item.fieldType ||
 				item.actionIntent ||
 				item.selectionControl ||
 				item.newSinceLastObservation
 			if (!isUseful) continue
 			const rect = item.rect || {}
-			rows.push(
-				`[${item.index}] label="${shortText(label, 48)}" fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} value=${item.valueState || '-'} rect=${rect.left},${rect.top},${rect.width}x${rect.height}${item.newSinceLastObservation ? ' new=true' : ''}`
+			const aliases = Array.isArray(item.aliases) && item.aliases.length
+				? ` aliases="${shortText(item.aliases.join('|'), 72)}"`
+				: ''
+			const source = item.labelSource ? ` source=${item.labelSource}` : ''
+			const row = (
+				`[${item.index}] label="${shortText(label, 48)}"${source}${aliases} fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} value=${item.valueState || '-'} rect=${rect.left},${rect.top},${rect.width}x${rect.height}${isTargetMatch ? ' target_match=true' : ''}${item.newSinceLastObservation ? ' new=true' : ''}`
 			)
+			if (isTargetMatch || isIndexMatch || isTextMatch) primaryRows.push(row)
+			else secondaryRows.push(row)
 		}
-		return rows.slice(0, 60).join('\n')
+		return [...primaryRows, ...secondaryRows].slice(0, 60).join('\n')
+	}
+
+	function getVisionTargetDescription(decision) {
+		const actionInput = decision?.action?.input || {}
+		return String(actionInput.target_description || actionInput.description || decision?.next_goal || decision?.thought || '').trim()
+	}
+
+	function getVisionTargetText(decisionOrAction, action) {
+		const input = action?.input || {}
+		return normalizeTextForCompare([
+			input.target_description,
+			input.description,
+			input.label,
+			decisionOrAction?.next_goal,
+			decisionOrAction?.thought,
+		].filter(Boolean).join(' '))
+	}
+
+	function matchesVisionTargetText(item, targetText) {
+		if (!targetText) return false
+		const parts = [
+			item.label,
+			item.placeholder,
+			item.text,
+			item.fieldType,
+			item.actionIntent,
+			item.selectionControl,
+			...(Array.isArray(item.aliases) ? item.aliases : []),
+		]
+			.map(normalizeTextForCompare)
+			.filter((part) => part && part !== '-' && part !== 'unknown' && part.length >= 2)
+		return parts.some((part) => targetText.includes(part) || part.includes(targetText))
 	}
 
 	function normalizeTextForCompare(value) {
@@ -491,5 +567,8 @@
 	g.NC_BG_VISION = {
 		canUseVisionFallback,
 		attemptVisionFallback,
+	}
+	g.NC_BG_VISION_TESTS = {
+		buildVisionCandidateSummary,
 	}
 })(globalThis)

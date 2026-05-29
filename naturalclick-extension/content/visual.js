@@ -22,6 +22,8 @@
 		let listening = false
 		let rafId = 0
 		let cursorHideTimer = 0
+		let captureHideDepth = 0
+		let hostVisibilityBeforeCapture = ''
 
 		function ensureHost() {
 			if (host && document.body.contains(host)) return host
@@ -47,28 +49,29 @@
 					position:fixed;
 					pointer-events:none;
 					box-sizing:border-box;
-					border:2px solid var(--nc-color);
-					background: color-mix(in srgb, var(--nc-color) 16%, transparent);
-					border-radius:6px;
-					box-shadow: 0 0 0 1px color-mix(in srgb, var(--nc-color) 36%, transparent);
+					border:1px solid color-mix(in srgb, var(--nc-color) 82%, transparent);
+					background: color-mix(in srgb, var(--nc-color) 5%, transparent);
+					border-radius:5px;
+					box-shadow: 0 0 0 1px color-mix(in srgb, var(--nc-color) 14%, transparent);
 				}
 				#${HOST_ID} .nc-index-label{
 					position:fixed;
 					pointer-events:none;
-					padding:1px 6px;
+					padding:0 5px;
 					border-radius:999px;
-					font:600 11px/1.3 "SF Mono",Consolas,monospace;
+					font:600 10px/1.25 "SF Mono",Consolas,monospace;
 					color:#fff;
 					background: var(--nc-color);
-					box-shadow:0 2px 8px color-mix(in srgb, var(--nc-color) 35%, transparent);
+					opacity:.88;
+					box-shadow:0 1px 4px color-mix(in srgb, var(--nc-color) 24%, transparent);
 				}
 				#${HOST_ID} .nc-action-box{
 					position:fixed;
 					pointer-events:none;
 					box-sizing:border-box;
-					border:2px solid rgba(16,185,129,.78);
-					border-radius:8px;
-					box-shadow:0 0 0 1px rgba(16,185,129,.16);
+					border:1px solid rgba(16,185,129,.7);
+					border-radius:7px;
+					box-shadow:0 0 0 1px rgba(16,185,129,.1);
 					animation:ncActionPulse .34s ease-out forwards;
 				}
 				@keyframes ncActionPulse{
@@ -166,6 +169,26 @@
 				item.label?.remove()
 			}
 			overlays = []
+		}
+
+		function setCaptureHidden(hidden) {
+			if (!host || !document.documentElement.contains(host)) {
+				return { success: true, hidden: false }
+			}
+			if (hidden) {
+				captureHideDepth += 1
+				if (captureHideDepth === 1) {
+					hostVisibilityBeforeCapture = host.style.visibility || ''
+					host.style.visibility = 'hidden'
+				}
+				return { success: true, hidden: true }
+			}
+			if (captureHideDepth > 0) captureHideDepth -= 1
+			if (captureHideDepth === 0) {
+				host.style.visibility = hostVisibilityBeforeCapture
+				hostVisibilityBeforeCapture = ''
+			}
+			return { success: true, hidden: captureHideDepth > 0 }
 		}
 
 		function updateOverlayPositions() {
@@ -300,11 +323,14 @@
 			cursor = null
 			if (host) host.remove()
 			host = null
+			captureHideDepth = 0
+			hostVisibilityBeforeCapture = ''
 		}
 
 		return {
 			renderIndexHighlights,
 			clearIndexHighlights,
+			setCaptureHidden,
 			movePointerTo,
 			clickPointer,
 			markActionTarget,
