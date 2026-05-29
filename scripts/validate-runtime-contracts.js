@@ -349,6 +349,7 @@ function assertDropdownActionsUseCompositePickerTriggers() {
 	const actionSelect = read('naturalclick-extension/content/action-select.js')
 	const triggerFn = extractFunctionSource(actionOptions, 'resolveDropdownTrigger')
 	const enabledTriggerFn = extractFunctionSource(actionSelect, 'hasEnabledSelectionTrigger')
+	const dropdownFn = extractFunctionSource(actionSelect, 'selectDropdownOptionAction')
 	for (const expected of ['.el-input--suffix', '.el-select__wrapper', '.el-date-editor', '.avue-select', '.avue-cascader']) {
 		if (!triggerFn.includes(expected) || !enabledTriggerFn.includes(expected)) {
 			throw new Error(`dropdown actions should treat composite picker wrapper ${expected} as a trigger container`)
@@ -362,6 +363,15 @@ function assertDropdownActionsUseCompositePickerTriggers() {
 	}
 	if (!/trigger instanceof HTMLElement && trigger !== field && !isDisabledElement\(trigger\)/.test(enabledTriggerFn)) {
 		throw new Error('dropdown enabled-trigger fallback should allow usable wrapper/suffix triggers when the observed field is a readonly picker input')
+	}
+	if (!/nativeSelect\s*&&\s*isDisabledElement\(nativeSelect\)/.test(dropdownFn)) {
+		throw new Error('dropdown disabled guard should still block truly disabled native select elements')
+	}
+	if (/if\s*\([^)]*isDisabledElement\(field\)[\s\S]{0,220}return\s+\{\s*success:\s*false,[\s\S]{0,120}对应下拉框已禁用/.test(dropdownFn)) {
+		throw new Error('open_dropdown must not abort composite picker fields just because the observed inner field looks disabled')
+	}
+	if (!dropdownFn.includes('字段带禁用样式/属性但已尝试点击下拉触发区')) {
+		throw new Error('open_dropdown should report when it continues through a disabled-like composite picker')
 	}
 }
 

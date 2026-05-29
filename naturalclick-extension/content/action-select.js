@@ -41,9 +41,13 @@
 				if (!field) return { success: false, message: `索引 ${index} 不存在。` }
 				const nativeSelect = resolveNativeSelect(field)
 				const trigger = nativeSelect || resolveDropdownTrigger(field) || field
-				if (isDisabledElement(field) && !hasEnabledSelectionTrigger(field, trigger)) {
+				if (nativeSelect && isDisabledElement(nativeSelect)) {
 					return { success: false, message: `索引 ${index} 对应下拉框已禁用。` }
 				}
+				const disabledLikeComposite =
+					!nativeSelect &&
+					isDisabledElement(field) &&
+					!hasEnabledSelectionTrigger(field, trigger)
 				before = getElementInteractionState(field)
 				await humanLikeClick(trigger, null, inputMode)
 				const nativeLabels = nativeSelect ? listNativeSelectOptionLabels(nativeSelect, 16) : []
@@ -53,7 +57,7 @@
 				const after = getElementInteractionState(field)
 				const suffix = visible.length
 					? ` 当前候选: ${visible.join('、')}`
-					: ' 当前尚未检测到可见候选，下一轮应重新观察或等待弹层。'
+					: `${disabledLikeComposite ? ' 字段带禁用样式/属性但已尝试点击下拉触发区。' : ''} 当前尚未检测到可见候选，下一轮应重新观察或等待弹层。`
 				return {
 					success: true,
 					message: appendStateChange(`已展开下拉框索引 ${index}。${suffix}`, before, after),
@@ -75,6 +79,9 @@
 				if (!field) return { success: false, message: `索引 ${index} 不存在。` }
 				const nativeSelect = resolveNativeSelect(field)
 				if (nativeSelect) {
+					if (isDisabledElement(nativeSelect)) {
+						return { success: false, message: `索引 ${index} 对应下拉框已禁用。` }
+					}
 					before = getElementInteractionState(field)
 					const matched = selectOptionByText(nativeSelect, text)
 					if (!matched) {
