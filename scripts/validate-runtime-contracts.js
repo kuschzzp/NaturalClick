@@ -5441,7 +5441,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/system/user', current: true }] }
 	)
 	if (reachedCreateWithoutEntry !== null) {
-		throw new Error(`create-record should not perform deterministic page actions before model planning after target arrival: ${JSON.stringify(reachedCreateWithoutEntry)}`)
+		throw new Error(`create tasks should not perform deterministic page actions before model planning after target arrival: ${JSON.stringify(reachedCreateWithoutEntry)}`)
 	}
 	const reachedCreateHint = workflow.buildWorkflowContextText(
 		{
@@ -5453,7 +5453,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		reachedCreateObservation
 	)
 	if (!reachedCreateHint.includes('create_task status="active"') || !reachedCreateHint.includes('request_context source=actions')) {
-		throw new Error(`create-record should expose model guidance instead of a deterministic action, got ${reachedCreateHint}`)
+		throw new Error(`create-task hints should expose model guidance instead of a deterministic action, got ${reachedCreateHint}`)
 	}
 	const createEntrySession = {
 		task: '打开 http://example.test/ 找到用户管理部分，创建一个用户。',
@@ -5479,7 +5479,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/system/user', current: true }] }
 	)
 	if (createEntryDecision !== null) {
-		throw new Error(`create-record should leave visible create entry choice to the model, got ${JSON.stringify(createEntryDecision)}`)
+		throw new Error(`create-task hints should leave visible create entry choice to the model, got ${JSON.stringify(createEntryDecision)}`)
 	}
 	const createEntryHint = workflow.buildWorkflowContextText(createEntrySession, {
 		url: 'http://example.test/#/system/user',
@@ -5493,7 +5493,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		elements: [],
 	})
 	if (!createEntryHint.includes('create_candidates') || !createEntryHint.includes('index=40')) {
-		throw new Error(`create-record hints should surface create candidates for model analysis, got ${createEntryHint}`)
+		throw new Error(`create-task hints should surface create candidates for model analysis, got ${createEntryHint}`)
 	}
 	const customerToolbarCreateDecision = workflow.derivePreModelWorkflowDecision(
 		{
@@ -5536,7 +5536,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/system/user', current: true }] }
 	)
 	if (repeatedCreateEntryDecision !== null) {
-		throw new Error(`create-record should not run a deterministic repeated create entry before model planning: ${JSON.stringify(repeatedCreateEntryDecision)}`)
+		throw new Error(`create tasks should not run a deterministic repeated create entry before model planning: ${JSON.stringify(repeatedCreateEntryDecision)}`)
 	}
 	const createFormTask = '打开 http://example.test/ 找到账号管理部分，创建一个用户，用户名是 nanobot，密码是 123456，性别男，江苏南京江宁人，角色为管理员。'
 	const createFormObservation = {
@@ -5570,7 +5570,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		tabsSummary: [{ id: 1, url: createFormObservation.url, current: true }],
 	})
 	if (firstCreateField !== null) {
-		throw new Error(`create forms should be filled by model-planned actions, not deterministic create-record workflow: ${JSON.stringify(firstCreateField)}`)
+		throw new Error(`create forms should be filled by model-planned actions, not deterministic workflow code: ${JSON.stringify(firstCreateField)}`)
 	}
 	const timeoutCreateSession = { task: createFormTask, latestTask: createFormTask, history: [], workflowState: {} }
 	const timeoutCreateDecision = workflow.deriveTimeoutRecoveryWorkflowDecision(timeoutCreateSession, createFormObservation, {
@@ -6374,12 +6374,9 @@ function assertPlannerWorkflowRegistryBehavior() {
 	if (plannerTests.resolveDecisionWorkflowName({ action: { input: { workflow_nav_key: '用户管理' } } }) !== 'task-navigation') {
 		throw new Error('workflow registry should infer navigation ownership from workflow_nav_key')
 	}
-	if (plannerTests.resolveDecisionWorkflowName({ action: { input: { workflow_step: 'open_create_entry' } } }) !== 'create-record') {
-		throw new Error('workflow registry should infer generic create ownership from workflow_step')
-	}
-	for (const createStep of ['fill_create_field', 'select_create_option', 'select_create_cascader', 'open_create_required_field', 'select_create_required_option', 'submit_create_record']) {
-		if (plannerTests.resolveDecisionWorkflowName({ action: { input: { workflow_step: createStep } } }) !== 'create-record') {
-			throw new Error(`workflow registry should infer create-record ownership from workflow_step ${createStep}`)
+	for (const createStep of ['open_create_entry', 'fill_create_field', 'select_create_option', 'select_create_cascader', 'open_create_required_field', 'select_create_required_option', 'submit_create_record']) {
+		if (plannerTests.resolveDecisionWorkflowName({ action: { input: { workflow_step: createStep } } })) {
+			throw new Error(`workflow registry should not infer deterministic create workflow ownership from workflow_step ${createStep}`)
 		}
 	}
 	if (/deriveFastPathDecision\(session,\s*observation,\s*tabsSummary\)/.test(planner)) {
