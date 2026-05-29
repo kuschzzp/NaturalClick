@@ -5,6 +5,7 @@ importScripts(
 	'background/constants.js',
 	'background/utils.js',
 	'background/config.js',
+	'background/initial-navigation.js',
 	'background/tools.js',
 	'background/planner-context.js',
 	'background/planner-fastpath.js',
@@ -12,6 +13,7 @@ importScripts(
 	'background/planner-model-client.js',
 	'background/planner-decision.js',
 	'background/planner-prompt.js',
+	'background/task-intent.js',
 	'background/login-workflow.js',
 	'background/search-workflow-state.js',
 	'background/search-workflow-history.js',
@@ -35,7 +37,7 @@ const { loadConfig, normalizeConfig } = globalThis.NC_BG_CONFIG
 const { generateId, sendTabMessage, createTabAndWaitLoaded } = globalThis.NC_BG_UTILS
 const { runSession, publishSession } = globalThis.NC_BG_SESSION_ENGINE
 const { handleConfirmationResponse } = globalThis.NC_BG_CONFIRMATION
-const FALLBACK_AUTOMATION_URL = 'https://www.google.com/'
+const { deriveInitialAutomationTarget, isInitialTargetLocation } = globalThis.NC_BG_INITIAL_NAVIGATION
 const CONTENT_SCRIPT_FILES = [
 	'shared/protocol.js',
 	'shared/action-contract.js',
@@ -120,7 +122,7 @@ async function startTask(message, sender) {
 	startCancelRequested = false
 
 	try {
-		const preparedTab = await prepareControllerTab(controllerTabId, windowId)
+		const preparedTab = await prepareControllerTab(controllerTabId, windowId, task)
 		if (startCancelRequested) {
 			return { ok: false, error: '任务启动已中止。', stopped: true }
 		}
@@ -183,7 +185,7 @@ async function startTask(message, sender) {
 	}
 }
 
-async function prepareControllerTab(tabId, windowId) {
+async function prepareControllerTab(tabId, windowId, taskText = '') {
 	let tab
 	try {
 		tab = await chrome.tabs.get(tabId)
@@ -192,24 +194,50 @@ async function prepareControllerTab(tabId, windowId) {
 	}
 
 	const originalUrl = String(tab?.url || '')
+	const initialTarget = deriveInitialAutomationTarget(taskText)
+	if (initialTarget?.url && !isInitialTargetLocation(originalUrl, initialTarget.url)) {
+		return openInitialAutomationTarget(windowId, originalUrl, initialTarget)
+	}
 	if (isAutomatablePageUrl(originalUrl)) {
 		return { ok: true, tabId }
 	}
 
+	if (!initialTarget?.url) {
+		return {
+			ok: false,
+			error: `当前页面不支持自动化（${formatShortUrl(originalUrl)}），且任务中没有可直接打开的网址。请在任务里补充业务系统网址，或先切换到目标网站后重试。`,
+		}
+	}
+
+	return openInitialAutomationTarget(windowId, originalUrl, initialTarget)
+}
+
+async function openInitialAutomationTarget(windowId, originalUrl, target) {
 	try {
-		const opened = await createTabAndWaitLoaded(windowId, FALLBACK_AUTOMATION_URL)
+		const opened = await createTabAndWaitLoaded(windowId, target.url)
 		if (!opened?.id) {
-			return { ok: false, error: '自动打开兜底页面失败，请手动切换到普通网页后重试。' }
+			return { ok: false, error: '自动打开任务目标页面失败，请手动切换到目标页面后重试。' }
 		}
 		await waitForTabAutomatable(opened.id, 20000)
-		const notice = `检测到受限页面（${formatShortUrl(originalUrl)}），已自动打开 Google 并继续执行。`
+		const notice = buildInitialNavigationNotice(originalUrl, target)
 		return { ok: true, tabId: opened.id, notice }
 	} catch (error) {
 		return {
 			ok: false,
-			error: `当前页面不支持自动化，且自动打开兜底页面失败：${String(error?.message || error || '')}`,
+			error: `自动打开任务目标页面失败：${String(error?.message || error || '')}`,
 		}
 	}
+}
+
+function buildInitialNavigationNotice(originalUrl, target) {
+	const prefix = isAutomatablePageUrl(originalUrl)
+		? '已根据任务打开'
+		: `检测到受限页面（${formatShortUrl(originalUrl)}），已根据任务打开`
+	const label = target?.label || '目标页面'
+	if (target?.source === 'public-search') {
+		return `${prefix}${label}：${target.query}`
+	}
+	return `${prefix}${label}。`
 }
 
 async function ensureTabBridgeReady(tabId) {

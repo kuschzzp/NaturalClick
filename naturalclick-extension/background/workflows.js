@@ -5,6 +5,7 @@
 	if (!loginWorkflow) throw new Error('NC_BG_LOGIN_WORKFLOW 未加载。')
 	const searchWorkflow = g.NC_BG_SEARCH_WORKFLOW
 	if (!searchWorkflow) throw new Error('NC_BG_SEARCH_WORKFLOW 未加载。')
+	const taskIntent = g.NC_BG_TASK_INTENT || null
 
 	const WORKFLOW_BY_STEP = {
 		fill_username: 'login',
@@ -19,6 +20,8 @@
 		finish_search_fields: 'search-fields',
 		navigate_to_task_target: 'task-navigation',
 		reveal_navigation_options: 'task-navigation',
+		view_first_record_detail: 'record-view',
+		finish_record_view: 'record-view',
 		fill_form_field_timeout_recovery: 'form-fill',
 		open_form_dropdown_timeout_recovery: 'form-fill',
 		choose_form_dropdown_timeout_recovery: 'form-fill',
@@ -44,10 +47,20 @@
 				deriveTaskNavigationWorkflowDecision(session, observation),
 		},
 		{
+			name: 'record-view',
+			run: (session, observation) =>
+				deriveRecordViewWorkflowDecision(session, observation),
+		},
+		{
 			name: 'search-fields',
 			run: (session, observation) =>
 				deriveSearchWorkflowDecisionIfAllowed(session, observation),
 		},
+	]
+
+	const PRE_INTENT_WORKFLOWS = [
+		PRE_MODEL_WORKFLOWS[0],
+		PRE_MODEL_WORKFLOWS[1],
 	]
 
 	const TIMEOUT_RECOVERY_WORKFLOWS = [
@@ -70,6 +83,10 @@
 		return runWorkflowList(PRE_MODEL_WORKFLOWS, session, observation, context)
 	}
 
+	function derivePreIntentWorkflowDecision(session, observation, context) {
+		return runWorkflowList(PRE_INTENT_WORKFLOWS, session, observation, context)
+	}
+
 	function deriveTimeoutRecoveryWorkflowDecision(session, observation, context) {
 		return runWorkflowList(TIMEOUT_RECOVERY_WORKFLOWS, session, observation, context)
 	}
@@ -84,6 +101,11 @@
 		}
 		if (expectedKeys.some((key) => !isNavigationTargetReached(observation, key))) {
 			lines.push('- guidance: named task target is unresolved; do not test generic search/filter areas until the target module/page is reached.')
+		}
+		if (taskIntent?.buildTaskIntentHintLines) {
+			for (const line of taskIntent.buildTaskIntentHintLines(session)) {
+				if (String(line || '').trim()) lines.push(line)
+			}
 		}
 		const searchHints = typeof searchWorkflow.buildSearchWorkflowHintLines === 'function'
 			? searchWorkflow.buildSearchWorkflowHintLines(session, observation)
@@ -112,6 +134,7 @@
 			recordNavigationWorkflowOutcome(session, routedDecision, outcome)
 			return
 		}
+		if (workflowName === 'record-view') return
 		if (workflowName !== 'search-fields') return
 		if (typeof searchWorkflow.recordSearchWorkflowOutcome === 'function') {
 			searchWorkflow.recordSearchWorkflowOutcome(session, routedDecision, outcome)
@@ -143,6 +166,8 @@
 		if (!unresolved.length) return null
 		const revealDecision = buildNavigationRevealDecision(state, observation, unresolved, '模型规划超时')
 		if (revealDecision) return revealDecision
+		const missingContextDecision = buildMissingNavigationContextDecision(session, observation, unresolved)
+		if (missingContextDecision) return missingContextDecision
 		const labels = unresolved.join('、')
 		return {
 			evaluation_previous_goal: `模型规划连续超时，且任务目标模块仍未到达: ${labels}。`,
@@ -487,17 +512,134 @@
 		if (!unattempted.length) return null
 		const revealDecision = buildNavigationRevealDecision(state, observation, unattempted, '目标导航尚未直接可见')
 		if (revealDecision) return revealDecision
+		const missingContextDecision = buildMissingNavigationContextDecision(session, observation, unresolved)
+		if (missingContextDecision) return missingContextDecision
 		return null
+	}
+
+	function buildMissingNavigationContextDecision(session, observation, unresolved) {
+		const labels = (Array.isArray(unresolved) ? unresolved : [])
+			.map(getNavigationKey)
+			.filter(Boolean)
+		if (!labels.length) return null
+		if (taskTextHasExplicitUrl(session)) return null
+		if (!isGenericFallbackLocation(observation)) return null
+		if (hasRecentMissingNavigationContextAsk(session)) return null
+		const labelText = labels.join('、')
+		return {
+			evaluation_previous_goal: `任务目标模块尚未到达: ${labelText}，但当前页面不是业务系统页面。`,
+			memory: '任务里没有明确业务系统网址，当前标签页处于通用起始/搜索页面，无法可靠定位业务菜单。',
+			thought: '先向用户确认要进入的业务系统网址，再继续导航到目标模块。',
+			next_goal: '询问业务系统网址',
+			action: {
+				name: 'ask_user',
+				input: {
+					question: `当前没有打开业务系统页面，也没有在任务里看到网站地址。请提供要进入的业务系统网址，我再继续找「${labelText}」。`,
+					placeholder: '例如：http://example.com/',
+					timeout_ms: 60000,
+					workflow_step: 'request_missing_target_url',
+					workflow_nav_key: labels[0],
+				},
+			},
+		}
+	}
+
+	function taskTextHasExplicitUrl(session) {
+		const text = String(session?.latestTask || session?.task || '')
+		return /https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/i.test(text)
+	}
+
+	function isGenericFallbackLocation(observation) {
+		const url = String(observation?.url || '').trim()
+		const title = getNavigationKey(observation?.title || '')
+		if (!url) return true
+		if (/^(about:blank|chrome:\/\/|edge:\/\/|moz-extension:\/\/|chrome-extension:\/\/)/i.test(url)) return true
+		if (/^https?:\/\/(?:www\.)?(google|bing|baidu|duckduckgo)\.[^/]+/i.test(url)) return true
+		return /^(google|bing|百度|duckduckgo|新标签页|newtab)$/.test(title)
+	}
+
+	function hasRecentMissingNavigationContextAsk(session) {
+		const history = Array.isArray(session?.history) ? session.history : []
+		return history.slice(-5).some((item) => {
+			const input = item?.input || item?.action?.input || {}
+			return String(item?.action || item?.name || item?.action?.name || '') === 'ask_user' &&
+				String(input.workflow_step || '') === 'request_missing_target_url'
+		})
+	}
+
+	function deriveRecordViewWorkflowDecision(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		const operation = taskIntent?.getOperation?.(session) || ''
+		if (operation !== 'view_first_record_detail' && !isFirstRecordDetailTask(taskText)) return null
+		if (hasRecentSuccessfulRecordViewAttempt(session)) {
+			return {
+				evaluation_previous_goal: '已触发列表第一条记录的详情查看动作。',
+				memory: '任务要求查看列表第一条记录详情，详情入口已成功点击。',
+				thought: '第一条记录详情已经打开或正在展示，任务目标已满足。',
+				next_goal: '结束任务',
+				action: {
+					name: 'done',
+					input: {
+						success: true,
+						text: '已打开列表第一条记录的详情。',
+						workflow_step: 'finish_record_view',
+					},
+				},
+			}
+		}
+		const state = syncNavigationState(session)
+		const unresolved = getExpectedNavigationKeys(session, state)
+			.filter((key) => !isNavigationTargetReached(observation, key))
+		if (unresolved.length) return null
+		if (hasRecentRecordViewAttempt(session)) return null
+		const candidate = findFirstRecordDetailCandidate(observation)
+		if (candidate) {
+			const label = getObservedItemLabel(candidate) || '详情'
+			return {
+				evaluation_previous_goal: '已到达目标列表页面，任务明确要求查看列表第一条记录详情。',
+				memory: '使用受限列表查看工作流，只点击内容区第一条记录附近的详情/查看入口。',
+				thought: '当前页面已是目标列表，且能确定第一条记录的详情入口，直接打开详情。',
+				next_goal: '查看列表第一条记录详情',
+				action: {
+					name: 'click_element_by_index',
+					input: {
+						index: Number(candidate.index),
+						target_label: label,
+						workflow_step: 'view_first_record_detail',
+					},
+				},
+			}
+		}
+		return {
+			evaluation_previous_goal: '已到达目标列表页面，但当前 DOM 观察没有稳定的第一条记录详情按钮索引。',
+			memory: '使用受限视觉定位，仅查找当前业务列表第一行的详情/查看入口。',
+			thought: '任务要求查看第一条记录详情，改用视觉语义定位第一行详情按钮。',
+			next_goal: '定位并查看第一条记录详情',
+			action: {
+				name: 'locate_by_vision',
+				input: {
+					target_description: '当前业务列表第一行的详情或查看按钮',
+					action_name: 'click_element_by_index',
+					workflow_step: 'view_first_record_detail',
+					workflow_record_position: 'first',
+				},
+			},
+		}
 	}
 
 	function buildCreateTaskHintLines(session, observation, expectedKeys = []) {
 		const taskText = String(session?.latestTask || session?.task || '')
-		if (!isCreateTask(taskText)) return []
+		const operation = taskIntent?.getOperation?.(session) || ''
+		if (operation !== 'create' && !isCreateTask(taskText)) return []
 		const unresolved = (Array.isArray(expectedKeys) ? expectedKeys : [])
 			.filter((key) => !isNavigationTargetReached(observation, key))
 		if (unresolved.length) return []
+		const createLabels = taskIntent?.getCreateEntryLabels?.(session) || []
+		const createLabelText = createLabels.length
+			? ` 可优先匹配入口文本：${createLabels.join('、')}。`
+			: ''
 		const lines = [
-			'- create_task status="active" guidance="任务包含创建/新增意图；页面动作仍由模型根据当前元素分析后决定。若紧凑观察未展示创建入口，先 request_context source=actions region=content query=\'新增\' 或 inspect_region content，不要直接 done。"',
+			`- create_task status="active" guidance="任务包含创建/新增意图；页面动作仍由模型根据当前元素分析后决定。${escapeAttr(createLabelText)}若紧凑观察未展示创建入口，先 request_context source=actions region=content query='新增 新建 创建 添加' 或 inspect_region content，不要直接 done。"`,
 		]
 		const candidates = collectCreateEntryItems(observation)
 			.filter((item) => Number.isFinite(Number(item?.index)))
@@ -883,6 +1025,72 @@
 
 	function isGenericNavigationAlias(value) {
 		return /^(管理|中心|模块|页面|列表|系统|业务|数据|信息|设置|配置)$/.test(getNavigationKey(value))
+	}
+
+	function isFirstRecordDetailTask(taskText) {
+		const text = String(taskText || '')
+		return /(第一条|第一行|首条|首行|第一位|第\s*1\s*条|第\s*1\s*行|列表第一)/i.test(text) &&
+			/(详情|明细|查看|预览|view|detail|details|preview)/i.test(text)
+	}
+
+	function hasRecentSuccessfulRecordViewAttempt(session) {
+		return getRecentHistoryItems(session, 6).some((item) => {
+			if (item?.success === false) return false
+			return isRecordViewHistoryItem(item)
+		})
+	}
+
+	function hasRecentRecordViewAttempt(session) {
+		return getRecentHistoryItems(session, 6).some((item) => isRecordViewHistoryItem(item))
+	}
+
+	function isRecordViewHistoryItem(item) {
+		const input = item?.input || {}
+		return String(input.workflow_step || '') === 'view_first_record_detail'
+	}
+
+	function findFirstRecordDetailCandidate(observation) {
+		const candidates = collectRecordDetailCandidateItems(observation)
+			.filter(isRecordDetailCandidateItem)
+			.sort((a, b) => scoreRecordDetailCandidate(a) - scoreRecordDetailCandidate(b))
+		return candidates[0] || null
+	}
+
+	function collectRecordDetailCandidateItems(observation) {
+		return uniqueObservedItems([
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...collectTextNavigationItems(observation),
+		])
+	}
+
+	function isRecordDetailCandidateItem(item) {
+		const index = Number(item?.index)
+		if (!Number.isFinite(index)) return false
+		const region = getNavigationKey(item?.region)
+		if (region && region !== 'content') return false
+		if (isSelectedOrActiveObservedItem(item)) return false
+		const role = getNavigationKey(item?.role)
+		if (role && !/^(button|link|menuitem)$/.test(role)) return false
+		const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)
+		if (/(dropdown|select|checkbox|radio|switch|cascader|textbox|combobox|listbox)/i.test(control)) return false
+		const label = getNavigationKey(getObservedItemLabel(item))
+		const intent = getNavigationKey(item?.actionIntent || item?.intent)
+		const target = getNavigationKey(item?.navigationTarget || item?.target || '')
+		if (/^(详情|明细|查看|预览|detail|details|view|preview)$/.test(label)) return true
+		return /(detail|details|view|preview|详情|明细|查看|预览)/i.test(`${intent} ${target}`) &&
+			!/(新增|新建|创建|添加|删除|移除|编辑|保存|提交|取消|关闭|搜索|查询|重置|add|create|new|delete|remove|edit|save|submit|cancel|close|search|reset)/i.test(label)
+	}
+
+	function scoreRecordDetailCandidate(item) {
+		const rect = item?.rect || {}
+		const top = Number(rect.top)
+		const left = Number(rect.left)
+		const label = getNavigationKey(getObservedItemLabel(item))
+		let score = 0
+		if (/^(详情|查看|detail|view)$/.test(label)) score -= 8
+		else if (/^(明细|预览|details|preview)$/.test(label)) score -= 4
+		return score * 100000000 + (Number.isFinite(top) ? top : Number(item?.index) || 9999) * 10000 + (Number.isFinite(left) ? left : 0)
 	}
 
 	function isCreateTask(taskText) {
@@ -1487,10 +1695,27 @@
 	}
 
 	function getExpectedNavigationKeys(session, state) {
+		const forbidden = new Set(getTaskIntentForbiddenNavigationKeys(session))
 		return [
 			...getReservedNavigationKeys(state),
+			...getTaskIntentNavigationKeys(session),
 			...extractTaskNavigationTargetKeys(session),
-		].filter((key, index, list) => key && list.indexOf(key) === index)
+		].filter((key) => key && !forbidden.has(getNavigationKey(key)))
+			.filter((key, index, list) => list.indexOf(key) === index)
+	}
+
+	function getTaskIntentNavigationKeys(session) {
+		if (!taskIntent?.getNavigationTargetKeys) return []
+		return taskIntent.getNavigationTargetKeys(session)
+			.map(getNavigationKey)
+			.filter(Boolean)
+	}
+
+	function getTaskIntentForbiddenNavigationKeys(session) {
+		if (!taskIntent?.getForbiddenNavigationTargetKeys) return []
+		return taskIntent.getForbiddenNavigationTargetKeys(session)
+			.map(getNavigationKey)
+			.filter(Boolean)
 	}
 
 	function extractTaskNavigationTargetKeys(session) {
@@ -1512,19 +1737,43 @@
 	}
 
 	function normalizeTaskTargetLabel(value) {
-		const withoutVerb = String(value || '')
-			.replace(/^(找到|进入|打开|前往|切换到|定位到|在)/g, '')
-			.trim()
+		const withoutVerb = stripTaskNavigationActionNoise(stripTaskNavigationLeadingNoise(value))
 		if (isGenericTaskTargetLabel(withoutVerb)) return ''
 		if (isAssignmentLikeTaskTargetLabel(withoutVerb)) return ''
-		const label = withoutVerb
+		const label = stripTaskNavigationActionNoise(withoutVerb
 			.replace(/(部分|模块|页面|区域|列表|中|里|内|下)$/g, '')
-			.trim()
+			.trim())
 		if (!label || label.length < 2 || label.length > 20) return ''
 		if (isGenericTaskTargetLabel(label)) return ''
 		if (isAssignmentLikeTaskTargetLabel(label)) return ''
 		if (/^(搜索|查询|筛选|过滤)(区域|条件|页面|列表)?$/.test(label)) return ''
 		return label
+	}
+
+	function stripTaskNavigationLeadingNoise(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^(?:然后|接着|再|并且|同时|随后|帮我|请|麻烦|你|我|先|去|到|把|将|给我)+/g, '')
+				.replace(/^(?:找到|进入|打开|前往|切换到|定位到|在|查看)\s*/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
+	}
+
+	function stripTaskNavigationActionNoise(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^(?:新增|新建|创建|添加|增加|编辑|修改|查看|预览)\s*/g, '')
+				.replace(/(?:新增|新建|创建|添加|增加|编辑|修改|详情|明细|查看|预览|搜索|查询|筛选|过滤)$/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
 	}
 
 	function isAssignmentLikeTaskTargetLabel(value) {
@@ -1775,6 +2024,7 @@
 
 	g.NC_BG_PLANNER_WORKFLOWS = {
 		buildWorkflowContextText,
+		derivePreIntentWorkflowDecision,
 		derivePreModelWorkflowDecision,
 		deriveTimeoutRecoveryWorkflowDecision,
 		recordWorkflowOutcome,
@@ -1782,9 +2032,11 @@
 	}
 	g.NC_BG_PLANNER_WORKFLOWS_TESTS = {
 		buildWorkflowContextText,
+		derivePreIntentWorkflowDecision,
 		derivePreModelWorkflowDecision,
 		deriveSearchWorkflowDecisionIfAllowed,
 		deriveTaskNavigationWorkflowDecision,
+		deriveRecordViewWorkflowDecision,
 		deriveUnresolvedNavigationTimeoutDecision,
 		deriveTimeoutRecoveryWorkflowDecision,
 		extractTaskNavigationTargetKeys,

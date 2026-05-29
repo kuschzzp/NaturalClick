@@ -12,6 +12,8 @@
 	if (!plannerDecision) throw new Error('NC_BG_PLANNER_DECISION 未加载。')
 	const plannerPrompt = g.NC_BG_PLANNER_PROMPT
 	if (!plannerPrompt) throw new Error('NC_BG_PLANNER_PROMPT 未加载。')
+	const taskIntent = g.NC_BG_TASK_INTENT
+	if (!taskIntent) throw new Error('NC_BG_TASK_INTENT 未加载。')
 	const plannerWorkflows = g.NC_BG_PLANNER_WORKFLOWS
 	if (!plannerWorkflows) throw new Error('NC_BG_PLANNER_WORKFLOWS 未加载。')
 	const {
@@ -46,7 +48,17 @@
 		buildHistoryLine,
 	} = plannerPrompt
 	const {
+		buildTaskIntentSystemPrompt,
+		buildTaskIntentUserMessage,
+		deriveHeuristicTaskIntent,
+		markTaskIntentUnavailable,
+		normalizeTaskIntent,
+		shouldRequestTaskIntent,
+		storeTaskIntent,
+	} = taskIntent
+	const {
 		buildWorkflowContextText,
+		derivePreIntentWorkflowDecision,
 		derivePreModelWorkflowDecision,
 		deriveTimeoutRecoveryWorkflowDecision,
 	} = plannerWorkflows
@@ -78,6 +90,10 @@
 		const startCompactObservation = shouldStartWithCompactObservation(observation, observationText)
 		const toolLines = g.NC_BG_TOOLS?.getToolPromptLines?.() || []
 		const availableActionNames = getAvailableActionNames()
+		const endpoint = session.config.textLLM
+		const preIntentWorkflowDecision = derivePreIntentWorkflowDecision(session, observation, { tabsSummary })
+		if (preIntentWorkflowDecision) return preIntentWorkflowDecision
+		await ensureTaskIntent(session, observation, endpoint, options)
 		const workflowDecision = derivePreModelWorkflowDecision(session, observation, { tabsSummary })
 		if (workflowDecision) return workflowDecision
 		const workflowContextText = buildWorkflowContextText(session, observation)
@@ -85,7 +101,6 @@
 		const system = buildPlannerSystemPrompt()
 		const compactSystem = buildCompactPlannerSystemPrompt()
 
-		const endpoint = session.config.textLLM
 		const modelRoundTimeoutMs = getModelRoundTimeoutMs(endpoint)
 		const planningContext = []
 		const planningRequestSeen = new Map()
@@ -269,6 +284,103 @@
 		}
 	}
 
+	async function ensureTaskIntent(session, observation, endpoint, options = {}) {
+		if (!shouldRequestTaskIntent(session)) return null
+		if (shouldSkipTaskIntentForObservation(observation)) return null
+		const heuristicIntent = storeHeuristicTaskIntentIfAvailable(session, '模型调用前', true, { requireTarget: true })
+		if (heuristicIntent) return heuristicIntent
+		if (!endpoint?.baseURL || !endpoint?.model) {
+			if (!storeHeuristicTaskIntentIfAvailable(session, '文本模型配置不完整', true)) {
+				markTaskIntentUnavailable(session, 'skipped', '文本模型配置不完整，跳过任务理解。')
+			}
+			return null
+		}
+		const timeoutMs = getTaskIntentTimeoutMs(endpoint)
+		notifyPlanningProgress(session, options, {
+			stage: 'task_intent_request',
+			round: 1,
+			text: `第 ${session.step} 步：先解析用户任务意图（最多等待 ${formatSeconds(timeoutMs)} 秒）...`,
+		})
+		const messages = [
+			{ role: 'system', content: buildTaskIntentSystemPrompt() },
+			{ role: 'user', content: buildTaskIntentUserMessage(session) },
+		]
+		try {
+			const result = await callOpenAI(endpoint, messages, { returnMeta: true, timeoutMs })
+			const parsed = safeJsonParse(result.content)
+			if (!parsed || typeof parsed !== 'object') {
+				const fallbackIntent = storeHeuristicTaskIntentIfAvailable(session, '任务理解返回非法 JSON')
+				if (!fallbackIntent) markTaskIntentUnavailable(session, 'invalid', '任务理解模型没有返回合法 JSON。')
+				appendModelTrace(session, {
+					title: '模型调用: 任务理解',
+					ok: !!fallbackIntent,
+					detail: fallbackIntent
+						? '任务理解返回内容不是合法 JSON，已使用本地启发式任务理解。'
+						: '任务理解返回内容不是合法 JSON，已回退到本地任务解析。',
+					modelThought: fallbackIntent ? summarizeTaskIntent(fallbackIntent) : '',
+					io: result.io,
+				})
+				return fallbackIntent
+			}
+			const intent = normalizeTaskIntent(parsed, session?.latestTask || session?.task || '')
+			storeTaskIntent(session, intent, { model: endpoint.model })
+			appendModelTrace(session, {
+				title: '模型调用: 任务理解',
+				ok: true,
+				detail: `${endpoint.model} 任务理解成功`,
+				modelThought: summarizeTaskIntent(intent),
+				io: result.io,
+			})
+			return intent
+		} catch (error) {
+			const fallbackIntent = storeHeuristicTaskIntentIfAvailable(session, String(error?.message || error || '任务理解失败'))
+			if (!fallbackIntent) markTaskIntentUnavailable(session, 'failed', String(error?.message || error || '任务理解失败'))
+			appendModelTrace(session, {
+				title: '模型调用: 任务理解',
+				ok: !!fallbackIntent,
+				detail: fallbackIntent
+					? `${String(error?.message || error || '任务理解失败')}，已使用本地启发式任务理解。`
+					: `${String(error?.message || error || '任务理解失败')}，已回退到本地任务解析。`,
+				modelThought: fallbackIntent ? summarizeTaskIntent(fallbackIntent) : '',
+				io: error?.io || null,
+			})
+			return fallbackIntent
+		}
+	}
+
+	function storeHeuristicTaskIntentIfAvailable(session, reason, trace = false, options = {}) {
+		const intent = typeof deriveHeuristicTaskIntent === 'function'
+			? deriveHeuristicTaskIntent(session?.latestTask || session?.task || '')
+			: null
+		if (!intent) return null
+		const hasTarget = Array.isArray(intent.navigationTargets) && intent.navigationTargets.length > 0
+		const hasOperation = intent.operation && intent.operation !== 'unknown'
+		if (options?.requireTarget && !hasTarget) return null
+		if (!hasTarget && !hasOperation) return null
+		const stored = storeTaskIntent(session, intent, { model: 'local-heuristic' })
+		if (trace && reason && Array.isArray(session?.traceItems)) {
+			appendModelTrace(session, {
+				title: '模型调用: 任务理解',
+				ok: true,
+				detail: `${reason}，已使用本地启发式任务理解。`,
+				modelThought: summarizeTaskIntent(stored),
+			})
+		}
+		return stored
+	}
+
+	function shouldSkipTaskIntentForObservation(observation) {
+		const forms = Array.isArray(observation?.forms) ? observation.forms : []
+		if (forms.some((form) => {
+			const formText = `${form?.name || ''} ${form?.id || ''} ${form?.region || ''}`
+			if (/(弹层|对话框|dialog|modal|drawer|popover)/i.test(formText)) return true
+			const fields = Array.isArray(form?.fields) ? form.fields : []
+			return fields.some((field) => /^(dialog|popover)$/i.test(String(field?.region || '')))
+		})) return true
+		return (Array.isArray(observation?.actions) ? observation.actions : [])
+			.some((item) => /^(dialog|popover)$/i.test(String(item?.region || '')))
+	}
+
 	function buildModelTimeoutFailureDecision(error) {
 		const reason = String(error?.message || error || '模型请求连续超时')
 		return {
@@ -290,6 +402,23 @@
 		const configured = Number(endpoint?.timeoutMs)
 		if (!Number.isFinite(configured) || configured <= 0) return MODEL_ROUND_TIMEOUT_MS
 		return Math.max(MIN_MODEL_ROUND_TIMEOUT_MS, Math.min(MAX_MODEL_ROUND_TIMEOUT_MS, Math.floor(configured)))
+	}
+
+	function getTaskIntentTimeoutMs(endpoint) {
+		const configured = Number(endpoint?.taskIntentTimeoutMs)
+		if (Number.isFinite(configured) && configured > 0) {
+			return Math.max(5000, Math.min(20000, Math.floor(configured)))
+		}
+		return Math.max(5000, Math.min(12000, getModelRoundTimeoutMs(endpoint)))
+	}
+
+	function summarizeTaskIntent(intent) {
+		const operation = String(intent?.operation || 'unknown')
+		const targets = (Array.isArray(intent?.navigationTargets) ? intent.navigationTargets : [])
+			.map((target) => target?.canonical || target?.raw || '')
+			.filter(Boolean)
+			.join('、')
+		return `任务理解：operation=${operation}${targets ? `，navigation=${targets}` : ''}`
 	}
 
 	function formatSeconds(ms) {
@@ -415,6 +544,7 @@
 		shouldStartWithCompactObservation,
 		getDisplayModelThought,
 		getModelRoundTimeoutMs,
+		getTaskIntentTimeoutMs,
 		formatSeconds,
 	}
 })(globalThis)

@@ -45,7 +45,7 @@
 	}
 
 	function extractTargetUrl(taskText) {
-		const match = String(taskText || '').match(/https?:\/\/[^\s，,。；;]+/i)
+		const match = String(taskText || '').match(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/i)
 		if (!match?.[0]) return ''
 		return trimTrailingUrlPunctuation(match[0])
 	}

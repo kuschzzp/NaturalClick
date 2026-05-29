@@ -37,7 +37,11 @@ async function main() {
 
 	assertNoForbiddenBusinessFallbacks(listFiles(extensionRoot))
 	assertPlannerFastPathBehavior()
+	assertInitialNavigationBehavior()
+	assertTaskIntentBehavior()
 	await assertPlannerUsesModelDecisionOnTarget()
+	await assertPlannerTaskIntentBeforeNavigation()
+	await assertPlannerHeuristicTaskIntentBeforeNavigation()
 	await assertPlannerCompactRetryAfterTimeout()
 	await assertPlannerStartsCompactForLargeObservation()
 	await assertPlannerDoesNotRepeatCompactTimeoutForLargeObservation()
@@ -596,6 +600,9 @@ function assertPlannerFastPathBehavior() {
 	if (plannerTests.extractTargetUrl('Open http://example.test/app.') !== 'http://example.test/app') {
 		throw new Error('target URL extraction should strip a trailing sentence period')
 	}
+	if (plannerTests.extractTargetUrl('进入http://116.205.97.39:8201/#/login这个网站，登录账号admin') !== 'http://116.205.97.39:8201/#/login') {
+		throw new Error('target URL extraction should stop before trailing Chinese task text')
+	}
 
 	const onTarget = plannerTests.deriveFastPathDecision(
 		{ task: '打开 http://example.test/app 并完成页面任务。' },
@@ -665,6 +672,123 @@ function assertPlannerFastPathBehavior() {
 		if (/click|input|select/i.test(String(decision?.action?.name || ''))) {
 			throw new Error(`planner fast path leaked a page action: ${decision.action.name}`)
 		}
+	}
+}
+
+function assertInitialNavigationBehavior() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/initial-navigation.js', {})
+	const initial = sandbox.NC_BG_INITIAL_NAVIGATION
+	if (!initial?.deriveInitialAutomationTarget || !initial?.isInitialTargetLocation) {
+		throw new Error('initial-navigation test contract is not exported')
+	}
+	const explicit = initial.deriveInitialAutomationTarget('进入http://116.205.97.39:8201/#/login这个网站，登录账号admin')
+	if (explicit?.url !== 'http://116.205.97.39:8201/#/login' || explicit.source !== 'explicit-url') {
+		throw new Error(`initial navigation should open the explicit user URL before any fallback page, got ${JSON.stringify(explicit)}`)
+	}
+	const baiduSearch = initial.deriveInitialAutomationTarget('打开百度搜索黄金价格')
+	if (
+		baiduSearch?.url !== `https://www.baidu.com/s?wd=${encodeURIComponent('黄金价格')}` ||
+		baiduSearch.source !== 'public-search'
+	) {
+		throw new Error(`initial navigation should derive Baidu search URLs for public search tasks, got ${JSON.stringify(baiduSearch)}`)
+	}
+	const baiduHome = initial.deriveInitialAutomationTarget('打开百度')
+	if (baiduHome?.url !== 'https://www.baidu.com/' || baiduHome.source !== 'public-home') {
+		throw new Error(`initial navigation should open public home pages without a query, got ${JSON.stringify(baiduHome)}`)
+	}
+	const privateBusinessTask = initial.deriveInitialAutomationTarget('打开销售订单新增页面，帮我新增一条数据')
+	if (privateBusinessTask !== null) {
+		throw new Error(`initial navigation must not guess private business-system URLs, got ${JSON.stringify(privateBusinessTask)}`)
+	}
+	if (!initial.isInitialTargetLocation('https://www.baidu.com/s?wd=x', 'https://www.baidu.com/')) {
+		throw new Error('initial navigation should treat a public-site root target as reached on the same origin')
+	}
+	const background = read('naturalclick-extension/background.js')
+	if (!background.includes('background/initial-navigation.js')) {
+		throw new Error('background should load initial navigation before startup page preparation')
+	}
+	if (background.includes('FALLBACK_AUTOMATION_URL') || background.includes('已自动打开 Google')) {
+		throw new Error('startup should not hard-code Google as the restricted-page fallback')
+	}
+	if (
+		!/prepareControllerTab\(controllerTabId,\s*windowId,\s*task\)/.test(background) ||
+		!/deriveInitialAutomationTarget\(taskText\)/.test(background)
+	) {
+		throw new Error('startup should derive the initial target from the user task before opening a fallback tab')
+	}
+	const taskIntentPrompt = read('naturalclick-extension/background/task-intent.js')
+	if (!taskIntentPrompt.includes('公共搜索任务') || !taskIntentPrompt.includes('私有业务系统地址禁止猜测')) {
+		throw new Error('task-intent prompt should allow public search URLs but forbid guessing private business URLs')
+	}
+}
+
+function assertTaskIntentBehavior() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/task-intent.js', {})
+	const taskIntent = sandbox.NC_BG_TASK_INTENT
+	if (!taskIntent?.normalizeTaskIntent || !taskIntent?.shouldRequestTaskIntent || !taskIntent?.deriveHeuristicTaskIntent) {
+		throw new Error('task-intent test contract is not exported')
+	}
+	const task = '打开销售订单新增页面，帮我新增一条数据'
+	const normalized = taskIntent.normalizeTaskIntent({
+		navigationTargets: [
+			{
+				raw: '销售订单新增页面',
+				canonical: '销售订单新增页面',
+				aliases: ['销售订单', '销售订单管理', '订单'],
+				entity: '销售订单',
+				moduleType: 'order',
+			},
+		],
+		operation: 'create',
+		forbiddenNavigationTargets: ['销售订单新增', '销售订单新增页面', '新增页面'],
+	}, task)
+	if (normalized.operation !== 'create') {
+		throw new Error(`task-intent should preserve create operation, got ${JSON.stringify(normalized)}`)
+	}
+	const session = {
+		task,
+		latestTask: task,
+		workflowState: {},
+	}
+	taskIntent.storeTaskIntent(session, normalized, { model: 'fake-model' })
+	const keys = taskIntent.getNavigationTargetKeys(session)
+	const forbidden = taskIntent.getForbiddenNavigationTargetKeys(session)
+	if (!keys.includes('销售订单') || keys.includes('销售订单新增')) {
+		throw new Error(`task-intent navigation aliases should route to the base module, got keys=${JSON.stringify(keys)}`)
+	}
+	if (!forbidden.includes('销售订单新增')) {
+		throw new Error(`task-intent should keep action-compound labels forbidden, got forbidden=${JSON.stringify(forbidden)}`)
+	}
+	const heuristic = taskIntent.deriveHeuristicTaskIntent(task)
+	if (
+		heuristic?.operation !== 'create' ||
+		!heuristic.navigationTargets?.some((target) => target.canonical === '销售订单') ||
+		!heuristic.forbiddenNavigationTargets?.includes('销售订单新增')
+	) {
+		throw new Error(`task-intent heuristic should split create-page wording, got ${JSON.stringify(heuristic)}`)
+	}
+	const genericCreate = taskIntent.deriveHeuristicTaskIntent('打开 http://example.test/app，帮我新增一条数据')
+	if (genericCreate?.navigationTargets?.length) {
+		throw new Error(`task-intent heuristic should not invent a module for generic create-data tasks, got ${JSON.stringify(genericCreate)}`)
+	}
+	if (taskIntent.shouldRequestTaskIntent(session)) {
+		throw new Error('task-intent should not request the model again after a ready intent for the same task')
+	}
+	const nextSession = { task, latestTask: `${task}，备注改一下`, workflowState: session.workflowState }
+	if (!taskIntent.shouldRequestTaskIntent(nextSession)) {
+		throw new Error('task-intent should request again when latestTask changes')
+	}
+	const plainSession = { task: '打开 http://example.test/app 并在搜索框输入 hello。', latestTask: '打开 http://example.test/app 并在搜索框输入 hello。', workflowState: {} }
+	if (taskIntent.shouldRequestTaskIntent(plainSession)) {
+		throw new Error('task-intent should skip simple page field tasks that do not need semantic decomposition')
+	}
+	const firstDetail = taskIntent.normalizeTaskIntent({
+		navigationTargets: [{ raw: '客户管理页面', canonical: '客户管理', aliases: ['客户管理', '客户'] }],
+		operation: 'view_first_record_detail',
+		recordSelector: { position: 'first', entity: '客户' },
+	}, '进入客户管理页面，查看第一条客户详情')
+	if (firstDetail.operation !== 'view_first_record_detail' || firstDetail.recordSelector.position !== 'first') {
+		throw new Error(`task-intent should normalize first-record detail tasks, got ${JSON.stringify(firstDetail)}`)
 	}
 }
 
@@ -769,6 +893,189 @@ async function assertPlannerUsesModelDecisionOnTarget() {
 	const modelTrace = session.traceItems.find((item) => item.kind === 'model')
 	if (!String(modelTrace?.modelThought || '').includes('forms')) {
 		throw new Error(`planner model trace should expose displayable thought outside raw IO, got ${JSON.stringify(session.traceItems)}`)
+	}
+}
+
+async function assertPlannerTaskIntentBeforeNavigation() {
+	const fetchBodies = []
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/planner.js', {
+		NC_BG_UTILS: {
+			safeJsonParse: (value) => {
+				try {
+					return JSON.parse(value)
+				} catch (_) {
+					return null
+				}
+			},
+			generateId: () => 'test_id',
+		},
+		NC_BG_CONSTANTS: { MAX_TRACE_ITEMS: 80 },
+		NC_BG_TOOLS: {
+			getToolPromptLines: () => [
+				'- click_element_by_index: 点击当前观察结果中的指定元素索引 input={index:number|required}',
+			],
+		},
+		chrome: {
+			tabs: {
+				query: async () => [
+					{ id: 1, title: 'Example', url: 'http://example.test/app', current: true },
+				],
+			},
+		},
+		fetch: async (_url, init) => {
+			const body = JSON.parse(init.body)
+			fetchBodies.push(body)
+			return fakeJsonResponse({
+				url: null,
+				auth: { username: null, password: null },
+				navigationTargets: [
+					{
+						raw: '业务单据',
+						canonical: '业务单据',
+						aliases: ['业务单据', '业务单据管理'],
+						entity: '业务单据',
+						moduleType: 'management',
+					},
+				],
+				operation: 'create',
+				recordSelector: { position: null, index: null, entity: null },
+				formData: {},
+				createEntryLabels: ['新增', '新建', '添加'],
+				detailEntryLabels: ['详情', '查看'],
+				forbiddenNavigationTargets: ['业务单据新增', '新增页面'],
+				notes: '先进入业务单据模块，再新增。',
+			})
+		},
+		AbortController,
+	})
+	const session = {
+		windowId: 1,
+		currentTabId: 1,
+		step: 1,
+		task: '打开 http://example.test/app，帮我按业务规则新增一条数据',
+		latestTask: '打开 http://example.test/app，帮我按业务规则新增一条数据',
+		config: {
+			textLLM: {
+				baseURL: 'http://model.test/v1',
+				model: 'fake-model',
+				apiKey: '',
+			},
+		},
+		history: [],
+		traceItems: [],
+		workflowState: {},
+	}
+	const decision = await sandbox.NC_BG_PLANNER.planAction(
+		session,
+		{
+			url: 'http://example.test/app',
+			title: '首页',
+			forms: [],
+			actions: [
+				{ index: 9, region: 'sidebar', role: 'menuitem', label: '业务单据', rect: { left: 0, top: 120, width: 160, height: 44 } },
+			],
+			options: [],
+			popups: [],
+			panels: [],
+			elements: [],
+			simplifiedDom: [],
+			rawCandidates: [],
+		}
+	)
+	assertAction(decision, 'click_element_by_index')
+	if (
+		decision.action.input.index !== 9 ||
+		decision.action.input.workflow !== 'task-navigation' ||
+		decision.action.input.workflow_nav_key !== '业务单据'
+	) {
+		throw new Error(`planner should use task-intent navigation targets before generic planning, got ${JSON.stringify(decision)}`)
+	}
+	if (fetchBodies.length !== 1 || !getSystemMessageText(fetchBodies[0]).includes('任务理解器')) {
+		throw new Error(`planner should call the task-intent model once before navigation, got ${fetchBodies.length} calls`)
+	}
+	if (session.workflowState.taskIntent?.status !== 'ready') {
+		throw new Error(`planner should store ready task intent state, got ${JSON.stringify(session.workflowState.taskIntent)}`)
+	}
+	if (!session.traceItems.some((item) => item.title === '模型调用: 任务理解' && item.kind === 'model')) {
+		throw new Error(`planner should trace the task-intent call, got ${JSON.stringify(session.traceItems)}`)
+	}
+}
+
+async function assertPlannerHeuristicTaskIntentBeforeNavigation() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/planner.js', {
+		NC_BG_UTILS: {
+			safeJsonParse: (value) => {
+				try {
+					return JSON.parse(value)
+				} catch (_) {
+					return null
+				}
+			},
+			generateId: () => 'test_id',
+		},
+		NC_BG_CONSTANTS: { MAX_TRACE_ITEMS: 80 },
+		NC_BG_TOOLS: {
+			getToolPromptLines: () => [
+				'- click_element_by_index: 点击当前观察结果中的指定元素索引 input={index:number|required}',
+			],
+		},
+		chrome: {
+			tabs: {
+				query: async () => [
+					{ id: 1, title: 'Example', url: 'http://example.test/app', current: true },
+				],
+			},
+		},
+		fetch: async () => {
+			throw new Error('task-intent model should not be called for obvious create-page wording')
+		},
+		AbortController,
+	})
+	const task = '打开 http://example.test/app，打开销售订单新增页面，帮我新增一条数据'
+	const session = {
+		windowId: 1,
+		currentTabId: 1,
+		step: 1,
+		task,
+		latestTask: task,
+		config: {
+			textLLM: {
+				baseURL: 'http://model.test/v1',
+				model: 'fake-model',
+				apiKey: '',
+			},
+		},
+		history: [],
+		traceItems: [],
+		workflowState: {},
+	}
+	const decision = await sandbox.NC_BG_PLANNER.planAction(
+		session,
+		{
+			url: 'http://example.test/app',
+			title: '首页',
+			forms: [],
+			actions: [
+				{ index: 11, region: 'sidebar', role: 'menuitem', label: '销售订单', rect: { left: 0, top: 120, width: 160, height: 44 } },
+			],
+			options: [],
+			popups: [],
+			panels: [],
+			elements: [],
+			simplifiedDom: [],
+			rawCandidates: [],
+		}
+	)
+	assertAction(decision, 'click_element_by_index')
+	if (
+		decision.action.input.index !== 11 ||
+		decision.action.input.workflow_nav_key !== '销售订单' ||
+		session.workflowState.taskIntent?.model !== 'local-heuristic'
+	) {
+		throw new Error(`planner should use local task-intent heuristic before navigation, got decision=${JSON.stringify(decision)} state=${JSON.stringify(session.workflowState.taskIntent)}`)
+	}
+	if (!session.traceItems.some((item) => item.title === '模型调用: 任务理解' && item.kind === 'model' && String(item.detail || '').includes('本地启发式'))) {
+		throw new Error(`planner should trace local heuristic task-intent, got ${JSON.stringify(session.traceItems)}`)
 	}
 }
 
@@ -4876,6 +5183,9 @@ function loadBackgroundModule(relPath, globals) {
 		vm.runInNewContext(read('naturalclick-extension/background/planner-prompt.js'), sandbox, {
 			filename: 'naturalclick-extension/background/planner-prompt.js',
 		})
+		vm.runInNewContext(read('naturalclick-extension/background/task-intent.js'), sandbox, {
+			filename: 'naturalclick-extension/background/task-intent.js',
+		})
 		vm.runInNewContext(read('naturalclick-extension/background/login-workflow.js'), sandbox, {
 			filename: 'naturalclick-extension/background/login-workflow.js',
 		})
@@ -4926,7 +5236,7 @@ function repeatedHistory(action, input, nextGoal, count, success = true) {
 
 function assertAction(decision, expectedName) {
 	if (decision?.action?.name !== expectedName) {
-		throw new Error(`expected ${expectedName}, got ${decision?.action?.name || '(none)'}`)
+		throw new Error(`expected ${expectedName}, got ${decision?.action?.name || '(none)'} decision=${JSON.stringify(decision)}`)
 	}
 }
 
@@ -5083,6 +5393,15 @@ function assertSharedActionContractLoadedEverywhere() {
 	}
 	if (background.indexOf('background/planner-prompt.js') > background.indexOf('background/planner.js')) {
 		throw new Error('planner prompt builder must be loaded before planner')
+	}
+	if (!background.includes('background/task-intent.js')) {
+		throw new Error('background importScripts should load task intent before planner and workflow registry')
+	}
+	if (
+		background.indexOf('background/task-intent.js') > background.indexOf('background/workflows.js') ||
+		background.indexOf('background/task-intent.js') > background.indexOf('background/planner.js')
+	) {
+		throw new Error('task intent must be loaded before workflows and planner')
 	}
 	if (!background.includes('background/login-workflow.js')) {
 		throw new Error('background importScripts should load login workflow before planner workflow registry')
@@ -5454,7 +5773,8 @@ function assertPlannerPromptExtractedFromPlanner() {
 		!prompt.includes('通用规划流程') ||
 		!prompt.includes('真正的业务页面动作仍需要你结合当前页面元素和用户任务自行判断') ||
 		!prompt.includes('request_context source=actions region=content query="新增"') ||
-		!prompt.includes('创建/新增类任务应由你')
+		!prompt.includes('创建/新增类任务应由你') ||
+		!prompt.includes('task_intent operation=create')
 	) {
 		throw new Error('planner prompt should keep business actions model-owned while guiding context requests for create tasks')
 	}
@@ -5789,6 +6109,48 @@ function assertTaskNavigationWorkflowBehavior() {
 	if (!createUserTargets.includes('用户管理') || createUserTargets.includes('角色为管理')) {
 		throw new Error(`task-navigation should ignore field assignment phrases such as role=admin while keeping real modules: ${JSON.stringify(createUserTargets)}`)
 	}
+	const customerDetailTask = '进入http://116.205.97.39:8201 这个网站，登录账号admin 密码123456 然后你进入客户管理页面，帮我找到列表第一条客户，然后查看这个客户的详情'
+	const customerDetailTargets = workflow.extractTaskNavigationTargetKeys({
+		task: customerDetailTask,
+		latestTask: customerDetailTask,
+	})
+	if (
+		!customerDetailTargets.includes('客户管理') ||
+		customerDetailTargets.some((key) => /然后|进入|帮我/.test(key))
+	) {
+		throw new Error(`task-navigation should strip connective text before target modules: ${JSON.stringify(customerDetailTargets)}`)
+	}
+	const createPageTargets = workflow.extractTaskNavigationTargetKeys({
+		task: '打开销售订单新增页面，帮我新增一条数据',
+		latestTask: '打开销售订单新增页面，帮我新增一条数据',
+	})
+	if (!createPageTargets.includes('销售订单') || createPageTargets.includes('销售订单新增')) {
+		throw new Error(`task-navigation should split create-page wording into module plus create action: ${JSON.stringify(createPageTargets)}`)
+	}
+	const missingBusinessUrlDecision = workflow.derivePreModelWorkflowDecision(
+		{
+			task: '打开销售订单新增页面，帮我新增一条数据',
+			latestTask: '打开销售订单新增页面，帮我新增一条数据',
+			history: [],
+			workflowState: {},
+		},
+		{
+			url: 'https://www.google.com/',
+			title: 'Google',
+			forms: [],
+			actions: [],
+			popups: [],
+			elements: [],
+		},
+		{ tabsSummary: [{ id: 1, url: 'https://www.google.com/', current: true }] }
+	)
+	assertAction(missingBusinessUrlDecision, 'ask_user')
+	if (
+		missingBusinessUrlDecision.action.input.workflow_step !== 'request_missing_target_url' ||
+		!/销售订单/.test(String(missingBusinessUrlDecision.action.input.question || ''))
+	) {
+		throw new Error(`task-navigation should ask for the business URL instead of model-planning on a generic start page: ${JSON.stringify(missingBusinessUrlDecision)}`)
+	}
 	const task = '打开 http://example.test/ 进入订单中心，并测试搜索区域每一个搜索项'
 	const observation = {
 		url: 'http://example.test/#/wel/index',
@@ -5975,6 +6337,88 @@ function assertTaskNavigationWorkflowBehavior() {
 	if (!customerReachedHint.includes('key="客户管理" status="reached"') || customerReachedHint.includes('named task target is unresolved')) {
 		throw new Error(`task-navigation should mark 客户管理 reached on the concrete 客户 page, got ${customerReachedHint}`)
 	}
+	const customerDetailHint = workflow.buildWorkflowContextText(
+		{ task: customerDetailTask, latestTask: customerDetailTask, history: [], workflowState: {} },
+		{
+			url: 'http://example.test/#/crm/customer',
+			title: '客户-CRM',
+			forms: [],
+			actions: [
+				{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机 公海 合同 销售订单 物料申请', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded' },
+				{ index: 7, region: 'sidebar', role: 'menuitem', label: '客户', valueState: 'selected' },
+			],
+			popups: [],
+			elements: [],
+		}
+	)
+	if (
+		!customerDetailHint.includes('key="客户管理" status="reached"') ||
+		customerDetailHint.includes('key="然后你进入客户管理"') ||
+		customerDetailHint.includes('named task target is unresolved')
+	) {
+		throw new Error(`customer detail tasks should not keep connective navigation targets unresolved, got ${customerDetailHint}`)
+	}
+	const customerDetailObservation = {
+		url: 'http://116.205.97.39:8201/#/crm/customer',
+		title: '客户-CRM',
+		forms: [],
+		actions: [
+			{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理 线索 客户 商机 公海 合同 销售订单 物料申请', stateHints: 'classState=is-active|is-opened', expandedState: 'expanded' },
+			{ index: 7, region: 'sidebar', role: 'menuitem', label: '客户', valueState: 'selected' },
+			{ index: 35, region: 'content', role: 'button', label: '展开搜索', actionIntent: 'open_filter', rect: { left: 20, top: 128, width: 80, height: 32 } },
+			{ index: 50, region: 'content', role: 'button', label: '详情', actionIntent: 'view', rect: { left: 900, top: 220, width: 52, height: 28 } },
+			{ index: 51, region: 'content', role: 'button', label: '详情', actionIntent: 'view', rect: { left: 900, top: 268, width: 52, height: 28 } },
+		],
+		popups: [],
+		elements: [],
+	}
+	const firstRecordDetailDecision = workflow.derivePreModelWorkflowDecision(
+		{ task: customerDetailTask, latestTask: customerDetailTask, history: [], workflowState: {} },
+		customerDetailObservation,
+		{ tabsSummary: [{ id: 1, url: customerDetailObservation.url, current: true }] }
+	)
+	assertAction(firstRecordDetailDecision, 'click_element_by_index')
+	if (
+		firstRecordDetailDecision.action.input.index !== 50 ||
+		firstRecordDetailDecision.action.input.workflow !== 'record-view' ||
+		firstRecordDetailDecision.action.input.workflow_step !== 'view_first_record_detail'
+	) {
+		throw new Error(`record-view workflow should click the first content detail action, got ${JSON.stringify(firstRecordDetailDecision)}`)
+	}
+	const firstRecordWithoutDetailTask = '进入http://116.205.97.39:8201 这个网站，然后你进入客户管理页面，帮我找到列表第一条客户'
+	const noDetailIntentDecision = workflow.derivePreModelWorkflowDecision(
+		{ task: firstRecordWithoutDetailTask, latestTask: firstRecordWithoutDetailTask, history: [], workflowState: {} },
+		customerDetailObservation,
+		{ tabsSummary: [{ id: 1, url: customerDetailObservation.url, current: true }] }
+	)
+	if (noDetailIntentDecision !== null) {
+		throw new Error(`record-view workflow should not click details unless the task asks to view details: ${JSON.stringify(noDetailIntentDecision)}`)
+	}
+	const completedRecordViewDecision = workflow.derivePreModelWorkflowDecision(
+		{
+			task: customerDetailTask,
+			latestTask: customerDetailTask,
+			history: [
+				{
+					action: 'click_element_by_index',
+					input: { index: 50, workflow: 'record-view', workflow_step: 'view_first_record_detail' },
+					success: true,
+					output: '已点击详情。',
+				},
+			],
+			workflowState: {},
+		},
+		{ ...customerDetailObservation, title: '客户详情-CRM', actions: [] },
+		{ tabsSummary: [{ id: 1, url: 'http://116.205.97.39:8201/#/crm/customer/detail/1', current: true }] }
+	)
+	assertAction(completedRecordViewDecision, 'done')
+	if (
+		completedRecordViewDecision.action.input.success !== true ||
+		completedRecordViewDecision.action.input.workflow !== 'record-view' ||
+		completedRecordViewDecision.action.input.workflow_step !== 'finish_record_view'
+	) {
+		throw new Error(`record-view workflow should finish after a successful detail click, got ${JSON.stringify(completedRecordViewDecision)}`)
+	}
 	const systemToolHint = workflow.buildWorkflowContextText(
 		{ task: '打开 http://example.test/ 找到系统管理部分。', latestTask: '打开 http://example.test/ 找到系统管理部分。', history: [], workflowState: {} },
 		{
@@ -6103,6 +6547,46 @@ function assertTaskNavigationWorkflowBehavior() {
 	})
 	if (!createEntryHint.includes('create_candidates') || !createEntryHint.includes('index=40')) {
 		throw new Error(`create-task hints should surface create candidates for model analysis, got ${createEntryHint}`)
+	}
+	const intentCreateSession = {
+		task: '打开销售订单新增页面，帮我新增一条数据',
+		latestTask: '打开销售订单新增页面，帮我新增一条数据',
+		history: [],
+		workflowState: {
+			taskIntent: {
+				status: 'ready',
+				version: 1,
+				taskText: '打开销售订单新增页面，帮我新增一条数据',
+				intent: {
+					navigationTargets: [
+						{ raw: '销售订单新增页面', canonical: '销售订单', aliases: ['销售订单', '销售订单管理'], entity: '销售订单' },
+					],
+					operation: 'create',
+					createEntryLabels: ['新增', '新建', '添加'],
+					detailEntryLabels: ['详情', '查看'],
+					forbiddenNavigationTargets: ['销售订单新增', '新增页面'],
+				},
+			},
+		},
+	}
+	const intentCreateHint = workflow.buildWorkflowContextText(intentCreateSession, {
+		url: 'http://example.test/#/crm/order',
+		title: '销售订单-CRM',
+		forms: [],
+		actions: [
+			{ index: 11, region: 'sidebar', role: 'menuitem', label: '销售订单', valueState: 'selected' },
+			{ index: 40, region: 'content', role: 'button', label: '新增', actionIntent: 'create', rect: { left: 20, top: 100, width: 72, height: 32 } },
+		],
+		popups: [],
+		elements: [],
+	})
+	if (
+		!intentCreateHint.includes('key="销售订单" status="reached"') ||
+		intentCreateHint.includes('key="销售订单新增"') ||
+		!intentCreateHint.includes('task_intent status="ready" operation="create"') ||
+		!intentCreateHint.includes('create_candidates')
+	) {
+		throw new Error(`task-intent create hints should separate module navigation from create action, got ${intentCreateHint}`)
 	}
 	const customerToolbarCreateDecision = workflow.derivePreModelWorkflowDecision(
 		{
