@@ -246,7 +246,8 @@
 		}
 
 		function getInputMode(action) {
-			return action?.meta?.inputMode === 'standard' ? 'standard' : 'realistic'
+			const inputMode = String(action?.meta?.inputMode || '').trim()
+			return inputMode === 'standard' || inputMode === 'direct' ? inputMode : 'realistic'
 		}
 
 		async function humanLikeClick(element, point, inputMode) {

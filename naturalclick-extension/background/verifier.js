@@ -47,6 +47,8 @@
 		const input = action?.input || {}
 		const urlChanged = String(postObs.url || '') !== String(preObservation.url || '')
 		const domChanged = String(postObs.content || '') !== String(preObservation.content || '')
+		const dialogCloseVerdict = detectUnexpectedDialogCloseAfterFieldAction(action, preObservation, postObs)
+		if (dialogCloseVerdict) return dialogCloseVerdict
 
 		if (name === 'scroll') {
 			const outcomeVerdict = evaluateStructuredOutcome(execution, { finalNoEffect: false })
@@ -265,6 +267,53 @@
 			return Array.isArray(input.path) ? input.path.length > 0 : !!String(input.path || '').trim()
 		}
 		return !!String(input.text || input.label || '').trim()
+	}
+
+	function detectUnexpectedDialogCloseAfterFieldAction(action, preObservation, postObservation) {
+		if (!isDialogFieldAction(action)) return null
+		const index = Number(action?.input?.index)
+		if (!Number.isFinite(index)) return null
+		const targetBefore = findObservedIndexedItem(preObservation, index)
+		if (!isObservedDialogItem(targetBefore)) return null
+		if (hasObservedDialogForm(postObservation)) return null
+		return {
+			ok: false,
+			reason: '字段动作后弹层消失，疑似点击了弹层外遮罩或触发了关闭；本次不应视为填写成功',
+		}
+	}
+
+	function isDialogFieldAction(action) {
+		const name = String(action?.name || '')
+		return [
+			'input_text',
+			'type',
+			'open_dropdown',
+			'choose_dropdown_option',
+			'select_dropdown_option',
+			'select_checkbox_option',
+			'select_cascader_path',
+		].includes(name)
+	}
+
+	function hasObservedDialogForm(observation) {
+		return (Array.isArray(observation?.forms) ? observation.forms : [])
+			.some((form) => isObservedDialogForm(form))
+	}
+
+	function isObservedDialogForm(form) {
+		if (!form || typeof form !== 'object') return false
+		const name = String(form.name || form.id || '').toLowerCase()
+		if (/弹层|dialog|modal|drawer/.test(name)) return true
+		return (Array.isArray(form.fields) ? form.fields : [])
+			.some((field) => isObservedDialogItem(field))
+	}
+
+	function isObservedDialogItem(item) {
+		if (!item || typeof item !== 'object') return false
+		const region = String(item.region || '').toLowerCase()
+		if (region === 'dialog') return true
+		const container = String(item.container || item.formName || '').toLowerCase()
+		return /弹层|dialog|modal|drawer/.test(container)
 	}
 
 	function isSearchWorkflowStep(action, step) {

@@ -44,6 +44,11 @@ async function main() {
 	await assertPlannerPublishesPlanningProgress()
 	await assertPlannerModelClientTraceDiagnostics()
 	await assertPlannerTimeoutWithoutRecoveryEndsGracefully()
+	await assertPlannerTimeoutRecoverySelectsExplicitCascaderPath()
+	await assertPlannerTimeoutRecoveryFillsAssignedTextBeforeCascader()
+	await assertPlannerTimeoutRecoveryCleansDanglingCascaderPunctuation()
+	await assertPlannerTimeoutRecoveryClicksVisibleCascaderCandidate()
+	await assertPlannerTimeoutRecoverySubmitsAfterFormFillRecovery()
 	await assertPlannerHistoryOutcomeGuidesReplanning()
 	await assertPlannerRejectsRepeatedFailedDropdownRequest()
 	await assertPlannerRejectsRepeatedDropdownOpenAfterVisibleOptions()
@@ -51,6 +56,7 @@ async function main() {
 	await assertPlannerTimeoutRecoveryStopsUnresolvedTaskNavigation()
 	await assertPlannerReactContextRound()
 	assertPlannerObservationOmissionHints()
+	assertPlannerObservationIncludesCandidateDiagnostics()
 	await assertPlannerRequestContextPaginationBounds()
 	await assertPlannerInspectIndexCoversFormsOnlyMatch()
 	await assertPlannerOptionsContextIncludesNativeSelectOptions()
@@ -71,16 +77,19 @@ async function main() {
 	await assertPlannerRejectsLocateByVisionWithoutTargetDescription()
 	assertNativeSelectUsesSelectionSemantics()
 	assertInputVerificationUsesResolvedEditableTarget()
+	assertDirectInputModeSkipsHumanizedClick()
 	assertCompositeSelectDoesNotResolveNestedInput()
 	assertReadonlyPickerInputsExposeDropdownSemantics()
 	assertCompositePickerWrappersAreObserved()
 	assertDropdownActionsUseCompositePickerTriggers()
 	assertObserverPreservesNestedNavigationItems()
+	assertObserverKeepsCrudTextActionCandidates()
 	assertVisionHitTestClickableSemantics()
 	assertVisionCandidatesUseSemanticTargetDescription()
 	assertVisionCaptureHidesNaturalClickOverlays()
 	assertPlannerBudgetCoversInternalRounds()
 	await assertAskUserToolTimesOut()
+	await assertInputTextRetriesDirectAfterTransportTimeout()
 	await assertExplicitDropdownToolsAreRegisteredAndRouted()
 	assertLoopGuardBehavior()
 	assertLoopGuardAllowsVerifiedProgressRepeats()
@@ -112,6 +121,7 @@ async function main() {
 	assertNestedSelectionControlStateChangesAreVerified()
 	await assertVerifierRejectsDropdownSelectionWithoutValueChange()
 	await assertVerifierRetriesDropdownSelectionUntilFieldValueChanges()
+	await assertVerifierRejectsDialogCloseAfterFieldSelection()
 	await assertLocateByVisionDelegatesToExecutableCoordinateAction()
 	assertVisionFallbackPreservesCoordinateActionOutcome()
 	assertLocateByVisionRegisteredAsBackgroundTool()
@@ -274,6 +284,25 @@ function assertInputVerificationUsesResolvedEditableTarget() {
 	}
 }
 
+function assertDirectInputModeSkipsHumanizedClick() {
+	const actions = read('naturalclick-extension/content/actions.js')
+	const actionInput = read('naturalclick-extension/content/action-input.js')
+	const getInputModeFn = extractFunctionSource(actions, 'getInputMode')
+	const inputByIndexFn = extractFunctionSource(actionInput, 'inputByIndex')
+	const inputByPointFn = extractFunctionSource(actionInput, 'inputByPoint')
+	if (!/inputMode\s*===\s*'direct'/.test(getInputModeFn)) {
+		throw new Error('content action dispatcher should accept the internal direct input mode')
+	}
+	for (const [name, fn] of [['inputByIndex', inputByIndexFn], ['inputByPoint', inputByPointFn]]) {
+		if (!/inputMode\s*===\s*'direct'/.test(fn) || !/focusDirectInputTarget\(editable\)/.test(fn)) {
+			throw new Error(`${name} should focus and set values directly in direct input mode`)
+		}
+		if (!/await\s+humanLikeClick/.test(fn)) {
+			throw new Error(`${name} should keep human-like clicking for normal input modes`)
+		}
+	}
+}
+
 function assertCompositeSelectDoesNotResolveNestedInput() {
 	const observer = read('naturalclick-extension/content/observer.js')
 	const editableTargetFn = extractFunctionSource(observer, 'resolveEditableTarget')
@@ -388,6 +417,39 @@ function assertObserverPreservesNestedNavigationItems() {
 	}
 	if (!navLikeFn.includes('menuitem') || !navLikeFn.includes('el-menu-item') || !navLikeFn.includes('el-submenu')) {
 		throw new Error('nested navigation preservation should cover common menuitem and Element menu classes')
+	}
+}
+
+function assertObserverKeepsCrudTextActionCandidates() {
+	const observer = read('naturalclick-extension/content/observer.js')
+	const interactiveFn = extractFunctionSource(observer, 'isProbablyInteractive')
+	const collectFn = extractFunctionSource(observer, 'collectInteractiveCandidates')
+	const crudFn = extractFunctionSource(observer, 'isCommonCrudActionText')
+	const diagnosticsFn = extractFunctionSource(observer, 'buildCandidateDiagnostics')
+	if (!interactiveFn.includes('isCommonCrudActionText(text)')) {
+		throw new Error('observer should keep common CRUD text actions even when frameworks render them as plain spans')
+	}
+	if (!interactiveFn.includes('isLikelyTextActionContext(element)')) {
+		throw new Error('plain CRUD text fallback should be scoped by nearby action/table context')
+	}
+	if (!collectFn.includes('isCommonCrudActionText(text)')) {
+		throw new Error('observer candidate collection should scan common CRUD text spans/divs even without button classes')
+	}
+	if (!collectFn.includes('isLikelyTextActionContext(node)')) {
+		throw new Error('observer should not collect arbitrary CRUD-looking title text without action context')
+	}
+	for (const label of ['详情', '删除', '推送', '编辑', '查看', '保存']) {
+		if (!crudFn.includes(label)) {
+			throw new Error(`common CRUD text detection should include ${label}`)
+		}
+	}
+	for (const forbidden of ['新增', '新建', '添加', 'create']) {
+		if (crudFn.includes(forbidden)) {
+			throw new Error(`plain CRUD text fallback should not include create/title text ${forbidden}`)
+		}
+	}
+	if (!diagnosticsFn.includes('unindexedTextActionProbes') || !diagnosticsFn.includes('outerHTML')) {
+		throw new Error('observer should export unindexed text-action diagnostics for copied sessions')
 	}
 }
 
@@ -1013,6 +1075,433 @@ async function assertPlannerTimeoutWithoutRecoveryEndsGracefully() {
 	}
 }
 
+async function assertPlannerTimeoutRecoverySelectsExplicitCascaderPath() {
+	const task = '新建一条记录，名称是晨会，配送区域是华东区，江苏省，南京市。'
+	const observation = {
+		...buildTestObservation(),
+		title: '记录-示例系统',
+		forms: [
+			{
+				id: 'dialog',
+				name: '新增弹层',
+				fields: [
+					{ index: 1, region: 'dialog', fieldType: 'name', kind: 'text', label: '名称', valueState: 'filled:晨会', role: 'textbox' },
+					{ index: 7, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '配送区域', valueState: 'empty', role: 'combobox', selectionControl: 'cascader-parent' },
+					{ index: 8, region: 'dialog', fieldType: 'memo', kind: 'text', label: '备注', valueState: 'empty', role: 'textbox' },
+				],
+			},
+		],
+		actions: [
+			{ index: 7, region: 'dialog', role: 'combobox', label: '配送区域', valueState: 'empty', kind: 'cascader', selectionControl: 'cascader-parent' },
+			{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+		],
+		elements: [],
+		simplifiedDom: [
+			'<field index="7" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="empty">配送区域</field>',
+		],
+	}
+	const events = []
+	const requestBodies = []
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async (_url, init) => {
+			requestBodies.push(JSON.parse(init.body))
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+		},
+		planOptions: {
+			onProgress: (event) => events.push(event),
+		},
+	})
+	assertAction(decision.result, 'select_cascader_path')
+	if (
+		decision.result.action.input.index !== 7 ||
+		decision.result.action.input.workflow !== 'form-fill' ||
+		decision.result.action.input.workflow_step !== 'select_cascader_path_timeout_recovery' ||
+		JSON.stringify(decision.result.action.input.path) !== JSON.stringify(['华东区', '江苏省', '南京市'])
+	) {
+		throw new Error(`timeout recovery should select the explicit cascader path, got ${JSON.stringify(decision.result)}`)
+	}
+	if (requestBodies.length !== 2) {
+		throw new Error(`cascader timeout recovery should run only after full and compact model timeouts, got ${requestBodies.length}`)
+	}
+	if (!events.some((event) => event.stage === 'timeout_recovery')) {
+		throw new Error(`cascader timeout recovery should publish timeout_recovery progress, got ${JSON.stringify(events)}`)
+	}
+
+	const repeatedDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			history: [
+				{
+					action: 'select_cascader_path',
+					input: { index: 7, path: ['华东区', '江苏省', '南京市'] },
+					success: false,
+				},
+			],
+		},
+	})
+	assertAction(repeatedDecision.result, 'done')
+	if (repeatedDecision.result.action.input.success !== false) {
+		throw new Error(`cascader timeout recovery should not repeat a recently failed same path, got ${JSON.stringify(repeatedDecision.result)}`)
+	}
+}
+
+async function assertPlannerTimeoutRecoveryFillsAssignedTextBeforeCascader() {
+	const task = '新建客户，客户公司名称是张三，联系方式是145555555，纳税人识别号是IOOO123456，客户等级是核心，客户所在地是江苏省，南京市，江宁区（'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '客户-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '新增弹层',
+					fields: [
+						{ index: 1, region: 'dialog', fieldType: 'unknown', kind: 'text', label: '客户公司名称', valueState: 'filled:张三', role: 'textbox', type: 'text' },
+						{ index: 2, region: 'dialog', fieldType: 'unknown', kind: 'text', label: '联系方式', valueState: 'filled:145555555', role: 'textbox', type: 'text' },
+						{ index: 3, region: 'dialog', fieldType: 'unknown', kind: 'text', label: '纳税人识别号', valueState: 'empty', role: 'textbox', type: 'text' },
+						{ index: 4, region: 'dialog', fieldType: 'select', kind: 'dropdown', label: '客户等级', valueState: 'empty', role: 'combobox', selectionControl: 'dropdown' },
+						{ index: 7, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '客户所在地', valueState: 'empty', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 4, region: 'dialog', role: 'combobox', label: '客户等级', valueState: 'empty', kind: 'dropdown', selectionControl: 'dropdown' },
+				{ index: 7, region: 'dialog', role: 'combobox', label: '客户所在地', valueState: 'empty', kind: 'cascader', selectionControl: 'cascader-parent' },
+			],
+			elements: [],
+			simplifiedDom: [],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+		},
+	})
+	assertAction(decision.result, 'input_text')
+	if (
+		decision.result.action.input.index !== 3 ||
+		decision.result.action.input.text !== 'IOOO123456' ||
+		decision.result.action.input.workflow !== 'form-fill' ||
+		decision.result.action.input.workflow_step !== 'fill_form_field_timeout_recovery'
+	) {
+		throw new Error(`timeout recovery should fill assigned text fields before cascader recovery, got ${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerTimeoutRecoveryCleansDanglingCascaderPunctuation() {
+	const task = '新建一条记录，名称是晨会，配送区域是江苏省，南京市，江宁区（'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '记录-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '新增弹层',
+					fields: [
+						{ index: 1, region: 'dialog', fieldType: 'name', kind: 'text', label: '名称', valueState: 'filled:晨会', role: 'textbox' },
+						{ index: 7, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '配送区域', valueState: 'empty', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 7, region: 'dialog', role: 'combobox', label: '配送区域', valueState: 'empty', kind: 'cascader', selectionControl: 'cascader-parent' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="7" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="empty">配送区域</field>',
+			],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+		},
+	})
+	assertAction(decision.result, 'select_cascader_path')
+	if (JSON.stringify(decision.result.action.input.path) !== JSON.stringify(['江苏省', '南京市', '江宁区'])) {
+		throw new Error(`timeout recovery should strip dangling punctuation from cascader path parts, got ${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerTimeoutRecoveryClicksVisibleCascaderCandidate() {
+	const task = '新建一条记录，名称是晨会，配送区域是江苏省，南京市，江宁区（'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '记录-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '新增弹层',
+					fields: [
+						{ index: 1, region: 'dialog', fieldType: 'name', kind: 'text', label: '名称', valueState: 'filled:晨会', role: 'textbox' },
+						{ index: 7, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '配送区域', valueState: 'empty', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 31, region: 'popover', role: 'menuitem', label: '栖霞区', valueState: 'unknown', kind: 'cascader', selectionControl: 'cascader-leaf' },
+				{ index: 33, region: 'popover', role: 'menuitem', label: '江宁区', valueState: 'unknown', kind: 'cascader', selectionControl: 'cascader-leaf' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<cascader-option index="33" role="menuitem" region="popover" kind="cascader" control="cascader-leaf">江宁区</cascader-option>',
+			],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			history: [
+				{
+					action: 'select_cascader_path',
+					input: {
+						index: 7,
+						path: ['江苏省', '南京市', '江宁区（'],
+						workflow: 'form-fill',
+						workflow_step: 'select_cascader_path_timeout_recovery',
+						workflow_field_label: '配送区域',
+					},
+					success: false,
+					output: '级联选择失败：未找到第 3 级选项 "江宁区（"。 当前第 3 级可见项: 栖霞区、江宁区。',
+				},
+			],
+		},
+	})
+	assertAction(decision.result, 'click_element_by_index')
+	if (
+		decision.result.action.input.index !== 33 ||
+		decision.result.action.input.workflow !== 'form-fill' ||
+		decision.result.action.input.workflow_step !== 'select_visible_cascader_option_timeout_recovery'
+	) {
+		throw new Error(`timeout recovery should click the visible cleaned cascader candidate, got ${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerTimeoutRecoverySubmitsAfterFormFillRecovery() {
+	const task = '新建一条记录，名称是晨会，配送区域是华东区，江苏省，南京市。'
+	const history = [
+		{
+			action: 'select_cascader_path',
+			input: {
+				index: 7,
+				path: ['华东区', '江苏省', '南京市'],
+				workflow: 'form-fill',
+				workflow_step: 'select_cascader_path_timeout_recovery',
+			},
+			success: true,
+		},
+	]
+	const visibleSubmitDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '记录-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '新增弹层',
+					fields: [
+						{ index: 1, region: 'dialog', fieldType: 'name', kind: 'text', label: '名称', valueState: 'filled:晨会', role: 'textbox' },
+						{ index: 7, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '配送区域', valueState: 'selected:华东区 / 江苏省 / 南京市', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 7, region: 'dialog', role: 'combobox', label: '配送区域', valueState: 'selected:华东区 / 江苏省 / 南京市', kind: 'cascader', selectionControl: 'cascader-parent' },
+				{ index: 18, region: 'dialog', role: 'button', label: '保 存', actionIntent: 'create' },
+				{ index: 19, region: 'dialog', role: 'button', label: '取 消', actionIntent: 'cancel' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<button index="18" role="button" region="dialog" intent="create">保 存</button>',
+			],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			history,
+		},
+	})
+	assertAction(visibleSubmitDecision.result, 'click_element_by_index')
+	if (
+		visibleSubmitDecision.result.action.input.index !== 18 ||
+		visibleSubmitDecision.result.action.input.workflow !== 'form-fill' ||
+		visibleSubmitDecision.result.action.input.workflow_step !== 'submit_form_timeout_recovery'
+	) {
+		throw new Error(`timeout recovery should click the visible submit button after form-fill recovery, got ${JSON.stringify(visibleSubmitDecision.result)}`)
+	}
+
+	const modelFilledSubmitDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '客户-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '新增弹层',
+					fields: [
+						{ index: 1, region: 'dialog', fieldType: 'unknown', kind: 'text', label: '客户公司名称', valueState: 'filled:张三', role: 'textbox' },
+						{ index: 2, region: 'dialog', fieldType: 'unknown', kind: 'text', label: '联系方式', valueState: 'filled:145555555', role: 'textbox' },
+						{ index: 3, region: 'dialog', fieldType: 'unknown', kind: 'text', label: '纳税人识别号', valueState: 'filled:IOOO123456', role: 'textbox' },
+						{ index: 4, region: 'dialog', fieldType: 'select', kind: 'dropdown', label: '客户等级', valueState: 'selected:核心', role: 'combobox', selectionControl: 'dropdown' },
+						{ index: 5, region: 'dialog', fieldType: 'select', kind: 'dropdown', label: '客户性质', valueState: 'selected:IT', role: 'combobox', selectionControl: 'dropdown' },
+						{ index: 6, region: 'dialog', fieldType: 'category', kind: 'dropdown', label: '产品类别', valueState: 'selected:民品件', role: 'combobox', selectionControl: 'dropdown' },
+						{ index: 7, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '客户所在地', valueState: 'selected:江苏省 / 南京市 / 江宁区', role: 'combobox', selectionControl: 'cascader-parent' },
+						{ index: 8, region: 'dialog', fieldType: 'unknown', kind: 'text', label: '详细地址', valueState: 'empty', role: 'textbox' },
+						{ index: 9, region: 'dialog', fieldType: 'select', kind: 'dropdown', label: '税组合', valueState: 'empty', role: 'combobox', selectionControl: 'dropdown' },
+					],
+				},
+			],
+			actions: [
+				{ index: 19, region: 'dialog', role: 'button', label: '保 存', actionIntent: 'create' },
+				{ index: 0, region: 'dialog', role: 'button', label: '保 存', actionIntent: 'create' },
+				{ index: 20, region: 'dialog', role: 'button', label: '取 消', actionIntent: 'cancel' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<button index="19" role="button" region="dialog" intent="create">保 存</button>',
+				'<button index="0" role="button" region="dialog" intent="create">保 存</button>',
+			],
+		},
+		sessionOverrides: {
+			task: '打开页面并新建客户，联系方式是145555555，纳税人识别号是IOOO123456，客户等级是核心，客户性质是IT，产品类别是民品件，客户所在地是江苏省，南京市，江宁区（',
+			latestTask: '打开页面并新建客户，联系方式是145555555，纳税人识别号是IOOO123456，客户等级是核心，客户性质是IT，产品类别是民品件，客户所在地是江苏省，南京市，江宁区（',
+			history: [
+				{ action: 'input_text', input: { index: 1, text: '张三' }, success: true },
+				{ action: 'choose_dropdown_option', input: { index: 6, text: '民品件' }, success: true },
+				{ action: 'select_cascader_path', input: { index: 7, path: ['江苏省', '南京市', '江宁区'] }, success: true },
+			],
+		},
+	})
+	assertAction(modelFilledSubmitDecision.result, 'click_element_by_index')
+	if (
+		![0, 19].includes(Number(modelFilledSubmitDecision.result.action.input.index)) ||
+		modelFilledSubmitDecision.result.action.input.workflow !== 'form-fill' ||
+		modelFilledSubmitDecision.result.action.input.workflow_step !== 'submit_form_timeout_recovery'
+	) {
+		throw new Error(`timeout recovery should submit once model-filled requested fields are satisfied, got ${JSON.stringify(modelFilledSubmitDecision.result)}`)
+	}
+
+	const visualSubmitDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '记录-示例系统',
+			forms: [
+				{
+					id: 'page_form',
+					name: '页面表单',
+					fields: [
+						{ index: 2, region: 'content', fieldType: 'select', kind: 'dropdown', label: '首页个人信息退出登录', valueState: 'selected:首页个人信息退出登录', role: 'combobox', selectionControl: 'dropdown' },
+					],
+				},
+			],
+			actions: [
+				{ index: 28, region: 'sidebar', role: 'button', label: '新 增', actionIntent: 'create' },
+				{ index: 36, region: 'content', role: 'button', label: '展开搜索', actionIntent: 'open_filter' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<button index="28" role="button" region="sidebar" intent="create">新 增</button>',
+			],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			history,
+		},
+	})
+	assertAction(visualSubmitDecision.result, 'locate_by_vision')
+	if (
+		visualSubmitDecision.result.action.input.workflow !== 'form-fill' ||
+		visualSubmitDecision.result.action.input.workflow_step !== 'submit_form_timeout_recovery' ||
+		!/保存|提交|确定/.test(String(visualSubmitDecision.result.action.input.target_description || ''))
+	) {
+		throw new Error(`timeout recovery should fall back to a constrained submit vision target, got ${JSON.stringify(visualSubmitDecision.result)}`)
+	}
+	if (Number(visualSubmitDecision.result.action.input.index) === 28) {
+		throw new Error(`timeout recovery must not click the create-entry button as a submit action, got ${JSON.stringify(visualSubmitDecision.result)}`)
+	}
+
+	const repeatedSubmitDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			forms: [],
+			actions: [
+				{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+			],
+			elements: [],
+			simplifiedDom: [],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			history: [
+				...history,
+				{
+					action: 'locate_by_vision',
+					input: {
+						target_description: '当前打开的表单或弹层底部的保存、提交或确定按钮',
+						workflow: 'form-fill',
+						workflow_step: 'submit_form_timeout_recovery',
+					},
+					success: false,
+				},
+			],
+		},
+	})
+	assertAction(repeatedSubmitDecision.result, 'done')
+	if (repeatedSubmitDecision.result.action.input.success !== false) {
+		throw new Error(`submit timeout recovery should not repeat after a recent failed submit attempt, got ${JSON.stringify(repeatedSubmitDecision.result)}`)
+	}
+}
+
 async function assertPlannerHistoryOutcomeGuidesReplanning() {
 	const requestBodies = []
 	await runPlannerWithFakeModel({
@@ -1490,6 +1979,34 @@ function assertPlannerObservationOmissionHints() {
 	}
 	if (!text.includes('<more_context source="raw_candidates" cursor="8" limit="40" action="request_context"')) {
 		throw new Error(`raw_candidates omission should include an explicit request_context hint, got ${text}`)
+	}
+}
+
+function assertPlannerObservationIncludesCandidateDiagnostics() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/planner-context.js', {})
+	const context = sandbox.NC_BG_PLANNER_CONTEXT
+	const observation = buildTestObservation()
+	observation.candidateDiagnostics = {
+		textActionProbeCount: 3,
+		indexedTextActionProbeCount: 1,
+		unindexedTextActionProbeCount: 2,
+		unindexedTextActionProbes: [
+			{
+				text: '详情',
+				tag: 'span',
+				role: '',
+				cursor: 'auto',
+				actionContext: true,
+				pointer: false,
+				rect: { left: 100, top: 200, width: 34, height: 18 },
+				className: 'table-action',
+				html: '<span class="table-action">详情</span>',
+			},
+		],
+	}
+	const text = context.buildObservationText(observation, { task: '检查按钮识别' })
+	if (!text.includes('<candidate_diagnostics>') || !text.includes('unindexed text="详情"')) {
+		throw new Error(`observation text should include compact candidate diagnostics for copied sessions, got ${text}`)
 	}
 }
 
@@ -2386,6 +2903,65 @@ async function assertAskUserToolTimesOut() {
 	}
 }
 
+async function assertInputTextRetriesDirectAfterTransportTimeout() {
+	const pageActions = []
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/tools.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { ACT: 'NC_ACT', ASK_USER_REQUEST: 'NC_ASK_USER_REQUEST', OBSERVE: 'NC_OBSERVE' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async (_tabId, message) => {
+				pageActions.push(message.action)
+				if (pageActions.length === 1) throw new Error('页面通信超时，执行脚本未响应。')
+				return {
+					success: true,
+					message: 'direct ok',
+					meta: { outcome: { kind: 'value_changed', progress: true } },
+				}
+			},
+			normalizeUrl: (url) => url,
+			createTabAndWaitLoaded: async () => ({ id: 1 }),
+			sendRuntimeMessage: async () => ({ ok: true, answer: 'ok' }),
+		},
+	})
+	const result = await sandbox.NC_BG_TOOLS.executeTool(
+		{ currentTabId: 9, config: { inputMode: 'realistic' } },
+		{ name: 'input_text', input: { index: 1, text: '张三' } }
+	)
+	if (!result.success || !String(result.message || '').includes('直接输入重试成功')) {
+		throw new Error(`input_text should recover with one direct retry after transport timeout, got ${JSON.stringify(result)}`)
+	}
+	if (pageActions.length !== 2) {
+		throw new Error(`input_text should run exactly two page actions after retry, got ${pageActions.length}`)
+	}
+	if (pageActions[0]?.meta?.inputMode !== 'realistic' || pageActions[1]?.meta?.inputMode !== 'direct') {
+		throw new Error(`input_text retry should switch from realistic to direct mode, got ${JSON.stringify(pageActions)}`)
+	}
+
+	const clickActions = []
+	const clickSandbox = loadBackgroundModule('naturalclick-extension/background/tools.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { ACT: 'NC_ACT', ASK_USER_REQUEST: 'NC_ASK_USER_REQUEST', OBSERVE: 'NC_OBSERVE' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async (_tabId, message) => {
+				clickActions.push(message.action)
+				throw new Error('页面通信超时，执行脚本未响应。')
+			},
+			normalizeUrl: (url) => url,
+			createTabAndWaitLoaded: async () => ({ id: 1 }),
+			sendRuntimeMessage: async () => ({ ok: true, answer: 'ok' }),
+		},
+	})
+	const clickResult = await clickSandbox.NC_BG_TOOLS.executeTool(
+		{ currentTabId: 9, config: { inputMode: 'realistic' } },
+		{ name: 'click_element_by_index', input: { index: 25 } }
+	)
+	if (clickResult.success || clickActions.length !== 1) {
+		throw new Error(`click actions should not be retried after transport timeout, got ${JSON.stringify({ clickResult, clickActions })}`)
+	}
+}
+
 async function assertExplicitDropdownToolsAreRegisteredAndRouted() {
 	const pageActions = []
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/tools.js', {
@@ -2496,6 +3072,7 @@ async function runPlannerWithFakeModel({ fetchImpl, observation, sessionOverride
 				'- open_dropdown: 展开指定 index 的下拉框并返回真实可见候选 input={index:number|required}',
 				'- choose_dropdown_option: 在指定字段的已知候选中按真实可见文本选择下拉选项 input={index:number|required,text:string|required,label:string|optional}',
 				'- select_dropdown_option: 按文本选择下拉选项；只提供 index 时展开下拉框 input={index:number|optional,text:string|optional}',
+				'- select_cascader_path: 按路径逐级选择级联选项 input={path:string[]|required,index:number|optional}',
 				'- locate_by_vision: 按语义描述视觉定位目标并执行输入或点击 input={target_description:string|required,index:number|optional,text:string|optional}',
 			],
 		},
@@ -7247,8 +7824,11 @@ function assertActionsReturnStructuredOutcomes() {
 		throw new Error('cascader path selection should dismiss the floating panel after selecting the leaf option')
 	}
 	const dismissFn = extractFunctionSource(actionSelect, 'dismissSelectionPopup')
-	if (!dismissFn.includes('Escape') || !dismissFn.includes('dispatchPointClick')) {
-		throw new Error('cascader dropdown dismissal should use Escape plus a safe blank click fallback')
+	if (!dismissFn.includes('isDialogAnchoredSelection') || !dismissFn.includes('blurSelectionAnchor')) {
+		throw new Error('cascader popup dismissal should avoid Escape/blank clicks for dialog-anchored fields')
+	}
+	if (!dismissFn.includes('dispatchEscape') || !dismissFn.includes('dispatchPointClick')) {
+		throw new Error('non-dialog cascader dropdown dismissal should keep Escape plus a safe blank click fallback')
 	}
 	if (!actionSelect.includes('function openCascaderField') || !/openCascaderField\(field,\s*inputMode\)/.test(cascaderFn) || !/resolveDropdownTrigger\(field\)/.test(actionSelect)) {
 		throw new Error('cascader path selection should explicitly open the field trigger before searching menu levels')
@@ -7733,6 +8313,67 @@ async function assertVerifierRetriesDropdownSelectionUntilFieldValueChanges() {
 	}
 	if (observations < 2) {
 		throw new Error(`dropdown selection verification stopped before the value-changing observation, observations=${observations}`)
+	}
+}
+
+async function assertVerifierRejectsDialogCloseAfterFieldSelection() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { VERIFY_INPUT: 'NC_VERIFY_INPUT', VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async () => ({ success: false, matched: false }),
+		},
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					url: 'http://example.test/customer',
+					content: 'customer-list-page',
+					forms: [
+						{
+							id: 'page_form',
+							name: '页面表单',
+							fields: [
+								{ index: 2, region: 'content', label: '首页个人信息退出登录', valueState: 'selected:首页个人信息退出登录' },
+							],
+						},
+					],
+					actions: [
+						{ index: 25, region: 'content', label: '新 增', role: 'button' },
+					],
+				},
+			}),
+		},
+	})
+	const result = await sandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{ name: 'select_cascader_path', input: { index: 8, path: ['江苏省', '南京市', '江宁区'] } },
+		{
+			url: 'http://example.test/customer',
+			content: 'dialog-open',
+			forms: [
+				{
+					id: 'container_1oa9ete',
+					name: '弹层',
+					fields: [
+						{ index: 8, region: 'dialog', label: '客户所在地', valueState: 'empty', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+		},
+		{
+			success: true,
+			message: '已按路径选择级联选项：江苏省 > 南京市 > 江宁区。',
+			meta: {
+				before: { value: '', text: '请选择客户所在地', childValue: '', expanded: false },
+				after: { value: '', text: '江苏省 / 南京市 / 江宁区', childValue: '江苏省 / 南京市 / 江宁区', expanded: false },
+				outcome: { kind: 'value_changed', progress: true },
+			},
+		}
+	)
+	if (result.ok || !String(result.reason || '').includes('弹层消失')) {
+		throw new Error(`field selection that closes the dialog should fail verification, got ${JSON.stringify(result)}`)
 	}
 }
 
@@ -8271,6 +8912,9 @@ function assertModelReasoningIsSurfaced() {
 	}
 	if (!sidepanel.includes('getModelErrorSummary') || !sidepanel.includes('lastModelError') || !sidepanel.includes('模型错误:')) {
 		throw new Error('sidepanel should surface model request errors directly instead of hiding them only in raw IO')
+	}
+	if (!sidepanel.includes('extractCandidateDiagnostics') || !sidepanel.includes('candidateDiagnostics')) {
+		throw new Error('sidepanel session export diagnostics should include candidate diagnostics for missed UI recognition')
 	}
 	if (!read('naturalclick-extension/sidepanel.html').includes('sp-model-error')) {
 		throw new Error('sidepanel should style direct model error summaries')

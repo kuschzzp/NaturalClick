@@ -44,6 +44,7 @@
 			const options = buildOptionCandidates(elements)
 			const popups = buildPopupCandidates(elements)
 			const panels = buildPanelCandidates(elements)
+			const candidateDiagnostics = buildCandidateDiagnostics(indexedElements)
 			const rawCandidates = lines
 			const treeCandidates = buildDomTree(elements)
 			const simplifiedDom = buildSimplifiedDom(elements)
@@ -68,6 +69,7 @@
 				options,
 				popups,
 				panels,
+				candidateDiagnostics,
 				elements,
 				treeCandidates,
 				simplifiedDom,
@@ -78,6 +80,7 @@
 					options,
 					popups,
 					panels,
+					candidateDiagnostics,
 					treeCandidates,
 					simplifiedDom,
 					rawCandidates,
@@ -226,8 +229,14 @@
 		for (const node of extras) {
 			if (!(node instanceof HTMLElement)) continue
 			const cls = String(node.className || '')
+			const text = getElementText(node)
 			const maybeButtonLikeClass = /(btn|button|login|register|signup|signin|forgot|submit|dropdown|select|cascader|picker|date-editor|input--suffix|checkbox|radio)/i.test(cls)
-			if (maybeButtonLikeClass || hasPointerCursor(node) || hasInlineEventHandler(node)) {
+			if (
+				maybeButtonLikeClass ||
+				hasPointerCursor(node) ||
+				hasInlineEventHandler(node) ||
+				(isCommonCrudActionText(text) && isLikelyTextActionContext(node))
+			) {
 				addCandidate(node)
 			}
 		}
@@ -280,6 +289,7 @@
 		const rect = element.getBoundingClientRect()
 		const area = Math.max(0, rect.width) * Math.max(0, rect.height)
 		const maxArea = window.innerWidth * window.innerHeight * 0.26
+		if (isCommonCrudActionText(text) && isLikelyTextActionContext(element) && area > 8 && area <= 16000 && element.childElementCount <= 4) return true
 		const optionLikeByClass = /(el-select-dropdown__item|el-option|el-cascader-node|el-checkbox|el-radio|el-tree-node__content|dropdown-item|select-option|cascader)/i.test(cls)
 		if (optionLikeByClass && area > 8 && area <= maxArea) return true
 		const buttonLikeByClass = /(btn|button|login|register|signup|signin|forgot|submit)/i.test(cls)
@@ -805,6 +815,110 @@
 		return /^\d+\s*\/\s*\d+$/.test(normalized)
 	}
 
+	function isCommonCrudActionText(text) {
+		const value = normalizeCompactText(text)
+		if (!value || value.length > 18) return false
+		return /^(详情|明细|查看|预览|编辑|修改|删除|移除|推送|指派|释放|分配|启用|禁用|保存|提交|确定|确认|取消|关闭|导入|导出|上传|下载|复制|detail|details|view|preview|edit|modify|delete|remove|push|assign|release|enable|disable|save|submit|confirm|ok|cancel|close|import|export|upload|download|copy)$/.test(value)
+	}
+
+	function isActionProbeText(text) {
+		const value = normalizeCompactText(text)
+		if (!value || value.length > 18) return false
+		return isCommonCrudActionText(value) || /^(新增|新建|添加|创建|add|new|create)$/.test(value)
+	}
+
+	function isLikelyTextActionContext(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const tag = element.tagName.toLowerCase()
+		const role = String(element.getAttribute('role') || '').toLowerCase()
+		if (['button', 'a'].includes(tag) || ['button', 'link', 'menuitem'].includes(role)) return true
+		if (hasPointerCursor(element) || hasInlineEventHandler(element)) return true
+		const clsText = [
+			element.className || '',
+			element.parentElement?.className || '',
+			element.closest?.('[class]')?.className || '',
+		].join(' ')
+		if (/(operation|operate|action|actions|toolbar|tools|crud|btn|button|link|table|cell|column)/i.test(clsText)) return true
+		const tableCell = element.closest?.('td,th,.el-table__cell,.ant-table-cell,.vxe-cell,.ag-cell,[class*="table-cell"],[class*="table__cell"]')
+		return tableCell instanceof HTMLElement
+	}
+
+	function buildCandidateDiagnostics(indexedElements) {
+		const indexedSet = new Set((Array.isArray(indexedElements) ? indexedElements : [])
+			.map((item) => item?.element)
+			.filter(Boolean))
+		const probes = []
+		const seen = new Set()
+		const selector = [
+			'button',
+			'a',
+			'span',
+			'div',
+			'i',
+			'svg',
+			'[role="button"]',
+			'[role="link"]',
+			'[role="menuitem"]',
+			'[onclick]',
+			'[tabindex]',
+		].join(',')
+		for (const node of Array.from(document.querySelectorAll(selector)).slice(0, 900)) {
+			if (!(node instanceof HTMLElement)) continue
+			if (node.closest('#naturalclick-right-dock-host')) continue
+			if (node.hasAttribute('data-naturalclick-ignore')) continue
+			const text = getElementText(node)
+			if (!isActionProbeText(text)) continue
+			const normalized = normalizeInteractiveElement(node)
+			const target = normalized instanceof HTMLElement ? normalized : node
+			if (!isElementVisibleForDiagnostics(target)) continue
+			const key = `${target.tagName}:${getElementText(target)}:${getDomPath(target)}`
+			if (seen.has(key)) continue
+			seen.add(key)
+			const indexed = indexedSet.has(target) || indexedSet.has(node) || Array.from(indexedSet).some((item) =>
+				item instanceof HTMLElement && (item.contains(target) || target.contains(item))
+			)
+			const rect = target.getBoundingClientRect()
+			const style = window.getComputedStyle(target)
+			probes.push({
+				text: shortText(getElementText(target), 28),
+				sourceText: shortText(text, 28),
+				tag: target.tagName.toLowerCase(),
+				sourceTag: node.tagName.toLowerCase(),
+				role: shortText(target.getAttribute('role') || '', 24),
+				className: shortText(String(target.className || '').replace(/\s+/g, ' '), 80),
+				parentClassName: shortText(String(target.parentElement?.className || '').replace(/\s+/g, ' '), 80),
+				cursor: String(style.cursor || ''),
+				actionContext: isLikelyTextActionContext(target),
+				pointer: hasPointerCursor(target),
+				inlineHandler: hasInlineEventHandler(target),
+				indexed,
+				rect: {
+					left: Math.round(rect.left),
+					top: Math.round(rect.top),
+					width: Math.round(rect.width),
+					height: Math.round(rect.height),
+				},
+				html: shortText(String(target.outerHTML || '').replace(/\s+/g, ' '), 220),
+			})
+		}
+		const unindexed = probes.filter((item) => !item.indexed)
+		return {
+			textActionProbeCount: probes.length,
+			indexedTextActionProbeCount: probes.length - unindexed.length,
+			unindexedTextActionProbeCount: unindexed.length,
+			unindexedTextActionProbes: unindexed.slice(0, 30),
+		}
+	}
+
+	function isElementVisibleForDiagnostics(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const rect = element.getBoundingClientRect()
+		if (rect.width < 2 || rect.height < 2) return false
+		if (rect.bottom <= 0 || rect.right <= 0 || rect.left >= window.innerWidth || rect.top >= window.innerHeight) return false
+		const style = window.getComputedStyle(element)
+		return style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0'
+	}
+
 	function isTextInputControl(element) {
 		return (
 			element instanceof HTMLTextAreaElement ||
@@ -1000,7 +1114,7 @@
 		return `[${item.index}]<${item.tag} ${attrs.join(' ')}>${shortText(item.text, 80)}</${item.tag}>`
 	}
 
-	function formatObservationText({ forms, actions, options, popups, panels, treeCandidates, simplifiedDom, rawCandidates }) {
+	function formatObservationText({ forms, actions, options, popups, panels, candidateDiagnostics, treeCandidates, simplifiedDom, rawCandidates }) {
 		const sections = []
 		if (Array.isArray(panels) && panels.length) {
 			sections.push('<panels>')
@@ -1044,6 +1158,9 @@
 			}
 			sections.push('</actions>')
 		}
+		if (candidateDiagnostics && Number(candidateDiagnostics.textActionProbeCount || 0) > 0) {
+			sections.push(formatCandidateDiagnostics(candidateDiagnostics))
+		}
 		if (Array.isArray(treeCandidates) && treeCandidates.length) {
 			sections.push('<dom_tree>')
 			sections.push(...treeCandidates.slice(0, 80).map((item) => item.line))
@@ -1061,6 +1178,21 @@
 		}
 		sections.push('</raw_candidates>')
 		return sections.join('\n') || '(no interactive elements found)'
+	}
+
+	function formatCandidateDiagnostics(candidateDiagnostics) {
+		const lines = [
+			'<candidate_diagnostics>',
+			`text_action_probes total=${Number(candidateDiagnostics.textActionProbeCount || 0)} indexed=${Number(candidateDiagnostics.indexedTextActionProbeCount || 0)} unindexed=${Number(candidateDiagnostics.unindexedTextActionProbeCount || 0)}`,
+		]
+		for (const probe of (Array.isArray(candidateDiagnostics.unindexedTextActionProbes) ? candidateDiagnostics.unindexedTextActionProbes : []).slice(0, 12)) {
+			const rect = probe.rect || {}
+			lines.push(
+				`  unindexed text="${shortText(probe.text || '', 28)}" tag=${probe.tag || '-'} role=${probe.role || '-'} cursor=${probe.cursor || '-'} context=${probe.actionContext ? 'true' : 'false'} pointer=${probe.pointer ? 'true' : 'false'} rect=${Number(rect.left) || 0},${Number(rect.top) || 0},${Number(rect.width) || 0}x${Number(rect.height) || 0} class="${shortText(probe.className || '', 60)}" html="${shortText(probe.html || '', 140)}"`
+			)
+		}
+		lines.push('</candidate_diagnostics>')
+		return lines.join('\n')
 	}
 
 	function formatOptionLine(item, kind) {

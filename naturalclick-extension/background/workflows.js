@@ -19,6 +19,12 @@
 		finish_search_fields: 'search-fields',
 		navigate_to_task_target: 'task-navigation',
 		reveal_navigation_options: 'task-navigation',
+		fill_form_field_timeout_recovery: 'form-fill',
+		open_form_dropdown_timeout_recovery: 'form-fill',
+		choose_form_dropdown_timeout_recovery: 'form-fill',
+		select_cascader_path_timeout_recovery: 'form-fill',
+		select_visible_cascader_option_timeout_recovery: 'form-fill',
+		submit_form_timeout_recovery: 'form-fill',
 	}
 
 	const PRE_MODEL_WORKFLOWS = [
@@ -49,6 +55,14 @@
 			name: 'task-navigation',
 			run: (session, observation) =>
 				deriveUnresolvedNavigationTimeoutDecision(session, observation),
+		},
+		{
+			name: 'form-fill',
+			run: (session, observation) =>
+				deriveVisibleCascaderOptionTimeoutDecision(session, observation) ||
+				deriveFormAssignedFieldTimeoutDecision(session, observation) ||
+				deriveFormCascaderTimeoutDecision(session, observation) ||
+				deriveFormSubmitTimeoutDecision(session, observation),
 		},
 	]
 
@@ -145,6 +159,311 @@
 				},
 			},
 		}
+	}
+
+	function deriveFormCascaderTimeoutDecision(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!taskText) return null
+		const state = syncNavigationState(session)
+		const unresolved = getExpectedNavigationKeys(session, state)
+			.filter((key) => !isNavigationTargetReached(observation, key))
+		if (unresolved.length) return null
+		const formItems = collectObservedFormControlItems(observation)
+		const labels = formItems
+			.map((item) => normalizeFormFieldLabel(getObservedItemLabel(item)))
+			.filter(Boolean)
+		const matches = []
+		for (const field of formItems) {
+			if (!isBusinessFormField(field)) continue
+			if (!isCascaderFormField(field)) continue
+			if (!isEmptyFormField(field)) continue
+			const index = Number(field.index)
+			if (!Number.isFinite(index)) continue
+			const label = normalizeFormFieldLabel(getObservedItemLabel(field))
+			if (!label) continue
+			const segment = extractTaskAssignmentSegment(taskText, label, labels)
+			const path = parseCascaderPathSegment(segment)
+			if (path.length < 2) continue
+			if (hasRecentCascaderPathAttempt(session, index, path)) continue
+			matches.push({ field, index, label, path })
+		}
+		if (matches.length !== 1) return null
+		const match = matches[0]
+		return {
+			evaluation_previous_goal: '模型规划超时，但当前表单中有一个与任务文字明确匹配的空级联字段。',
+			memory: `使用通用表单恢复策略，仅根据字段标签 "${match.label}" 与任务中的层级值继续一次级联选择。`,
+			thought: '模型超时后，任务文本和当前表单字段能唯一确定下一步级联路径，先执行受限恢复动作。',
+			next_goal: `选择${match.label}`,
+			action: {
+				name: 'select_cascader_path',
+				input: {
+					index: match.index,
+					path: match.path,
+					workflow_step: 'select_cascader_path_timeout_recovery',
+					workflow_field_label: match.label,
+				},
+			},
+		}
+	}
+
+	function deriveVisibleCascaderOptionTimeoutDecision(session, observation) {
+		const failed = getRecentFailedCascaderRecovery(session)
+		if (!failed) return null
+		const requested = cleanCascaderPathPart(
+			getOutcomeRequestedText(failed) ||
+			getLastCascaderPathPart(failed?.input?.path)
+		)
+		if (!requested) return null
+		const candidates = collectVisibleCascaderOptionItems(observation)
+			.filter((item) => labelsMatchAssignedValue(getObservedItemLabel(item), requested))
+			.filter((item) => !hasRecentVisibleCascaderOptionAttempt(session, item, requested))
+		if (candidates.length !== 1) return null
+		const candidate = candidates[0]
+		return {
+			evaluation_previous_goal: `上一次级联路径选择失败，但当前级联菜单中已经出现与请求值匹配的真实候选 "${requested}"。`,
+			memory: '使用通用表单恢复策略，优先点击已展开级联菜单里的可见叶子候选，避免因任务文本尾部标点导致再次失败。',
+			thought: '级联候选已可见，且候选文本与清洗后的目标值唯一匹配，直接选择该候选。',
+			next_goal: `选择级联候选：${requested}`,
+			action: {
+				name: 'click_element_by_index',
+				input: {
+					index: Number(candidate.index),
+					target_label: getObservedItemLabel(candidate) || requested,
+					workflow_step: 'select_visible_cascader_option_timeout_recovery',
+					workflow_field_label: String(failed?.input?.workflow_field_label || ''),
+					workflow_requested_text: requested,
+				},
+			},
+		}
+	}
+
+	function deriveFormAssignedFieldTimeoutDecision(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!taskText) return null
+		const state = syncNavigationState(session)
+		const unresolved = getExpectedNavigationKeys(session, state)
+			.filter((key) => !isNavigationTargetReached(observation, key))
+		if (unresolved.length) return null
+		const formItems = collectObservedFormControlItems(observation)
+		const labels = formItems
+			.map((item) => normalizeFormFieldLabel(getObservedItemLabel(item)))
+			.filter(Boolean)
+		const matches = []
+		for (const field of formItems) {
+			if (!isBusinessFormField(field)) continue
+			if (!isEmptyFormField(field)) continue
+			if (isCascaderFormField(field)) continue
+			const index = Number(field.index)
+			if (!Number.isFinite(index)) continue
+			const label = normalizeFormFieldLabel(getObservedItemLabel(field))
+			if (!label) continue
+			const value = parseScalarAssignmentSegment(extractTaskAssignmentSegment(taskText, label, labels))
+			if (!value) continue
+			if (isPlainTextFormField(field)) {
+				if (hasRecentFormFieldRecoveryAttempt(session, index, 'input_text', value)) continue
+				matches.push({
+					field,
+					index,
+					label,
+					value,
+					priority: getFormFieldOrderScore(field),
+					decision: buildTextFormFieldRecoveryDecision(index, label, value),
+				})
+				continue
+			}
+			if (isDropdownFormField(field)) {
+				const visible = findVisibleOptionLabelForValue(observation, value)
+				if (visible && !hasRecentFormFieldRecoveryAttempt(session, index, 'choose_dropdown_option', visible)) {
+					matches.push({
+						field,
+						index,
+						label,
+						value,
+						priority: getFormFieldOrderScore(field),
+						decision: buildChooseDropdownRecoveryDecision(index, label, visible),
+					})
+					continue
+				}
+				if (!hasRecentFormFieldRecoveryAttempt(session, index, 'open_dropdown', '')) {
+					matches.push({
+						field,
+						index,
+						label,
+						value,
+						priority: getFormFieldOrderScore(field) + 0.1,
+						decision: buildOpenDropdownRecoveryDecision(index, label, value),
+					})
+				}
+			}
+		}
+		if (!matches.length) return null
+		matches.sort((a, b) => a.priority - b.priority)
+		return matches[0].decision
+	}
+
+	function buildTextFormFieldRecoveryDecision(index, label, value) {
+		return {
+			evaluation_previous_goal: `模型规划超时，但当前表单字段 "${label}" 为空，且任务文本明确给出了取值。`,
+			memory: `使用通用表单恢复策略，按表单顺序填写空字段 "${label}"。`,
+			thought: '模型超时后，任务文字和当前表单字段能唯一确定下一步文本输入。',
+			next_goal: `填写${label}`,
+			action: {
+				name: 'input_text',
+				input: {
+					index,
+					text: value,
+					workflow_step: 'fill_form_field_timeout_recovery',
+					workflow_field_label: label,
+				},
+			},
+		}
+	}
+
+	function buildOpenDropdownRecoveryDecision(index, label, value) {
+		return {
+			evaluation_previous_goal: `模型规划超时，但当前表单字段 "${label}" 为空，且任务文本明确给出了目标值 "${value}"。`,
+			memory: `使用通用表单恢复策略，先展开 "${label}" 下拉框以获取真实候选。`,
+			thought: '选择类字段需要先获得页面真实候选，避免臆造选项。',
+			next_goal: `展开${label}下拉框`,
+			action: {
+				name: 'open_dropdown',
+				input: {
+					index,
+					workflow_step: 'open_form_dropdown_timeout_recovery',
+					workflow_field_label: label,
+					workflow_requested_text: value,
+				},
+			},
+		}
+	}
+
+	function buildChooseDropdownRecoveryDecision(index, label, value) {
+		return {
+			evaluation_previous_goal: `模型规划超时，但 "${label}" 的目标候选 "${value}" 已在当前页面可见。`,
+			memory: `使用通用表单恢复策略，选择字段 "${label}" 的真实可见候选。`,
+			thought: '下拉候选已经可见且与任务目标唯一匹配，直接选择该候选。',
+			next_goal: `选择${label}为${value}`,
+			action: {
+				name: 'choose_dropdown_option',
+				input: {
+					index,
+					text: value,
+					workflow_step: 'choose_form_dropdown_timeout_recovery',
+					workflow_field_label: label,
+				},
+			},
+		}
+	}
+
+	function deriveFormSubmitTimeoutDecision(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!taskText || !isCreateTask(taskText)) return null
+		const state = syncNavigationState(session)
+		const unresolved = getExpectedNavigationKeys(session, state)
+			.filter((key) => !isNavigationTargetReached(observation, key))
+		if (unresolved.length) return null
+		const assignedFieldsSatisfied = areTaskAssignedFormFieldsSatisfied(session, observation)
+		if (!hasRecentSuccessfulFormFillRecovery(session) && !assignedFieldsSatisfied) return null
+		if (hasRecentFormSubmitRecoveryAttempt(session)) return null
+		const candidates = collectFormSubmitCandidateItems(observation)
+			.filter(isFormSubmitCandidateItem)
+			.sort(scoreFormSubmitCandidate)
+		const candidate = chooseFormSubmitCandidate(candidates)
+		if (candidate) {
+			const label = normalizeFormFieldLabel(getObservedItemLabel(candidate)) || '提交按钮'
+			return {
+				evaluation_previous_goal: assignedFieldsSatisfied
+					? '模型规划超时，但任务明确要求的表单字段已经填写完毕，且当前观察中存在稳定的通用提交按钮。'
+					: '模型规划超时，但最近一次受限表单恢复已经完成字段选择，且当前观察中存在稳定的通用提交按钮。',
+				memory: `使用通用表单恢复策略，仅点击当前业务表单中的 "${label}" 按钮提交一次。`,
+				thought: '字段已满足任务要求且模型再次超时，当前能确定保存/提交按钮，执行一次受限提交动作。',
+				next_goal: '提交当前表单',
+				action: {
+					name: 'click_element_by_index',
+					input: {
+						index: Number(candidate.index),
+						workflow_step: 'submit_form_timeout_recovery',
+						workflow_submit_label: label,
+					},
+				},
+			}
+		}
+		if (candidates.length > 1) return null
+		return {
+			evaluation_previous_goal: '模型规划超时，最近一次受限表单恢复已完成字段选择，但当前 DOM 观察没有稳定的提交按钮索引。',
+			memory: '使用通用表单恢复策略，请视觉定位当前打开表单或弹层底部的保存/提交按钮；若不存在应失败而不是点击页面入口。',
+			thought: '字段已由恢复动作补完，但保存按钮没有稳定索引，改用受限视觉定位查找当前表单的提交按钮。',
+			next_goal: '定位并提交当前表单',
+			action: {
+				name: 'locate_by_vision',
+				input: {
+					target_description: '当前打开的表单或弹层底部的保存、提交或确定按钮',
+					action_name: 'click_element_by_index',
+					workflow_step: 'submit_form_timeout_recovery',
+					workflow_submit_label: '保存/提交/确定',
+				},
+			},
+		}
+	}
+
+	function areTaskAssignedFormFieldsSatisfied(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!taskText) return false
+		const formItems = collectObservedFormControlItems(observation)
+			.filter(isBusinessFormField)
+		const labels = formItems
+			.map((item) => normalizeFormFieldLabel(getObservedItemLabel(item)))
+			.filter(Boolean)
+		let matchedCount = 0
+		for (const field of formItems) {
+			const label = normalizeFormFieldLabel(getObservedItemLabel(field))
+			if (!label) continue
+			const segment = extractTaskAssignmentSegment(taskText, label, labels)
+			if (!segment) continue
+			if (isCascaderFormField(field)) {
+				const path = parseCascaderPathSegment(segment)
+				if (path.length < 2) continue
+				matchedCount += 1
+				if (isEmptyFormField(field) || !observedFieldValueMatchesCascaderPath(field, path)) return false
+				continue
+			}
+			const value = parseScalarAssignmentSegment(segment)
+			if (!value) continue
+			matchedCount += 1
+			if (isEmptyFormField(field) || !observedFieldValueMatchesScalar(field, value)) return false
+		}
+		return matchedCount > 0
+	}
+
+	function observedFieldValueMatchesScalar(field, expected) {
+		const actual = getObservedFormFieldValueText(field)
+		if (!actual) return false
+		return labelsMatchAssignedValue(actual, expected)
+	}
+
+	function observedFieldValueMatchesCascaderPath(field, path) {
+		const actual = getNavigationKey(getObservedFormFieldValueText(field))
+		if (!actual) return false
+		return (Array.isArray(path) ? path : [])
+			.map((part) => getNavigationKey(cleanCascaderPathPart(part)))
+			.filter(Boolean)
+			.every((part) => actual.includes(part))
+	}
+
+	function getObservedFormFieldValueText(item) {
+		for (const raw of [
+			item?.valueState,
+			item?.value,
+			item?.selected,
+			item?.childValue,
+			item?.childSelected,
+			item?.text,
+		]) {
+			const text = String(raw || '').trim()
+			if (!text || /^(unknown|empty|-|null|undefined)$/i.test(text)) continue
+			return cleanAssignmentValue(text.replace(/^(filled|selected|checked)\s*:\s*/i, ''))
+		}
+		return ''
 	}
 
 	function deriveTaskNavigationWorkflowDecision(session, observation) {
@@ -633,6 +952,447 @@
 
 	function isGenericCreateEntityHint(value) {
 		return /^(一个|一条|新的|记录|数据|信息|表单|item|record|data)$/i.test(String(value || '').trim())
+	}
+
+	function collectFormSubmitCandidateItems(observation) {
+		const items = [
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...collectTextNavigationItems(observation),
+		]
+		const seen = new Set()
+		return items.filter((item) => {
+			const index = Number(item?.index)
+			if (!Number.isFinite(index)) return false
+			const label = normalizeFormFieldLabel(getObservedItemLabel(item))
+			const key = `${index}:${label}:${getNavigationKey(item?.region)}`
+			if (seen.has(key)) return false
+			seen.add(key)
+			return true
+		})
+	}
+
+	function isFormSubmitCandidateItem(item) {
+		const index = Number(item?.index)
+		if (!Number.isFinite(index)) return false
+		const region = getNavigationKey(item?.region)
+		if (region && !/^(content|dialog|popover)$/.test(region)) return false
+		if (isSelectedOrActiveObservedItem(item)) return false
+		const role = getNavigationKey(item?.role)
+		if (role && !/^(button|link)$/.test(role)) return false
+		const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)
+		if (/(dropdown|select|checkbox|radio|switch|cascader|textbox|combobox|listbox)/i.test(control)) return false
+		const label = getNavigationKey(getObservedItemLabel(item))
+		if (!label || isKnownNonSubmitButtonLabel(label)) return false
+		const intent = getNavigationKey(item?.actionIntent || item?.intent)
+		const target = getNavigationKey(item?.navigationTarget || item?.target || '')
+		if (/^(保存|提交|确定|完成|确认|save|submit|confirm|ok|done)$/.test(label)) return true
+		if (/(保存并|保存后|提交并|确认提交|saveandsubmit|saveandclose)/i.test(label)) return true
+		if (/(submit|save|confirm|ok|done)/i.test(`${intent} ${target}`) && /(保存|提交|确定|完成|确认|save|submit|confirm|ok|done)/i.test(label)) {
+			return true
+		}
+		return false
+	}
+
+	function isKnownNonSubmitButtonLabel(label) {
+		return /^(新增|新建|创建|添加|增加|删除|移除|取消|关闭|返回|重置|搜索|查询|展开|收起|更多|导出|导入|上传|下载|刷新|详情|明细|推送|编辑|add|create|new|delete|remove|cancel|close|back|reset|search|query|expand|collapse|more|export|import|upload|download|refresh|detail|edit)$/.test(String(label || ''))
+	}
+
+	function chooseFormSubmitCandidate(candidates) {
+		const list = Array.isArray(candidates) ? candidates : []
+		if (list.length <= 1) return list[0] || null
+		const labels = [...new Set(list.map((item) => normalizeFormFieldLabel(getObservedItemLabel(item))).filter(Boolean))]
+		const regions = [...new Set(list.map((item) => getNavigationKey(item?.region)).filter(Boolean))]
+		if (
+			labels.length === 1 &&
+			regions.length === 1 &&
+			/^(保存|提交|确定|完成|确认|save|submit|confirm|ok|done)$/i.test(labels[0])
+		) {
+			return list[0]
+		}
+		return null
+	}
+
+	function scoreFormSubmitCandidate(a, b) {
+		return getFormSubmitCandidateScore(a) - getFormSubmitCandidateScore(b)
+	}
+
+	function getFormSubmitCandidateScore(item) {
+		const label = getNavigationKey(getObservedItemLabel(item))
+		const intent = getNavigationKey(item?.actionIntent || item?.intent)
+		const region = getNavigationKey(item?.region)
+		let score = 0
+		if (region === 'dialog') score -= 30
+		else if (region === 'popover') score -= 20
+		else if (region === 'content') score -= 10
+		if (/^(保存|提交|确定|完成|确认|save|submit|confirm|ok|done)$/.test(label)) score -= 10
+		if (/(submit|save|confirm|ok|done)/i.test(intent)) score -= 5
+		const rect = item?.rect || {}
+		return score * 1000000 + (Number(rect.top) || 0) * 1000 + (Number(rect.left) || 0)
+	}
+
+	function hasRecentSuccessfulFormFillRecovery(session) {
+		return getRecentHistoryItems(session, 6).some((item) => {
+			if (item?.success === false) return false
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			const input = item?.input || {}
+			const step = String(input.workflow_step || '')
+			const workflow = String(input.workflow || '')
+			if (workflow && workflow !== 'form-fill') return false
+			if (action === 'select_cascader_path' && step === 'select_cascader_path_timeout_recovery') return true
+			return action === 'click_element_by_index' && step === 'select_visible_cascader_option_timeout_recovery'
+		})
+	}
+
+	function hasRecentFormSubmitRecoveryAttempt(session) {
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const input = item?.input || {}
+			return String(input.workflow_step || '') === 'submit_form_timeout_recovery'
+		})
+	}
+
+	function getRecentHistoryItems(session, limit) {
+		const history = Array.isArray(session?.history) ? session.history : []
+		const count = Math.max(0, Number(limit) || 0)
+		return count ? history.slice(Math.max(0, history.length - count)).reverse() : []
+	}
+
+	function collectObservedFormControlItems(observation) {
+		const items = []
+		for (const form of Array.isArray(observation?.forms) ? observation.forms : []) {
+			for (const field of Array.isArray(form?.fields) ? form.fields : []) {
+				items.push({
+					...field,
+					formId: form?.id || field?.formId || '',
+					formName: form?.name || field?.formName || '',
+				})
+			}
+		}
+		for (const item of [
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...(Array.isArray(observation?.popups) ? observation.popups : []),
+		]) {
+			if (isCascaderFormField(item)) items.push(item)
+		}
+		const seen = new Set()
+		return items.filter((item) => {
+			const label = normalizeFormFieldLabel(getObservedItemLabel(item))
+			const key = `${Number(item?.index)}:${label}:${getNavigationKey(item?.region)}`
+			if (seen.has(key)) return false
+			seen.add(key)
+			return true
+		})
+	}
+
+	function isBusinessFormField(item) {
+		const region = getNavigationKey(item?.region)
+		return !region || /^(content|dialog|popover)$/.test(region)
+	}
+
+	function isCascaderFormField(item) {
+		const text = getNavigationKey([
+			item?.kind,
+			item?.fieldType,
+			item?.selectionControl,
+			item?.controlKind,
+			item?.control,
+		].filter(Boolean).join(' '))
+		return /cascader/.test(text)
+	}
+
+	function isEmptyFormField(item) {
+		const value = String(item?.valueState || item?.value || item?.selected || '').trim()
+		if (!value) return true
+		if (/^(empty|空|未选择|未填写)$/i.test(value)) return true
+		if (/^(filled|selected|checked):/i.test(value)) return false
+		return false
+	}
+
+	function isPlainTextFormField(item) {
+		if (!item) return false
+		if (isCascaderFormField(item) || isDropdownFormField(item)) return false
+		const role = getNavigationKey(item?.role)
+		const kind = getNavigationKey([
+			item?.kind,
+			item?.fieldType,
+			item?.selectionControl,
+			item?.controlKind,
+			item?.control,
+		].filter(Boolean).join(' '))
+		const type = getNavigationKey(item?.type)
+		if (/(dropdown|select|combobox|checkbox|radio|switch|cascader|date|time|picker|tree|menu|listbox|option)/.test(kind)) return false
+		if (/^(combobox|button|link|menuitem|option|checkbox|radio|switch|listbox|tab)$/.test(role)) return false
+		if (/^(checkbox|radio|button|submit|reset|file|range|color|image)$/.test(type)) return false
+		if (/^(textbox|text|input|textarea)$/.test(role)) return true
+		if (/^(text|textarea|tel|number|email|url|search|password)$/.test(type)) return true
+		return !role && !kind && !type
+	}
+
+	function isDropdownFormField(item) {
+		if (!item || isCascaderFormField(item)) return false
+		const text = getNavigationKey([
+			item?.kind,
+			item?.fieldType,
+			item?.selectionControl,
+			item?.controlKind,
+			item?.control,
+			item?.role,
+		].filter(Boolean).join(' '))
+		return /(dropdown|select|combobox|picker|category|listbox|option)/.test(text)
+	}
+
+	function getFormFieldOrderScore(item) {
+		const rect = item?.rect || {}
+		const top = Number(rect.top)
+		const left = Number(rect.left)
+		if (Number.isFinite(top) || Number.isFinite(left)) {
+			return (Number.isFinite(top) ? top : 0) * 10000 + (Number.isFinite(left) ? left : 0)
+		}
+		const index = Number(item?.index)
+		return (Number.isFinite(index) ? index : 9999) * 10000
+	}
+
+	function parseScalarAssignmentSegment(segment) {
+		const text = cleanAssignmentValue(segment)
+		if (!text) return ''
+		if (/[，,、]/.test(text)) return ''
+		const first = cleanAssignmentValue(String(text).split(/[。；;\n\r]/)[0])
+		if (!first || first.length > 80) return ''
+		return first
+	}
+
+	function cleanAssignmentValue(value) {
+		let text = String(value || '').trim()
+		if (!text) return ''
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^[\s"'“”‘’【】\[\]()（）{}<>《》,，、。.;；:：!?！？]+/g, '')
+				.replace(/[\s"'“”‘’【】\[\]()（）{}<>《》,，、。.;；:：!?！？]+$/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
+	}
+
+	function findVisibleOptionLabelForValue(observation, value) {
+		const requested = cleanAssignmentValue(value)
+		if (!requested) return ''
+		const labels = collectVisibleSelectionOptionItems(observation)
+			.filter((item) => labelsMatchAssignedValue(getObservedItemLabel(item), requested))
+			.map((item) => cleanAssignmentValue(getObservedItemLabel(item)))
+			.filter(Boolean)
+		const unique = [...new Set(labels)]
+		return unique.length === 1 ? unique[0] : ''
+	}
+
+	function collectVisibleSelectionOptionItems(observation) {
+		const items = [
+			...(Array.isArray(observation?.options) ? observation.options : []),
+			...(Array.isArray(observation?.popups) ? observation.popups : []),
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...collectTextNavigationItems(observation),
+		]
+		return uniqueObservedItems(items)
+			.filter((item) => {
+				const index = Number(item?.index)
+				if (!Number.isFinite(index)) return false
+				const label = getObservedItemLabel(item)
+				if (!label || label === '(empty)') return false
+				const region = getNavigationKey(item?.region)
+				const role = getNavigationKey(item?.role)
+				const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)
+				const kind = getNavigationKey(item?.kind || item?.fieldType || '')
+				if (/^(header|pagination)$/.test(region)) return false
+				if (/^(option|menuitem|treeitem)$/.test(role)) return true
+				return /(option|dropdown|select|menuitem|checkbox|radio|cascader-leaf|cascader)/.test(`${control} ${kind}`)
+			})
+	}
+
+	function collectVisibleCascaderOptionItems(observation) {
+		return collectVisibleSelectionOptionItems(observation)
+			.filter((item) => {
+				const role = getNavigationKey(item?.role)
+				const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)
+				const kind = getNavigationKey(item?.kind || item?.fieldType || '')
+				const source = getNavigationKey(item?.source || '')
+				if (/cascader/.test(`${control} ${kind} ${source}`)) return true
+				return /^(menuitem|treeitem|option)$/.test(role) && getNavigationKey(item?.region) === 'popover'
+			})
+	}
+
+	function uniqueObservedItems(items) {
+		const seen = new Set()
+		return (Array.isArray(items) ? items : []).filter((item) => {
+			const index = Number(item?.index)
+			if (!Number.isFinite(index)) return false
+			const key = `${index}:${getObservedItemLabel(item)}:${getNavigationKey(item?.region)}:${getNavigationKey(item?.role)}:${getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)}`
+			if (seen.has(key)) return false
+			seen.add(key)
+			return true
+		})
+	}
+
+	function labelsMatchAssignedValue(label, value) {
+		const candidate = getNavigationKey(cleanAssignmentValue(label))
+		const requested = getNavigationKey(cleanAssignmentValue(value))
+		if (!candidate || !requested) return false
+		if (candidate === requested) return true
+		if (requested.length >= 2 && candidate.includes(requested)) return true
+		return candidate.length >= 2 && requested.includes(candidate)
+	}
+
+	function getRecentFailedCascaderRecovery(session) {
+		return getRecentHistoryItems(session, 10).find((item) => {
+			if (item?.success !== false) return false
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			const input = item?.input || {}
+			return action === 'select_cascader_path' && String(input.workflow_step || '') === 'select_cascader_path_timeout_recovery'
+		}) || null
+	}
+
+	function getOutcomeRequestedText(item) {
+		const direct = item?.outcome?.requested || item?.outcome?.requestedText || item?.requested || item?.requestedText
+		if (direct) return String(direct)
+		const text = String(item?.output || item?.message || item?.detail || '')
+		return (
+			text.match(/\brequested="([^"]+)"/)?.[1] ||
+			text.match(/未找到第\s*\d+\s*级选项\s*"([^"]+)"/)?.[1] ||
+			text.match(/未找到[^"“”]*["“]([^"“”]+)["”]/)?.[1] ||
+			''
+		)
+	}
+
+	function getLastCascaderPathPart(path) {
+		if (!Array.isArray(path) || !path.length) return ''
+		return String(path[path.length - 1] || '')
+	}
+
+	function hasRecentVisibleCascaderOptionAttempt(session, item, requested) {
+		const index = Number(item?.index)
+		const target = getNavigationKey(requested)
+		return getRecentHistoryItems(session, 8).some((historyItem) => {
+			const action = String(historyItem?.action || '').replace(/\..*$/, '')
+			const input = historyItem?.input || {}
+			if (String(input.workflow_step || '') !== 'select_visible_cascader_option_timeout_recovery') return false
+			if (action !== 'click_element_by_index' && action !== 'click') return false
+			if (Number.isFinite(index) && Number(input.index) === index) return true
+			return target && getNavigationKey(input.workflow_requested_text || input.target_label || '') === target
+		})
+	}
+
+	function hasRecentFormFieldRecoveryAttempt(session, index, actionName, value) {
+		const target = getNavigationKey(cleanAssignmentValue(value))
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			const input = item?.input || {}
+			if (Number(input.index) !== Number(index)) return false
+			if (String(actionName || '') && action !== actionName) return false
+			const step = String(input.workflow_step || '')
+			if (!/^(fill_form_field_timeout_recovery|open_form_dropdown_timeout_recovery|choose_form_dropdown_timeout_recovery)$/.test(step)) return false
+			if (!target) return true
+			const attempted = getNavigationKey(cleanAssignmentValue(input.text || input.label || input.workflow_requested_text || ''))
+			return !attempted || attempted === target
+		})
+	}
+
+	function normalizeFormFieldLabel(value) {
+		return String(value || '')
+			.replace(/^[\s*＊]+/g, '')
+			.replace(/[\s:：]+$/g, '')
+			.replace(/\s+/g, '')
+			.trim()
+	}
+
+	function extractTaskAssignmentSegment(taskText, label, allLabels) {
+		const source = String(taskText || '')
+		for (const match of findLooseLabelMatches(source, label)) {
+			let cursor = Number(match.index) + String(match[0] || '').length
+			const connector = matchTaskAssignmentConnector(source.slice(cursor))
+			if (!connector) continue
+			cursor += connector.length
+			let end = source.length
+			const sentenceBreak = source.slice(cursor).search(/[。；;\n\r]/)
+			if (sentenceBreak >= 0) end = Math.min(end, cursor + sentenceBreak)
+			const nextLabel = findNextAssignmentLabelIndex(source, cursor, label, allLabels)
+			if (nextLabel >= 0) end = Math.min(end, nextLabel)
+			const segment = source.slice(cursor, end).trim()
+			if (segment) return segment
+		}
+		return ''
+	}
+
+	function findLooseLabelMatches(source, label) {
+		const key = normalizeFormFieldLabel(label)
+		if (!key) return []
+		const pattern = new RegExp(Array.from(key).map(escapeRegExp).join('\\s*'), 'gi')
+		return Array.from(String(source || '').matchAll(pattern))
+	}
+
+	function matchTaskAssignmentConnector(value) {
+		const match = String(value || '').match(/^\s*(?:(?:设置为|设为|选择为|选为|指定为|填为|填写为|为|是|=|:|：)\s*)+/)
+		return match?.[0] || ''
+	}
+
+	function findNextAssignmentLabelIndex(source, cursor, currentLabel, allLabels) {
+		let end = -1
+		const current = normalizeFormFieldLabel(currentLabel)
+		for (const label of allLabels || []) {
+			const key = normalizeFormFieldLabel(label)
+			if (!key || key === current) continue
+			for (const match of findLooseLabelMatches(source.slice(cursor), key)) {
+				const index = cursor + Number(match.index)
+				const after = source.slice(index + String(match[0] || '').length)
+				if (!matchTaskAssignmentConnector(after)) continue
+				if (end < 0 || index < end) end = index
+				break
+			}
+		}
+		return end
+	}
+
+	function parseCascaderPathSegment(segment) {
+		const text = cleanAssignmentValue(segment)
+		if (!text) return []
+		const parts = text
+			.split(/\s*(?:->|→|＞|>|\/|\\|,|，|、|\s+)\s*/g)
+			.map(cleanCascaderPathPart)
+			.filter(Boolean)
+		if (parts.length < 2) return []
+		if (parts.some((part) => !isSafeCascaderPathPart(part))) return []
+		return parts
+	}
+
+	function cleanCascaderPathPart(value) {
+		return cleanAssignmentValue(value)
+	}
+
+	function isSafeCascaderPathPart(value) {
+		const key = getNavigationKey(value)
+		if (!key || key.length > 40) return false
+		return !/^(和|及|以及|并且|然后|请选择|选择)$/.test(key)
+	}
+
+	function hasRecentCascaderPathAttempt(session, index, path) {
+		const targetPath = normalizeCascaderPathForCompare(path)
+		for (const item of Array.isArray(session?.history) ? session.history : []) {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			if (action !== 'select_cascader_path') continue
+			const input = item?.input || {}
+			if (Number(input.index) !== Number(index)) continue
+			if (normalizeCascaderPathForCompare(input.path) !== targetPath) continue
+			return true
+		}
+		return false
+	}
+
+	function normalizeCascaderPathForCompare(path) {
+		return (Array.isArray(path) ? path : [])
+			.map((part) => getNavigationKey(cleanCascaderPathPart(part)))
+			.filter(Boolean)
+			.join('>')
 	}
 
 	function syncNavigationState(session) {

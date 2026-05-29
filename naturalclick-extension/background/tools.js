@@ -64,27 +64,77 @@
 
 	async function executePageAction(session, name, input) {
 		const inputMode = session?.config?.inputMode === 'standard' ? 'standard' : 'realistic'
+		const timeoutMs = getPageActionTimeoutMs(name)
 		try {
-			const timeoutMs = getPageActionTimeoutMs(name)
-			const result = await sendTabMessage(session.currentTabId, {
-				type: MSG_TYPES.ACT,
-				action: {
-					name,
-					input: input || {},
-					meta: { inputMode },
-				},
-			}, {
-				maxRetries: 0,
-				timeoutMs,
-			})
+			const result = await sendPageActionMessage(session, name, input, inputMode, timeoutMs)
+			if (!result?.success && shouldRetryDirectInput(name, inputMode, result?.message)) {
+				return retryDirectInputAction(session, name, input, timeoutMs, result?.message || '页面输入动作失败。')
+			}
 			return {
 				success: !!result?.success,
 				message: result?.message || '执行完成',
 				meta: result?.meta || null,
 			}
 		} catch (error) {
-			return { success: false, message: `页面动作执行失败: ${String(error)}` }
+			const message = `页面动作执行失败: ${String(error)}`
+			if (shouldRetryDirectInput(name, inputMode, message)) {
+				return retryDirectInputAction(session, name, input, timeoutMs, message)
+			}
+			return { success: false, message }
 		}
+	}
+
+	async function sendPageActionMessage(session, name, input, inputMode, timeoutMs) {
+		return sendTabMessage(session.currentTabId, {
+			type: MSG_TYPES.ACT,
+			action: {
+				name,
+				input: input || {},
+				meta: { inputMode },
+			},
+		}, {
+			maxRetries: 0,
+			timeoutMs,
+		})
+	}
+
+	async function retryDirectInputAction(session, name, input, timeoutMs, firstMessage) {
+		await sleep(250)
+		try {
+			const result = await sendPageActionMessage(session, name, input, 'direct', Math.max(timeoutMs, 7000))
+			if (result?.success) {
+				return {
+					success: true,
+					message: `${firstMessage} | 直接输入重试成功: ${result.message || '执行完成'}`,
+					meta: result?.meta || null,
+				}
+			}
+			return {
+				success: false,
+				message: `${firstMessage} | 直接输入重试失败: ${result?.message || '执行失败'}`,
+				meta: result?.meta || null,
+			}
+		} catch (error) {
+			return {
+				success: false,
+				message: `${firstMessage} | 直接输入重试失败: ${String(error)}`,
+			}
+		}
+	}
+
+	function shouldRetryDirectInput(name, inputMode, message) {
+		if (!isTextInputAction(name) || inputMode === 'direct') return false
+		return isRecoverableInputTransportFailure(message)
+	}
+
+	function isTextInputAction(name) {
+		const actionName = String(name || '')
+		return actionName === 'input_text' || actionName === 'type'
+	}
+
+	function isRecoverableInputTransportFailure(message) {
+		const text = String(message || '')
+		return /页面动作超时|页面通信超时|执行脚本未响应|已放弃等待|message port closed|message channel closed/i.test(text)
 	}
 
 	function getPageActionTimeoutMs(name) {

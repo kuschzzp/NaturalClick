@@ -401,6 +401,11 @@
 		}
 
 		async function dismissSelectionPopup(anchor, inputMode) {
+			if (isDialogAnchoredSelection(anchor)) {
+				blurSelectionAnchor(anchor)
+				await sleep(inputMode === 'realistic' ? randomBetween(80, 140) : 70)
+				return
+			}
 			dispatchEscape(anchor)
 			await sleep(inputMode === 'realistic' ? randomBetween(80, 140) : 70)
 			if (!hasVisibleSelectionPopup()) return
@@ -415,6 +420,28 @@
 					anchor.blur?.()
 				} catch (_) {}
 			}
+		}
+
+		function isDialogAnchoredSelection(anchor) {
+			return !!(anchor instanceof HTMLElement && anchor.closest(
+				'[role="dialog"],[aria-modal="true"],dialog,.el-dialog,.ant-modal,.n-modal'
+			))
+		}
+
+		function blurSelectionAnchor(anchor) {
+			const active = document.activeElement
+			for (const target of [active, anchor]) {
+				if (!(target instanceof HTMLElement)) continue
+				try {
+					target.blur?.()
+				} catch (_) {}
+			}
+			try {
+				const nested = anchor instanceof HTMLElement
+					? anchor.querySelector?.('input,textarea,[tabindex]')
+					: null
+				if (nested instanceof HTMLElement) nested.blur?.()
+			} catch (_) {}
 		}
 
 		function dispatchEscape(anchor) {

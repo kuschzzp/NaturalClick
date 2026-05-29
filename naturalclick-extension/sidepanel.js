@@ -1062,6 +1062,7 @@
 			timeoutCount: items.filter((item) => /超时|timeout/i.test(`${item?.title || ''} ${item?.detail || ''}`)).length,
 			loopGuardCount: items.filter((item) => /循环保护|loop_guard/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
 			verificationFailureCount: items.filter((item) => /校验失败|verify/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
+			candidateDiagnostics: extractCandidateDiagnostics(modelItems),
 			lastError: lastError ? {
 				title: String(lastError.title || ''),
 				detail: clampText(String(lastError.detail || ''), 800),
@@ -1070,6 +1071,18 @@
 			lastModelError: lastModelErrorItem ? getModelErrorSummary(lastModelErrorItem) : null,
 			modelThoughts,
 		}
+	}
+
+	function extractCandidateDiagnostics(modelItems) {
+		const sections = []
+		for (const item of [...(Array.isArray(modelItems) ? modelItems : [])].reverse()) {
+			const prompt = extractPromptParts(item?.io?.request || {}).user
+			const match = String(prompt || '').match(/<candidate_diagnostics>[\s\S]*?<\/candidate_diagnostics>/)
+			if (!match) continue
+			sections.push(clampText(match[0], 1200))
+			if (sections.length >= 2) break
+		}
+		return sections
 	}
 
 	function sanitizeConfigForExport(config) {

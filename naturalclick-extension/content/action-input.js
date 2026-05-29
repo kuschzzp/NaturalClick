@@ -26,7 +26,11 @@
 			if (isDisabledElement(editable) || isReadonlyElement(editable)) {
 				return { success: false, message: `索引 ${index} 对应输入目标不可编辑。` }
 			}
-			await humanLikeClick(editable, null, inputMode)
+			if (inputMode === 'direct') {
+				focusDirectInputTarget(editable)
+			} else {
+				await humanLikeClick(editable, null, inputMode)
+			}
 			return inputToEditableTarget(editable, text, inputMode, `已在索引 ${index} 输入文本。`)
 		}
 
@@ -47,7 +51,11 @@
 				return { success: false, message: '坐标命中输入目标不可编辑。' }
 			}
 
-			await humanLikeClick(editable, { x, y }, inputMode)
+			if (inputMode === 'direct') {
+				focusDirectInputTarget(editable)
+			} else {
+				await humanLikeClick(editable, { x, y }, inputMode)
+			}
 			return inputToEditableTarget(
 				editable,
 				text,
@@ -55,6 +63,17 @@
 				'已通过坐标输入文本。',
 				'已在坐标命中的 contenteditable 元素输入文本。'
 			)
+		}
+
+		function focusDirectInputTarget(element) {
+			if (!(element instanceof HTMLElement)) return
+			try {
+				element.focus({ preventScroll: true })
+			} catch (_) {
+				try {
+					element.focus()
+				} catch (_) {}
+			}
 		}
 
 		async function keypressAction(opts) {

@@ -96,18 +96,30 @@ naturalclick-extension/
 │   ├── confirmation.js              # Risky-action confirmation
 │   ├── constants.js                 # Runtime constants
 │   ├── executor.js                  # Tab tools and page-action dispatch
-│   ├── planner.js                   # Prompt construction and model calls
+│   ├── login-workflow.js            # Deterministic login workflow
+│   ├── planner.js                   # Planner orchestration
+│   ├── planner-context.js           # Observation compaction and context requests
+│   ├── planner-model-client.js      # OpenAI-compatible model client
+│   ├── planner-prompt.js            # Full and compact planner prompts
+│   ├── planner-validation.js        # Tool/action validation and replanning hints
+│   ├── search-workflow*.js          # Deterministic search/filter workflow
 │   ├── session-engine.js            # Observe-plan-act loop
+│   ├── session-*.js                 # Session lifecycle, timing, recovery, records
+│   ├── tools.js                     # Planner-visible tool registry
 │   ├── utils.js                     # Chrome/runtime helpers
 │   ├── verifier.js                  # Post-action verification
+│   ├── workflows.js                 # Pre-model and timeout workflow decisions
 │   └── vision.js                    # Screenshot and coordinate fallback
 ├── content.js                       # Page-side bridge
 ├── content/
-│   ├── actions.js                   # DOM and coordinate action execution
+│   ├── action-*.js                  # DOM, input, selection, scroll action helpers
+│   ├── actions.js                   # Page action router
 │   ├── observer.js                  # DOM observation and semantic extraction
 │   ├── verification.js              # Hit-test and input verification
 │   └── visual.js                    # Index highlights and click feedback
 ├── shared/
+│   ├── action-contract.js           # Structured action outcome contract
+│   ├── control-semantics.js         # Shared control and field semantics
 │   └── protocol.js                  # Shared message types and statuses
 ├── sidepanel.html                   # Side panel UI shell and styles
 ├── sidepanel.js                     # UI state, settings, history, traces
@@ -120,11 +132,13 @@ naturalclick-extension/
 |---|---|
 | DOM indexing | Interactive elements, fields, labels, roles, placeholders, value state |
 | Form understanding | Username, password, confirm password, phone, OTP, invite code, nickname, email, department, role, platform, region, date |
-| Selection controls | Selects, checkbox-like options, radio-like options, tree nodes, Element Plus-style dropdowns |
-| Cascaders | Parent hover to reveal the next level, leaf click for final selection |
+| Selection controls | Explicit open/choose tools for selects, checkbox-like options, radio-like options, tree nodes, and Element-style dropdowns |
+| Cascaders | Full-path cascader selection with parent hover, leaf click, and dialog-safe popup dismissal |
+| Deterministic workflows | Target URL, login, task navigation, search/filter testing, and constrained form-fill timeout recovery |
 | Cross-tab actions | Open, switch, and close tabs |
 | Vision fallback | Screenshot-based coordinate selection with hit-test validation |
-| Trace inspection | Model IO, action inputs, outputs, verification failures, exported session logs |
+| Trace inspection | Model IO, action inputs, outputs, verification failures, candidate diagnostics, exported session logs |
+| Verification | Structured outcomes, loop guard, input/dropdown/cascader checks, and dialog-disappearance detection |
 | Stop handling | First-class `stopped` status instead of treating user stop as an error |
 
 ## Supported Actions
@@ -133,14 +147,23 @@ naturalclick-extension/
 |---|---|
 | `click_element_by_index` | Click an observed DOM element by index |
 | `input_text` | Type text into an observed editable element |
-| `scroll` | Scroll the page or a target container |
+| `open_dropdown` | Open a dropdown by field index and return visible real candidates |
+| `choose_dropdown_option` | Choose a real visible dropdown option scoped to a field index |
+| `select_checkbox_option` | Select a checkbox-like option by visible text |
+| `select_cascader_path` | Select a cascader by full path, such as province/city/district |
+| `hover_element_by_index` | Hover an observed element, mainly for menus and cascaders |
+| `scroll` | Scroll the page or a target container vertically |
+| `scroll_horizontally` | Scroll the page or a target container horizontally |
 | `keypress` | Dispatch keyboard events to the active element |
 | `open_new_tab` | Open a URL in a new Chrome tab |
 | `switch_to_tab` | Switch to an existing tab |
 | `close_tab` | Close an existing tab |
+| `wait` | Wait briefly for async page, dialog, or dropdown changes |
+| `ask_user` | Ask the user for missing credentials, CAPTCHA, or confirmation |
+| `locate_by_vision` | Trigger semantic screenshot-based targeting for a click or input |
 | `done` | End the task with a final message |
 
-Coordinate click and coordinate input are used internally for vision fallback.
+`select_dropdown_option` remains as a compatibility alias, but new planning prefers `open_dropdown` plus `choose_dropdown_option`. Coordinate click and coordinate input are used internally for vision fallback.
 
 ## Runtime Flow
 
@@ -149,9 +172,11 @@ User task
   -> Side panel sends START_TASK
   -> Background prepares an automatable tab
   -> Content observer returns structured page state
+  -> Deterministic workflows may handle URL, login, navigation, search, or safe form recovery
   -> Planner calls the text model
   -> Executor runs a browser or page action
   -> Verifier checks selected outcomes
+  -> Timeout recovery may fill known form fields or submit only a satisfied active form
   -> Vision fallback retries failed click/input actions
   -> Session trace updates the side panel
 ```
@@ -165,6 +190,12 @@ node --check naturalclick-extension/background.js
 node --check naturalclick-extension/content.js
 node --check naturalclick-extension/sidepanel.js
 node -e "JSON.parse(require('fs').readFileSync('naturalclick-extension/manifest.json','utf8')); console.log('manifest ok')"
+```
+
+Run the runtime contract checks:
+
+```bash
+node scripts/validate-runtime-contracts.js
 ```
 
 After editing extension files:
@@ -195,15 +226,15 @@ NaturalClick includes heuristic confirmation for risky actions such as delete, p
 - Complex custom components may still need site-specific or framework-specific heuristics.
 - Vision fallback depends on screenshot quality and model reliability.
 - There is no packaged release workflow yet.
-- There is no automated regression test suite yet.
+- Runtime contract checks exist, but there is no full browser end-to-end regression suite yet.
 
 ## Roadmap
 
 | Area | Planned Improvements |
 |---|---|
 | DOM recognition | Better duplicate filtering, stronger label binding, richer custom component metadata |
-| Select controls | More deterministic multi-select, tree-select, and cascader behavior |
-| Verification | Better before/after observation diffs and click outcome validation |
+| Select controls | Broader custom multi-select and tree-select coverage |
+| Verification | Browser fixture coverage for before/after observation diffs and click outcomes |
 | Debugging | Trace replay, compact failure reports, and fixture-based reproductions |
 | Packaging | Release workflow for installable Chrome extension builds |
 | Privacy | Optional domain allowlist and clearer storage/history controls |
@@ -220,7 +251,7 @@ Helpful contributions include:
 - UI/UX refinements for the side panel
 - Documentation improvements and examples
 
-Before submitting changes, run the syntax checks above and keep unrelated edits separate.
+Before submitting changes, run the syntax checks and runtime contract checks above, and keep unrelated edits separate.
 
 ## License
 

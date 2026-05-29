@@ -9,6 +9,9 @@
 		const optionItems = Array.isArray(observation?.options) ? observation.options : []
 		const popups = Array.isArray(observation?.popups) ? observation.popups : []
 		const panels = Array.isArray(observation?.panels) ? observation.panels : []
+		const candidateDiagnostics = observation?.candidateDiagnostics && typeof observation.candidateDiagnostics === 'object'
+			? observation.candidateDiagnostics
+			: null
 		const treeCandidates = Array.isArray(observation?.treeCandidates) ? observation.treeCandidates : []
 		const simplifiedDom = Array.isArray(observation?.simplifiedDom) ? observation.simplifiedDom : []
 		const compactReason = normalizeCompactReason(opts.compactReason || 'compact_retry')
@@ -40,6 +43,10 @@
 				parts.push(formatPanelLine(panel))
 			}
 			parts.push('</panels>')
+		}
+
+		if (candidateDiagnostics && Number(candidateDiagnostics.textActionProbeCount || 0) > 0) {
+			parts.push(formatCandidateDiagnostics(candidateDiagnostics, compact ? 5 : 10))
 		}
 
 		if (forms.length) {
@@ -162,6 +169,24 @@
 			`... omitted ${count} ${label}`,
 			`<more_context source="${source}" cursor="${cursor}" limit="40" action="request_context" hint='{"source":"${source}","cursor":${cursor},"limit":40}' />`,
 		].join('\n')
+	}
+
+	function formatCandidateDiagnostics(candidateDiagnostics, limit) {
+		const lines = [
+			'<candidate_diagnostics>',
+			`text_action_probes total=${Number(candidateDiagnostics.textActionProbeCount || 0)} indexed=${Number(candidateDiagnostics.indexedTextActionProbeCount || 0)} unindexed=${Number(candidateDiagnostics.unindexedTextActionProbeCount || 0)}`,
+		]
+		const probes = Array.isArray(candidateDiagnostics.unindexedTextActionProbes)
+			? candidateDiagnostics.unindexedTextActionProbes
+			: []
+		for (const probe of probes.slice(0, Math.max(0, Number(limit) || 0))) {
+			const rect = probe?.rect || {}
+			lines.push(
+				`  unindexed text="${shortText(probe?.text || '', 28)}" tag=${probe?.tag || '-'} role=${probe?.role || '-'} cursor=${probe?.cursor || '-'} context=${probe?.actionContext ? 'true' : 'false'} pointer=${probe?.pointer ? 'true' : 'false'} rect=${Number(rect.left) || 0},${Number(rect.top) || 0},${Number(rect.width) || 0}x${Number(rect.height) || 0} class="${shortText(probe?.className || '', 60)}" html="${shortText(probe?.html || '', 140)}"`
+			)
+		}
+		lines.push('</candidate_diagnostics>')
+		return lines.join('\n')
 	}
 
 	function resolvePlanningContextRequest(observation, action, seq) {
