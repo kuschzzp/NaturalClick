@@ -1084,6 +1084,29 @@
 							<input id="cfg-max-steps" class="sp-text" type="number" min="1" max="200" />
 						</div>
 						<div class="sp-field">
+							<label>文本模型单轮超时（秒）</label>
+							<input id="cfg-text-timeout-sec" class="sp-text" type="number" min="8" max="180" step="1" />
+						</div>
+						<div class="sp-field">
+							<label>完整观察最大字符数</label>
+							<input id="cfg-full-observation-max-chars" class="sp-text" type="number" min="7600" max="1048576" step="1" />
+						</div>
+						<div class="sp-field">
+							<label>精简观察最大字符数</label>
+							<input id="cfg-compact-observation-max-chars" class="sp-text" type="number" min="1000" max="65536" step="1" />
+						</div>
+						<div class="sp-field">
+							<label>触发精简元素数</label>
+							<input id="cfg-compact-element-threshold" class="sp-text" type="number" min="20" max="10000" step="1" />
+						</div>
+						<div class="sp-field">
+							<label>触发精简 raw 数</label>
+							<input id="cfg-compact-raw-candidate-threshold" class="sp-text" type="number" min="20" max="10000" step="1" />
+						</div>
+						<div class="sp-inline-tools">
+							<button id="sp-reset-planning-context" class="sp-btn" type="button">恢复规划默认值</button>
+						</div>
+						<div class="sp-field">
 							<label>输入拟真模式</label>
 							<select id="cfg-input-mode" class="sp-select">
 								<option value="realistic">realistic（推荐）</option>

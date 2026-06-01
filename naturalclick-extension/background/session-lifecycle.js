@@ -4,6 +4,7 @@
 	const TRACEABLE_PLANNING_STAGES = new Set([
 		'model_compact_request',
 		'model_context_round',
+		'model_stream_delta',
 		'compact_retry',
 		'planning_context',
 		'timeout_recovery',
@@ -44,6 +45,10 @@
 	function appendPlanningProgressTrace(session, event, text) {
 		const stage = String(event?.stage || '').trim()
 		if (!TRACEABLE_PLANNING_STAGES.has(stage)) return
+		if (stage === 'model_stream_delta') {
+			upsertModelStreamTrace(session, event, text)
+			return
+		}
 		const round = Number(event?.round) || 0
 		const key = `${session.step || 0}:${stage}:${round}:${text}`
 		if (session.lastPlanningProgressTraceKey === key) return
@@ -54,6 +59,34 @@
 			kind: 'step',
 			progress: { stage, round },
 		})
+	}
+
+	function upsertModelStreamTrace(session, event, text) {
+		const round = Number(event?.round) || 0
+		const key = `${session.step || 0}:${round}`
+		const existingId = session.modelStreamTraceKey === key ? session.modelStreamTraceId : ''
+		const progress = {
+			stage: 'model_stream_delta',
+			round,
+			...(event?.stream || {}),
+		}
+		const existing = existingId
+			? session.traceItems.find((item) => item?.id === existingId)
+			: null
+		if (existing) {
+			existing.detail = text
+			existing.progress = progress
+			return
+		}
+		appendTrace(session, {
+			title: '模型流式输出',
+			detail: text,
+			kind: 'model',
+			progress,
+		})
+		const last = session.traceItems[session.traceItems.length - 1]
+		session.modelStreamTraceKey = key
+		session.modelStreamTraceId = last?.id || ''
 	}
 
 	function failSession(session, errorText, sessions) {

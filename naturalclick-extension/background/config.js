@@ -26,21 +26,76 @@
 					? raw.experimentalIncludeAllTabs
 					: DEFAULT_CONFIG.experimentalIncludeAllTabs,
 			inputMode: normalizeInputMode(raw?.inputMode),
+			planning: normalizePlanningConfig(raw?.planning, DEFAULT_CONFIG.planning),
 			visionDisabledDomains: normalizeDomainList(raw?.visionDisabledDomains),
 		}
 	}
 
 	function normalizeEndpoint(value, fallback) {
-		return {
+		const endpoint = {
 			baseURL: String(value?.baseURL || fallback.baseURL).trim(),
 			model: String(value?.model || fallback.model).trim(),
 			apiKey: String(value?.apiKey || '').trim(),
 		}
+		const configuredTimeout = Number(value?.timeoutMs)
+		const fallbackTimeout = Number(fallback?.timeoutMs)
+		if (Number.isFinite(configuredTimeout) || Number.isFinite(fallbackTimeout)) {
+			endpoint.timeoutMs = clampInteger(
+				configuredTimeout,
+				Number.isFinite(fallbackTimeout) ? fallbackTimeout : 60000,
+				8000,
+				180000
+			)
+		}
+		if (typeof value?.stream === 'boolean' || typeof fallback?.stream === 'boolean') {
+			endpoint.stream = typeof value?.stream === 'boolean' ? value.stream : fallback.stream !== false
+		}
+		return endpoint
 	}
 
 	function normalizeInputMode(value) {
 		const mode = String(value || '').trim().toLowerCase()
 		return mode === 'standard' ? 'standard' : 'realistic'
+	}
+
+	function normalizePlanningConfig(value, fallback) {
+		const defaults = fallback || DEFAULT_CONFIG.planning || {}
+		const full = clampInteger(
+			value?.fullObservationMaxChars,
+			defaults.fullObservationMaxChars || 262144,
+			7600,
+			1048576
+		)
+		const compact = clampInteger(
+			value?.compactObservationMaxChars,
+			defaults.compactObservationMaxChars || 4200,
+			1000,
+			Math.min(65536, full)
+		)
+		const elementThreshold = clampInteger(
+			value?.compactElementThreshold,
+			defaults.compactElementThreshold || 120,
+			20,
+			10000
+		)
+		const rawThreshold = clampInteger(
+			value?.compactRawCandidateThreshold,
+			defaults.compactRawCandidateThreshold || 80,
+			20,
+			10000
+		)
+		return {
+			fullObservationMaxChars: full,
+			compactObservationMaxChars: compact,
+			compactElementThreshold: elementThreshold,
+			compactRawCandidateThreshold: rawThreshold,
+		}
+	}
+
+	function clampInteger(value, fallback, min, max) {
+		const number = Number(value)
+		const base = Number.isFinite(number) && number > 0 ? number : Number(fallback)
+		return Math.max(min, Math.min(max, Math.floor(base)))
 	}
 
 	function normalizeDomainList(value) {
@@ -62,5 +117,6 @@
 	g.NC_BG_CONFIG = {
 		loadConfig,
 		normalizeConfig,
+		normalizePlanningConfig,
 	}
 })(globalThis)

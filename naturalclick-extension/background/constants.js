@@ -19,12 +19,18 @@
 	const STORAGE_KEY_CONFIG = 'nc_config_v1'
 
 	const DEFAULT_CONFIG = {
-		textLLM: { baseURL: 'https://api.openai.com/v1', model: 'gpt-5.2', apiKey: '' },
+		textLLM: { baseURL: 'https://api.openai.com/v1', model: 'gpt-5.2', apiKey: '', timeoutMs: 60000, stream: true },
 		multiModalLLM: { baseURL: 'https://api.openai.com/v1', model: 'gpt-5.2', apiKey: '' },
 		visionService: { baseURL: 'https://api.openai.com/v1', model: 'gpt-5.2', apiKey: '' },
 		maxSteps: 100,
 		experimentalIncludeAllTabs: true,
 		inputMode: 'realistic',
+		planning: {
+			fullObservationMaxChars: 262144,
+			compactObservationMaxChars: 4200,
+			compactElementThreshold: 120,
+			compactRawCandidateThreshold: 80,
+		},
 		visionDisabledDomains: [],
 	}
 

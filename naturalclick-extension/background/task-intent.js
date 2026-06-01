@@ -74,7 +74,7 @@
 			targets.push({
 				raw,
 				canonical,
-				aliases: normalizeNavigationAliases([raw, canonical, `${canonical}管理`]),
+				aliases: normalizeNavigationAliases([raw, canonical]),
 				entity: canonical,
 				moduleType: inferModuleTypeFromName(canonical),
 			})
@@ -407,7 +407,9 @@
 
 	function collectNavigationClauseMatches(out, text) {
 		const targetCore = '([\\u4e00-\\u9fa5A-Za-z0-9]{2,24}(?:管理|中心|模块|页面|页|列表|报表|审批|设置|配置)?)'
-		collectTargetMatches(out, text, new RegExp(`(?:找到|进入|打开|前往|切换到|定位到|在)\\s*${targetCore}`, 'g'))
+		const boundary = '(?:^|[，。；;、\\s])'
+		const politePrefix = '(?:(?:现在|当前|马上|立即|帮我|请|麻烦|先|给我)\\s*)*'
+		collectTargetMatches(out, text, new RegExp(`${boundary}${politePrefix}(?:找到|进入|打开|前往|切换到|定位到|在)\\s*${targetCore}`, 'g'))
 	}
 
 	function collectCreateObjectMatches(out, text) {

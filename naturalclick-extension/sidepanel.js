@@ -11,6 +11,19 @@
 	}
 
 	const STORAGE_KEY_SESSIONS = 'nc_sessions_v1'
+	const DEFAULT_TEXT_MODEL_TIMEOUT_MS = 60000
+	const DEFAULT_PLANNING_CONTEXT = Object.freeze({
+		fullObservationMaxChars: 262144,
+		compactObservationMaxChars: 4200,
+		compactElementThreshold: 120,
+		compactRawCandidateThreshold: 80,
+	})
+	const PLANNING_CONTEXT_LIMITS = Object.freeze({
+		fullObservationMaxChars: { min: 7600, max: 1048576 },
+		compactObservationMaxChars: { min: 1000, max: 65536 },
+		compactElementThreshold: { min: 20, max: 10000 },
+		compactRawCandidateThreshold: { min: 20, max: 10000 },
+	})
 	const STATUS_LABELS = {
 		idle: '空闲',
 		running: '执行中',
@@ -83,11 +96,17 @@
 		cfgTextBase: mustGet('cfg-text-base'),
 		cfgTextModel: mustGet('cfg-text-model'),
 		cfgTextKey: mustGet('cfg-text-key'),
+		cfgTextTimeoutSec: mustGet('cfg-text-timeout-sec'),
 		cfgMmBase: mustGet('cfg-mm-base'),
 		cfgMmModel: mustGet('cfg-mm-model'),
 		cfgMmKey: mustGet('cfg-mm-key'),
 		cfgInputMode: mustGet('cfg-input-mode'),
+		cfgFullObservationMaxChars: mustGet('cfg-full-observation-max-chars'),
+		cfgCompactObservationMaxChars: mustGet('cfg-compact-observation-max-chars'),
+		cfgCompactElementThreshold: mustGet('cfg-compact-element-threshold'),
+		cfgCompactRawCandidateThreshold: mustGet('cfg-compact-raw-candidate-threshold'),
 		cfgVisionDisabledDomains: mustGet('cfg-vision-disabled-domains'),
+		resetPlanningContext: mustGet('sp-reset-planning-context'),
 		toggleTextKey: mustGet('sp-toggle-text-key'),
 		toggleMmKey: mustGet('sp-toggle-mm-key'),
 		configForm: mustGet('sp-config-form'),
@@ -206,7 +225,6 @@
 		el.configForm.addEventListener('submit', async (event) => {
 			event.preventDefault()
 			const config = getConfigFromForm()
-			currentConfig = config
 			const result = await sendRuntimeMessage({ type: TYPES.SAVE_CONFIG, config })
 			if (!result?.ok) {
 				state.status = 'error'
@@ -214,9 +232,15 @@
 				render()
 				return
 			}
+			currentConfig = result.config || config
 			state.activityText = '配置已保存。'
 			state.view = { name: 'chat' }
 			render()
+		})
+
+		el.resetPlanningContext.addEventListener('click', () => {
+			setValue('cfg-text-timeout-sec', String(Math.round(DEFAULT_TEXT_MODEL_TIMEOUT_MS / 1000)))
+			setPlanningContextToForm(DEFAULT_PLANNING_CONTEXT)
 		})
 
 		el.testTextConn.addEventListener('click', async () => {
@@ -1094,6 +1118,7 @@
 			maxSteps: Number(config.maxSteps || 0),
 			inputMode: String(config.inputMode || ''),
 			experimentalIncludeAllTabs: !!config.experimentalIncludeAllTabs,
+			planning: normalizePlanningContextForUi(config.planning),
 			visionDisabledDomains: Array.isArray(config.visionDisabledDomains)
 				? config.visionDisabledDomains.slice(0, 80)
 				: [],
@@ -1104,6 +1129,8 @@
 		return {
 			baseURL: String(endpoint?.baseURL || ''),
 			model: String(endpoint?.model || ''),
+			timeoutMs: Number(endpoint?.timeoutMs || 0),
+			stream: endpoint?.stream !== false,
 			apiKeyMasked: maskSecret(String(endpoint?.apiKey || '')),
 		}
 	}
@@ -1611,6 +1638,13 @@
 	function getConfigFromForm() {
 		const get = (id) => String(document.getElementById(id)?.value || '').trim()
 		const maxStepsRaw = Number(get('cfg-max-steps'))
+		const textTimeoutMs = normalizeTextModelTimeoutMsForUi(get('cfg-text-timeout-sec'))
+		const planning = normalizePlanningContextForUi({
+			fullObservationMaxChars: get('cfg-full-observation-max-chars'),
+			compactObservationMaxChars: get('cfg-compact-observation-max-chars'),
+			compactElementThreshold: get('cfg-compact-element-threshold'),
+			compactRawCandidateThreshold: get('cfg-compact-raw-candidate-threshold'),
+		})
 		const mmConfig = {
 			baseURL: get('cfg-mm-base'),
 			model: get('cfg-mm-model'),
@@ -1621,6 +1655,8 @@
 				baseURL: get('cfg-text-base'),
 				model: get('cfg-text-model'),
 				apiKey: get('cfg-text-key'),
+				timeoutMs: textTimeoutMs,
+				stream: true,
 			},
 			multiModalLLM: mmConfig,
 			// 兼容后台双回退链路：视觉服务默认复用多模态配置
@@ -1631,6 +1667,7 @@
 					: 100,
 			inputMode: get('cfg-input-mode') === 'standard' ? 'standard' : 'realistic',
 			experimentalIncludeAllTabs: get('cfg-all-tabs') === 'true',
+			planning,
 			visionDisabledDomains: get('cfg-vision-disabled-domains')
 				.split(/[\n,，]+/)
 				.map((item) => item.trim())
@@ -1641,6 +1678,7 @@
 	function setConfigToForm(config) {
 		setValue('cfg-text-base', config.textLLM?.baseURL || '')
 		setValue('cfg-text-key', config.textLLM?.apiKey || '')
+		setValue('cfg-text-timeout-sec', String(Math.round(normalizeTextModelTimeoutMsForUi(config.textLLM?.timeoutMs) / 1000)))
 		setValue('cfg-mm-base', config.multiModalLLM?.baseURL || '')
 		setValue('cfg-mm-key', config.multiModalLLM?.apiKey || '')
 		setModelValue(el.cfgTextModel, config.textLLM?.model || '')
@@ -1648,12 +1686,67 @@
 		setValue('cfg-max-steps', String(config.maxSteps || 100))
 		setValue('cfg-input-mode', config.inputMode === 'standard' ? 'standard' : 'realistic')
 		setValue('cfg-all-tabs', config.experimentalIncludeAllTabs ? 'true' : 'false')
+		setPlanningContextToForm(normalizePlanningContextForUi(config.planning))
 		setValue(
 			'cfg-vision-disabled-domains',
 			Array.isArray(config.visionDisabledDomains) ? config.visionDisabledDomains.join('\n') : ''
 		)
 		hydrateModelOptions('text').catch(() => {})
 		hydrateModelOptions('mm').catch(() => {})
+	}
+
+	function setPlanningContextToForm(planning) {
+		const normalized = normalizePlanningContextForUi(planning)
+		setValue('cfg-full-observation-max-chars', String(normalized.fullObservationMaxChars))
+		setValue('cfg-compact-observation-max-chars', String(normalized.compactObservationMaxChars))
+		setValue('cfg-compact-element-threshold', String(normalized.compactElementThreshold))
+		setValue('cfg-compact-raw-candidate-threshold', String(normalized.compactRawCandidateThreshold))
+	}
+
+	function normalizePlanningContextForUi(planning) {
+		const raw = planning && typeof planning === 'object' ? planning : {}
+		const full = clampIntegerForUi(
+			raw.fullObservationMaxChars,
+			DEFAULT_PLANNING_CONTEXT.fullObservationMaxChars,
+			PLANNING_CONTEXT_LIMITS.fullObservationMaxChars.min,
+			PLANNING_CONTEXT_LIMITS.fullObservationMaxChars.max
+		)
+		const compact = clampIntegerForUi(
+			raw.compactObservationMaxChars,
+			DEFAULT_PLANNING_CONTEXT.compactObservationMaxChars,
+			PLANNING_CONTEXT_LIMITS.compactObservationMaxChars.min,
+			Math.min(PLANNING_CONTEXT_LIMITS.compactObservationMaxChars.max, full)
+		)
+		const elementThreshold = clampIntegerForUi(
+			raw.compactElementThreshold,
+			DEFAULT_PLANNING_CONTEXT.compactElementThreshold,
+			PLANNING_CONTEXT_LIMITS.compactElementThreshold.min,
+			PLANNING_CONTEXT_LIMITS.compactElementThreshold.max
+		)
+		const rawThreshold = clampIntegerForUi(
+			raw.compactRawCandidateThreshold,
+			DEFAULT_PLANNING_CONTEXT.compactRawCandidateThreshold,
+			PLANNING_CONTEXT_LIMITS.compactRawCandidateThreshold.min,
+			PLANNING_CONTEXT_LIMITS.compactRawCandidateThreshold.max
+		)
+		return {
+			fullObservationMaxChars: full,
+			compactObservationMaxChars: compact,
+			compactElementThreshold: elementThreshold,
+			compactRawCandidateThreshold: rawThreshold,
+		}
+	}
+
+	function normalizeTextModelTimeoutMsForUi(value) {
+		const raw = Number(value)
+		const ms = raw > 1000 ? raw : raw * 1000
+		return clampIntegerForUi(ms, DEFAULT_TEXT_MODEL_TIMEOUT_MS, 8000, 180000)
+	}
+
+	function clampIntegerForUi(value, fallback, min, max) {
+		const number = Number(value)
+		const base = Number.isFinite(number) && number > 0 ? number : Number(fallback)
+		return Math.max(min, Math.min(max, Math.floor(base)))
 	}
 
 	function setValue(id, value) {

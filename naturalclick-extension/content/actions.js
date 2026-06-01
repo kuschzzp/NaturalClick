@@ -115,7 +115,7 @@
 
 			if (name === 'click_element_by_index' || name === 'click') {
 				const index = Number(input.index)
-				return clickByIndex(index, inputMode)
+				return clickByIndex(index, inputMode, input)
 			}
 
 			if (name === 'input_text' || name === 'type') {
@@ -189,7 +189,7 @@
 			return buildActionFailureResult(`坐标动作不支持: ${name}`, 'unsupported_coordinate_action')
 		}
 
-		async function clickByIndex(index, inputMode) {
+		async function clickByIndex(index, inputMode, input = {}) {
 			const element = observer.getElementByIndex(index)
 			if (!element) {
 				return buildActionFailureResult(`索引 ${index} 不存在。`, 'missing_index', { index })
@@ -201,12 +201,20 @@
 				return buildActionFailureResult(`索引 ${index} 对应元素已禁用。`, 'disabled_target', { index })
 			}
 			const before = getElementInteractionState(element)
-			await humanLikeClick(element, null, inputMode)
+			const clickInfo = await humanLikeClick(element, null, inputMode, input)
 			const after = getElementInteractionState(element)
+			const clickTargetMessage = formatClickTargetMessage(clickInfo)
 			return {
 				success: true,
-				message: appendStateChange(`已点击索引 ${index}。`, before, after),
-				meta: { before, after, outcome: inferInteractionOutcome(before, after) },
+				message: appendStateChange(`已点击索引 ${index}${clickTargetMessage}。`, before, after),
+				meta: {
+					before,
+					after,
+					clickTarget: clickInfo?.clickTarget || null,
+					hitTarget: clickInfo?.hitTarget || null,
+					point: clickInfo?.point || null,
+					outcome: inferInteractionOutcome(before, after),
+				},
 			}
 		}
 
@@ -270,13 +278,13 @@
 			}
 		}
 
-		async function humanLikeClick(element, point, inputMode) {
-			const clickElement = resolveClickElement(element) || element
+		async function humanLikeClick(element, point, inputMode, input = {}) {
+			const clickElement = resolveClickElement(element, input) || element
 			clickElement.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' })
 			const rect = clickElement.getBoundingClientRect()
 			const preferredPoint = Number.isFinite(point?.x) && Number.isFinite(point?.y)
 				? point
-				: getPreferredClickPoint(clickElement, rect)
+				: getPreferredClickPoint(clickElement, rect, input)
 			const targetX = clampNumber(
 				Number(preferredPoint?.x),
 				1,
@@ -317,6 +325,7 @@
 			const hitTarget = doc.elementFromPoint(x, y)
 			const target =
 				hitTarget instanceof HTMLElement && clickElement.contains(hitTarget) ? hitTarget : clickElement
+			const clickInfo = buildClickInfo(clickElement, hitTarget, target, x, y)
 
 			const pointerOpts = {
 				bubbles: true,
@@ -344,7 +353,7 @@
 				startSustainedHover(clickElement, x, y)
 				lastPointer = { x, y }
 				await sleep(inputMode === 'realistic' ? randomBetween(120, 200) : 120)
-				return
+				return clickInfo
 			}
 			target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts))
 			target.dispatchEvent(new MouseEvent('mousedown', mouseOpts))
@@ -357,6 +366,7 @@
 			target.dispatchEvent(new MouseEvent('mouseup', mouseOpts))
 			target.click()
 			await sleep(inputMode === 'realistic' ? randomBetween(45, 95) : 70)
+			return clickInfo
 		}
 
 		async function hoverElement(element, inputMode) {
@@ -414,9 +424,11 @@
 			}
 		}
 
-		function resolveClickElement(element) {
+		function resolveClickElement(element, input = {}) {
 			if (!(element instanceof HTMLElement)) return element
 			if (isCascaderParentOption(element)) return element
+			const actionControl = findNestedActionControl(element, input)
+			if (actionControl) return actionControl
 			const selectable = resolveSelectableClickTarget(element)
 			if (selectable) return selectable
 			const labelTarget = resolveLabelTarget(element)
@@ -437,13 +449,15 @@
 			}
 		}
 
-		function getPreferredClickPoint(element, rect) {
+		function getPreferredClickPoint(element, rect, input = {}) {
 			if (isCascaderParentOption(element)) {
 				return {
 					x: rect.left + rect.width * 0.76,
 					y: rect.top + rect.height / 2,
 				}
 			}
+			const actionTextPoint = findNestedActionTextPoint(element, input)
+			if (actionTextPoint) return actionTextPoint
 			const selectable = findNestedSelectableControl(element)
 			if (selectable) {
 				const selectableRect = selectable.getBoundingClientRect()
@@ -458,6 +472,215 @@
 				x: rect.left + rect.width / 2,
 				y: rect.top + rect.height / 2,
 			}
+		}
+
+		const ACTION_CONTROL_SELECTOR = [
+			'button',
+			'a[href]',
+			'[role="button"]',
+			'[role="link"]',
+			'.el-button',
+			'.ant-btn',
+			'.arco-btn',
+			'.n-button',
+			'.van-button',
+			'[class*="btn"]',
+			'[class*="button"]',
+		].join(',')
+
+		function findNestedActionControl(element, input = {}) {
+			if (!(element instanceof HTMLElement)) return null
+			if (!shouldPreferNestedActionTarget(element, input)) return null
+			const candidates = []
+			const closest = element.closest?.(ACTION_CONTROL_SELECTOR)
+			if (closest instanceof HTMLElement && closest !== document.body) candidates.push(closest)
+			try {
+				candidates.push(...element.querySelectorAll(ACTION_CONTROL_SELECTOR))
+			} catch (_) {}
+			const seen = new Set()
+			const scored = []
+			for (const candidate of candidates) {
+				if (!(candidate instanceof HTMLElement)) continue
+				if (seen.has(candidate)) continue
+				seen.add(candidate)
+				if (!isVisibleClickTarget(candidate) || isDisabledElement(candidate)) continue
+				if (candidate !== element && !element.contains(candidate) && !candidate.contains(element)) continue
+				const score = scoreNestedActionTarget(candidate, element, input)
+				if (score > 0) scored.push({ candidate, score })
+			}
+			scored.sort((a, b) => b.score - a.score)
+			return scored[0]?.candidate || null
+		}
+
+		function findNestedActionTextPoint(element, input = {}) {
+			if (!(element instanceof HTMLElement)) return null
+			if (!shouldPreferNestedActionTarget(element, input)) return null
+			const candidates = []
+			try {
+				candidates.push(
+					...element.querySelectorAll('span,i,em,b,strong,svg,use,[aria-label],[title],[class*="icon"],[class*="plus"]')
+				)
+			} catch (_) {}
+			const seen = new Set()
+			const scored = []
+			for (const candidate of candidates) {
+				if (!(candidate instanceof Element)) continue
+				if (seen.has(candidate)) continue
+				seen.add(candidate)
+				if (!element.contains(candidate)) continue
+				const rect = candidate.getBoundingClientRect()
+				if (rect.width < 2 || rect.height < 2) continue
+				const score = scoreNestedActionTarget(candidate, element, input)
+				if (score > 0) {
+					scored.push({
+						point: {
+							x: rect.left + rect.width / 2,
+							y: rect.top + rect.height / 2,
+						},
+						score,
+					})
+				}
+			}
+			scored.sort((a, b) => b.score - a.score)
+			return scored[0]?.point || null
+		}
+
+		function shouldPreferNestedActionTarget(element, input = {}) {
+			const labels = getActionInputTargetLabels(input)
+			if (labels.length) return true
+			return containsCreateLikeActionText(getElementActionLabel(element))
+		}
+
+		function scoreNestedActionTarget(candidate, root, input = {}) {
+			const desiredLabels = getActionInputTargetLabels(input).map(normalizeActionText).filter(Boolean)
+			const label = getElementActionLabel(candidate)
+			const key = normalizeActionText(label)
+			const classText = getElementClassText(candidate)
+			const classKey = normalizeActionText(classText)
+			const rootKey = normalizeActionText(getElementActionLabel(root))
+			const wantsCreate = desiredLabels.some(isCreateLikeActionKey) || containsCreateLikeActionText(rootKey)
+			let score = 0
+			if (desiredLabels.length) {
+				if (desiredLabels.includes(key)) score += 100
+				else if (desiredLabels.some((desired) => desired && (key.includes(desired) || desired.includes(key)))) score += 70
+			}
+			if (wantsCreate) {
+				if (isCreateLikeActionKey(key)) score += 80
+				else if (containsCreateLikeActionText(key) && key.length <= 16) score += 45
+				if (/(plus|add|create|new|el-icon-plus|icon-add|iconplus)/i.test(classText)) score += 20
+			}
+			if (score <= 0) return 0
+			const tag = String(candidate.tagName || '').toLowerCase()
+			const role = String(candidate.getAttribute?.('role') || '').toLowerCase()
+			if (tag === 'button' || role === 'button' || tag === 'a' || role === 'link') score += 18
+			if (/btn|button|el-button|ant-btn|arco-btn|n-button|van-button/i.test(classText)) score += 12
+			if (candidate !== root) score += 10
+			const rect = candidate.getBoundingClientRect()
+			const rootRect = root.getBoundingClientRect()
+			const area = Math.max(1, rect.width * rect.height)
+			const rootArea = Math.max(1, rootRect.width * rootRect.height)
+			if (area > rootArea * 0.8 && candidate !== root) score -= 30
+			if (key.length > 24) score -= Math.min(25, Math.floor((key.length - 24) / 4) + 6)
+			if (isTopLayerAtCenter(candidate, rect)) score += 6
+			if (/switch|checkbox|radio|select|dropdown|cascader/i.test(`${role} ${classKey}`)) score -= 60
+			return score
+		}
+
+		function getActionInputTargetLabels(input = {}) {
+			const values = [
+				input.target_label,
+				input.workflow_create_label,
+				input.label,
+				input.text,
+				input.target_description,
+			]
+			const labels = []
+			for (const value of values) {
+				const text = String(value || '').trim()
+				if (!text) continue
+				for (const part of text.split(/[、,，;；|/]+/)) {
+					const label = part.trim()
+					if (label) labels.push(label)
+				}
+			}
+			return [...new Set(labels)]
+		}
+
+		function getElementActionLabel(element) {
+			if (!(element instanceof Element)) return ''
+			const values = [
+				element.getAttribute?.('aria-label'),
+				element.getAttribute?.('title'),
+				element.getAttribute?.('value'),
+			]
+			if (element instanceof HTMLElement) values.push(observer.getElementText(element))
+			return values.map((value) => String(value || '').trim()).filter(Boolean).join(' ')
+		}
+
+		function normalizeActionText(value) {
+			return String(value || '')
+				.replace(/\s+/g, '')
+				.trim()
+				.toLowerCase()
+		}
+
+		function containsCreateLikeActionText(value) {
+			return /(新增|新建|创建|添加|增加|\+|add|create|new)/i.test(normalizeActionText(value))
+		}
+
+		function isCreateLikeActionKey(value) {
+			const key = normalizeActionText(value)
+			return /^(新增|新建|创建|添加|增加|\+|add|create|new)$/.test(key)
+		}
+
+		function isTopLayerAtCenter(element, rect) {
+			const x = rect.left + rect.width / 2
+			const y = rect.top + rect.height / 2
+			if (x < 1 || y < 1 || x > window.innerWidth - 1 || y > window.innerHeight - 1) return false
+			const hit = document.elementFromPoint(x, y)
+			return hit instanceof Element && (hit === element || element.contains(hit) || hit.contains(element))
+		}
+
+		function buildClickInfo(clickElement, hitTarget, target, x, y) {
+			return {
+				point: { x: Math.round(x), y: Math.round(y) },
+				clickTarget: summarizeClickElement(clickElement),
+				hitTarget: summarizeClickElement(hitTarget),
+				dispatchTarget: summarizeClickElement(target),
+			}
+		}
+
+		function summarizeClickElement(element) {
+			if (!(element instanceof Element)) return null
+			const rect = element.getBoundingClientRect()
+			return {
+				tag: String(element.tagName || '').toLowerCase(),
+				role: String(element.getAttribute?.('role') || ''),
+				text: element instanceof HTMLElement ? observer.shortText(observer.getElementText(element), 36) : '',
+				className: observer.shortText(getElementClassText(element), 60),
+				rect: {
+					left: Math.round(rect.left),
+					top: Math.round(rect.top),
+					width: Math.round(rect.width),
+					height: Math.round(rect.height),
+				},
+			}
+		}
+
+		function formatClickTargetMessage(clickInfo) {
+			const target = clickInfo?.clickTarget
+			if (!target) return ''
+			const role = target.role ? ` role=${target.role}` : ''
+			const text = target.text ? ` "${target.text}"` : ''
+			const point = clickInfo?.point ? ` @${clickInfo.point.x},${clickInfo.point.y}` : ''
+			return `，点击目标=${target.tag}${role}${text}${point}`
+		}
+
+		function getElementClassText(element) {
+			const value = element?.className
+			if (typeof value === 'string') return value
+			if (typeof value?.baseVal === 'string') return value.baseVal
+			return ''
 		}
 
 		function isVisibleClickTarget(element) {

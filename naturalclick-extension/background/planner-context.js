@@ -1,5 +1,7 @@
 ;(function (g) {
 	const controlSemantics = g.NC_CONTROL_SEMANTICS || null
+	const DEFAULT_FULL_OBSERVATION_MAX_CHARS = 262144
+	const DEFAULT_COMPACT_OBSERVATION_MAX_CHARS = 4200
 
 	function buildObservationText(observation, opts = {}) {
 		const parts = []
@@ -137,7 +139,10 @@
 		} else {
 			parts.push(`<raw_candidates omitted="${compactReason}" />`)
 		}
-		return limitObservationText(parts, opts.maxChars || (compact ? 4200 : 8000))
+		return limitObservationText(
+			parts,
+			opts.maxChars || (compact ? DEFAULT_COMPACT_OBSERVATION_MAX_CHARS : DEFAULT_FULL_OBSERVATION_MAX_CHARS)
+		)
 	}
 
 	function countFormRows(forms) {
@@ -658,14 +663,17 @@
 		const options = Array.isArray(item.optionLabels) && item.optionLabels.length
 			? ` options="${shortText(item.optionLabels.join('|'), 160)}"`
 			: ''
-		return `element index=${item.index} region=${item.region || '-'} role=${item.role || '-'} fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} label="${shortText(item.label || item.placeholder || item.text || '', 48)}" value=${item.valueState || '-'}${options} rect=${formatRect(item.rect)}`
+		const validation = item.invalid || item.validationMessage
+			? ` invalid=${item.invalid ? 'true' : 'false'} error="${shortText(item.validationMessage || '', 96)}"`
+			: ''
+		return `element index=${item.index} region=${item.region || '-'} role=${item.role || '-'} fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} label="${shortText(item.label || item.placeholder || item.text || '', 48)}" value=${item.valueState || '-'}${validation}${options} rect=${formatRect(item.rect)}`
 	}
 
 	function formatElementDetailLine(item) {
 		const hint = item.selectorHints || {}
 		return [
 			formatElementBriefLine(item),
-			`stableId=${item.stableId || '-'} tag=${item.tag || '-'} type=${item.type || '-'} labelSource=${item.labelSource || '-'} labelConf=${item.labelConfidence || '-'} aliases="${Array.isArray(item.aliases) ? item.aliases.join('|') : ''}" expanded=${item.expandedState || '-'} required=${item.required ? 'true' : 'false'} conf=${item.confidence || '-'}`,
+			`stableId=${item.stableId || '-'} tag=${item.tag || '-'} type=${item.type || '-'} labelSource=${item.labelSource || '-'} labelConf=${item.labelConfidence || '-'} aliases="${Array.isArray(item.aliases) ? item.aliases.join('|') : ''}" expanded=${item.expandedState || '-'} required=${item.required ? 'true' : 'false'} invalid=${item.invalid ? 'true' : 'false'} errorSource=${item.validationSource || '-'} conf=${item.confidence || '-'}`,
 			`placeholder="${item.placeholder || ''}" text="${shortText(item.text || '', 80)}"`,
 			`selectorHints=${JSON.stringify(hint)} domPath="${shortText(item.domPath || '', 160)}"`,
 		].join('\n')
@@ -696,6 +704,9 @@
 				: '',
 			`expanded=${field.expandedState || '-'}`,
 			`required=${field.required ? 'true' : 'false'}`,
+			`invalid=${field.invalid ? 'true' : 'false'}`,
+			field.validationMessage ? `error="${shortText(field.validationMessage, 120)}"` : '',
+			field.validationSource ? `errorSource=${field.validationSource}` : '',
 			`conf=${field.confidence || '-'}`,
 		].filter(Boolean).join(' ')
 	}
@@ -705,6 +716,7 @@
 			`action index=${action.index}`,
 			action.stableId ? `sid=${action.stableId}` : '',
 			action.region ? `region=${action.region}` : '',
+			action.rect ? `rect=${formatRect(action.rect)}` : '',
 			`intent=${action.actionIntent || 'unknown'}`,
 			action.controlKind ? `kind=${action.controlKind}` : '',
 			`label="${shortText(action.label || action.text || '', 48)}"`,

@@ -44,6 +44,7 @@
 			const options = buildOptionCandidates(elements)
 			const popups = buildPopupCandidates(elements)
 			const panels = buildPanelCandidates(elements)
+			const feedback = collectPageFeedbackMessages()
 			const candidateDiagnostics = buildCandidateDiagnostics(indexedElements)
 			const rawCandidates = lines
 			const treeCandidates = buildDomTree(elements)
@@ -69,6 +70,7 @@
 				options,
 				popups,
 				panels,
+				feedback,
 				candidateDiagnostics,
 				elements,
 				treeCandidates,
@@ -80,6 +82,7 @@
 					options,
 					popups,
 					panels,
+					feedback,
 					candidateDiagnostics,
 					treeCandidates,
 					simplifiedDom,
@@ -1095,6 +1098,7 @@
 		const relationHints = getRelationHints(element)
 		const popupHints = getPopupContainerHints(element)
 		const navigationTarget = getNavigationTargetHint(element)
+		const validationState = readValidationState(element)
 		const snapshot = {
 			index,
 			stableId: '',
@@ -1122,6 +1126,9 @@
 			editable,
 			clickable,
 			required: isRequiredFieldControl(element),
+			invalid: validationState.invalid,
+			validationMessage: shortText(validationState.message, 120),
+			validationSource: validationState.source,
 			rect: getElementRect(element),
 			selectorHints: getSelectorHints(element),
 			domPath: shortText(getDomPath(element), 120),
@@ -1148,6 +1155,216 @@
 			}
 		}
 		return false
+	}
+
+	function readValidationState(element) {
+		if (!(element instanceof HTMLElement)) return { invalid: false, message: '', source: '' }
+		const target = resolveValidationTarget(element) || element
+		const messages = []
+		const sources = []
+		let invalid = false
+		for (const node of uniqueElements([target, element])) {
+			if (!(node instanceof HTMLElement)) continue
+			if (String(node.getAttribute('aria-invalid') || '').toLowerCase() === 'true') {
+				invalid = true
+				sources.push('aria-invalid')
+			}
+			const nativeMessage = readNativeValidationMessage(node)
+			if (nativeMessage) {
+				invalid = true
+				pushUniqueValidationMessage(messages, nativeMessage)
+				sources.push('native-validation')
+			}
+			for (const message of readIdRefValidationMessages(node)) {
+				pushUniqueValidationMessage(messages, message)
+				sources.push('aria-message')
+			}
+			if (hasValidationErrorState(node)) {
+				invalid = true
+				sources.push('control-state')
+			}
+		}
+		const container = findValidationContainer(target)
+		if (container instanceof HTMLElement) {
+			if (hasValidationErrorState(container)) {
+				invalid = true
+				sources.push('container-state')
+			}
+			for (const message of collectValidationMessages(container)) {
+				pushUniqueValidationMessage(messages, message)
+				sources.push('container-message')
+			}
+		}
+		if (messages.length) invalid = true
+		return {
+			invalid,
+			message: messages.slice(0, 3).join(' | '),
+			source: Array.from(new Set(sources)).slice(0, 4).join('|'),
+		}
+	}
+
+	function resolveValidationTarget(element) {
+		if (!(element instanceof HTMLElement)) return null
+		if (isNativeValidatableElement(element) || element.hasAttribute('aria-invalid')) return element
+		const nested = element.querySelector?.('input,textarea,select,[contenteditable="true"],[aria-invalid],[aria-errormessage],[aria-describedby]')
+		return nested instanceof HTMLElement ? nested : null
+	}
+
+	function isNativeValidatableElement(element) {
+		return element instanceof HTMLInputElement ||
+			element instanceof HTMLTextAreaElement ||
+			element instanceof HTMLSelectElement
+	}
+
+	function readNativeValidationMessage(element) {
+		if (!isNativeValidatableElement(element)) return ''
+		try {
+			if (element.validity && element.validity.valid === false) {
+				return cleanValidationMessage(element.validationMessage)
+			}
+		} catch (_) {}
+		return ''
+	}
+
+	function readIdRefValidationMessages(element) {
+		const messages = []
+		for (const attr of ['aria-errormessage', 'aria-describedby']) {
+			const ids = String(element.getAttribute(attr) || '').trim().split(/\s+/).filter(Boolean)
+			for (const id of ids) {
+				const node = findElementByIdRef(element, id)
+				if (!(node instanceof HTMLElement) || !isElementVisible(node)) continue
+				const text = cleanValidationMessage(getElementText(node))
+				if (text && isLikelyValidationMessage(text)) messages.push(text)
+			}
+		}
+		return messages
+	}
+
+	function findElementByIdRef(element, id) {
+		const root = element?.getRootNode?.()
+		if (root && typeof root.getElementById === 'function') {
+			const found = root.getElementById(id)
+			if (found instanceof HTMLElement) return found
+		}
+		try {
+			const found = document.getElementById(id) || document.querySelector(`#${CSS.escape(id)}`)
+			return found instanceof HTMLElement ? found : null
+		} catch (_) {
+			return null
+		}
+	}
+
+	function findValidationContainer(element) {
+		if (!(element instanceof HTMLElement)) return null
+		return element.closest?.(
+			'.el-form-item,.ant-form-item,.arco-form-item,.n-form-item,.avue-form__row,.van-field,.ivu-form-item,.layui-form-item,.q-field,.vxe-form--item,.form-item,.form-group,.field,[class*="form-item"]'
+		)
+	}
+
+	function hasValidationErrorState(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const cls = String(element.className || '')
+		if (/(^|\s)(is-error|has-error|error|invalid|is-invalid|has-danger)(\s|$)/i.test(cls)) return true
+		return String(element.getAttribute('aria-invalid') || '').toLowerCase() === 'true'
+	}
+
+	function collectValidationMessages(container) {
+		const selectors = [
+			{ selector: '.el-form-item__error', strict: false },
+			{ selector: '.ant-form-item-explain-error,.ant-form-item-explain', strict: false },
+			{ selector: '.arco-form-message,.arco-form-item-message', strict: false },
+			{ selector: '.n-form-item-feedback__line,.n-form-item-feedback-wrapper', strict: false },
+			{ selector: '.van-field__error-message', strict: false },
+			{ selector: '.ivu-form-item-error-tip', strict: false },
+			{ selector: '.invalid-feedback,.form-error,.field-error,.error-message,.help-block', strict: false },
+			{ selector: '[role="alert"],[aria-live="assertive"],[aria-live="polite"]', strict: false },
+			{ selector: '[class*="error"],[class*="invalid"]', strict: true },
+		]
+		const messages = []
+		for (const item of selectors) {
+			for (const node of querySelectorAllDeep(item.selector, container)) {
+				if (!(node instanceof HTMLElement) || !isElementVisible(node)) continue
+				if (node.querySelector?.('input,textarea,select,button,[role="button"]')) continue
+				const text = cleanValidationMessage(getElementText(node))
+				if (!text) continue
+				if (item.strict && !isLikelyValidationMessage(text)) continue
+				pushUniqueValidationMessage(messages, text)
+			}
+		}
+		return messages
+	}
+
+	function cleanValidationMessage(value) {
+		return shortText(String(value || '').replace(/\s+/g, ' ').trim(), 120)
+	}
+
+	function isLikelyValidationMessage(text) {
+		return /不能为空|必填|请选择|请输入|请填写|请录入|校验|验证|格式|错误|失败|required|invalid|error|please|required field|must|missing|cannot|can't/i.test(String(text || ''))
+	}
+
+	function pushUniqueValidationMessage(list, value) {
+		const text = cleanValidationMessage(value)
+		if (!text || list.includes(text)) return
+		list.push(text)
+	}
+
+	function uniqueElements(items) {
+		const seen = new Set()
+		const result = []
+		for (const item of items) {
+			if (!(item instanceof HTMLElement) || seen.has(item)) continue
+			seen.add(item)
+			result.push(item)
+		}
+		return result
+	}
+
+	function collectPageFeedbackMessages() {
+		const selector = [
+			'.el-message',
+			'.el-notification',
+			'.ant-message-notice-content',
+			'.ant-notification-notice',
+			'.arco-message',
+			'.arco-notification',
+			'.n-message',
+			'.n-notification',
+			'.van-toast',
+			'.ivu-message',
+			'.ivu-notice',
+			'.layui-layer-content',
+			'.toast',
+			'.notification',
+			'[role="alert"]',
+			'[aria-live="assertive"]',
+			'[aria-live="polite"]',
+		].join(',')
+		const messages = []
+		for (const node of querySelectorAllDeep(selector)) {
+			if (!(node instanceof HTMLElement)) continue
+			if (node.closest('#naturalclick-right-dock-host')) continue
+			if (!isElementVisible(node)) continue
+			const text = cleanValidationMessage(getElementText(node))
+			if (!text || text.length < 2) continue
+			if (node.querySelector?.('input,textarea,select,button,[role="button"]')) continue
+			if (messages.some((item) => item.text === text)) continue
+			messages.push({
+				text,
+				kind: inferFeedbackKind(text, node),
+				region: inferElementRegion(node),
+				rect: getElementRect(node),
+			})
+			if (messages.length >= 20) break
+		}
+		return messages
+	}
+
+	function inferFeedbackKind(text, element) {
+		const source = `${text} ${String(element?.className || '')}`.toLowerCase()
+		if (/成功|完成|success|saved|created|submitted/.test(source)) return 'success'
+		if (/失败|错误|异常|不能为空|必填|请选择|请输入|重复|已存在|唯一|required|invalid|duplicate|error|failed/.test(source)) return 'error'
+		if (/警告|warning|warn/.test(source)) return 'warning'
+		return 'info'
 	}
 
 	function getObservedControlKind(item) {
@@ -1181,12 +1398,22 @@
 		if (item.popupHints) attrs.push(`popup="${shortText(item.popupHints, 96)}"`)
 		if (item.newSinceLastObservation) attrs.push('new="true"')
 		if (item.required) attrs.push('required="true"')
+		if (item.invalid) attrs.push('invalid="true"')
+		if (item.validationMessage) attrs.push(`error="${shortText(item.validationMessage, 80)}"`)
+		if (item.validationSource) attrs.push(`errorSource="${shortText(item.validationSource, 48)}"`)
 		attrs.push(`conf="${item.confidence}"`)
 		return `[${item.index}]<${item.tag} ${attrs.join(' ')}>${shortText(item.text, 80)}</${item.tag}>`
 	}
 
-	function formatObservationText({ forms, actions, options, popups, panels, candidateDiagnostics, treeCandidates, simplifiedDom, rawCandidates }) {
+	function formatObservationText({ forms, actions, options, popups, panels, feedback, candidateDiagnostics, treeCandidates, simplifiedDom, rawCandidates }) {
 		const sections = []
+		if (Array.isArray(feedback) && feedback.length) {
+			sections.push('<feedback>')
+			for (const item of feedback.slice(0, 20)) {
+				sections.push(`  feedback kind=${item.kind || 'info'} region=${item.region || '-'} text="${shortText(item.text || '', 120)}" rect=${formatObservationRect(item.rect)}`)
+			}
+			sections.push('</feedback>')
+		}
 		if (Array.isArray(panels) && panels.length) {
 			sections.push('<panels>')
 			for (const panel of panels.slice(0, 12)) {
@@ -1200,7 +1427,7 @@
 				sections.push(`form ${form.id}: ${form.name}`)
 				for (const field of form.fields) {
 					sections.push(
-						`  field index=${field.index} region=${field.region || '-'} fieldType=${field.fieldType || 'unknown'} kind=${field.controlKind || '-'} label="${field.label || field.placeholder || field.text}" source=${field.labelSource || '-'} conf=${field.labelConfidence || '-'} aliases="${(field.aliases || []).join('|')}" container="${field.semanticContainer || '-'}" value=${field.valueState} type=${field.type || '-'} role=${field.role || '-'} control=${field.selectionControl || '-'} options="${Array.isArray(field.optionLabels) ? field.optionLabels.join('|') : ''}" expanded=${field.expandedState || '-'}`
+						`  field index=${field.index} region=${field.region || '-'} fieldType=${field.fieldType || 'unknown'} kind=${field.controlKind || '-'} label="${field.label || field.placeholder || field.text}" source=${field.labelSource || '-'} conf=${field.labelConfidence || '-'} aliases="${(field.aliases || []).join('|')}" container="${field.semanticContainer || '-'}" value=${field.valueState} type=${field.type || '-'} role=${field.role || '-'} control=${field.selectionControl || '-'} required=${field.required ? 'true' : 'false'} invalid=${field.invalid ? 'true' : 'false'} error="${field.validationMessage || ''}" options="${Array.isArray(field.optionLabels) ? field.optionLabels.join('|') : ''}" expanded=${field.expandedState || '-'}`
 					)
 				}
 			}
@@ -1224,7 +1451,7 @@
 			sections.push('<actions>')
 			for (const action of actions.slice(0, 60)) {
 				sections.push(
-					`  action index=${action.index} region=${action.region || '-'} intent=${action.actionIntent || 'unknown'} kind=${action.controlKind || '-'} label="${action.label || action.text}" role=${action.role || '-'} value=${action.valueState || 'unknown'} control=${action.selectionControl || '-'} expanded=${action.expandedState || '-'}`
+					`  action index=${action.index} region=${action.region || '-'} rect=${formatObservationRect(action.rect)} intent=${action.actionIntent || 'unknown'} kind=${action.controlKind || '-'} label="${action.label || action.text}" role=${action.role || '-'} value=${action.valueState || 'unknown'} control=${action.selectionControl || '-'} expanded=${action.expandedState || '-'}`
 				)
 			}
 			sections.push('</actions>')
@@ -1249,6 +1476,15 @@
 		}
 		sections.push('</raw_candidates>')
 		return sections.join('\n') || '(no interactive elements found)'
+	}
+
+	function formatObservationRect(rect) {
+		if (!rect || typeof rect !== 'object') return '-'
+		const left = Math.round(Number(rect.left) || 0)
+		const top = Math.round(Number(rect.top) || 0)
+		const width = Math.round(Number(rect.width) || 0)
+		const height = Math.round(Number(rect.height) || 0)
+		return `${left},${top},${width}x${height}`
 	}
 
 	function formatCandidateDiagnostics(candidateDiagnostics) {

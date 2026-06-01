@@ -26,7 +26,7 @@
 		const thought = normalizeLoopText(decision?.thought || '')
 		const memory = normalizeLoopText(decision?.memory || '')
 		const inputSig = stableActionInputSignatureForAction(actionName, decision?.action?.input || {})
-		const recent = Array.isArray(session?.history) ? session.history.slice(-8) : []
+		const recent = getRepeatDetectionWindow(session, actionName, decision?.action?.input || {})
 		const sameGoalActionCount = recent.filter(
 			(item) =>
 				item?.success &&
@@ -148,6 +148,36 @@
 			if (item.success === false && /\.loop_guard$/i.test(String(item.action || ''))) count += 1
 		}
 		return count
+	}
+
+	function getRepeatDetectionWindow(session, actionName, input) {
+		const recent = Array.isArray(session?.history) ? session.history.slice(-8) : []
+		if (!isFormSubmitRecoveryAction(actionName, input)) return recent
+		for (let index = recent.length - 1; index >= 0; index -= 1) {
+			if (isFormValueChangeHistory(recent[index])) return recent.slice(index + 1)
+		}
+		return recent
+	}
+
+	function isFormSubmitRecoveryAction(actionName, input) {
+		if (actionName !== 'click' && actionName !== 'click_element_by_index') return false
+		return String(input?.workflow_step || '') === 'submit_form_timeout_recovery'
+	}
+
+	function isFormValueChangeHistory(item) {
+		if (!item || item.success === false) return false
+		const action = normalizeHistoryActionName(item.action, item.input)
+		const input = item.input || {}
+		const workflow = String(input.workflow || '')
+		const step = String(input.workflow_step || '')
+		if (action === 'input_text' || action === 'type') {
+			return workflow === 'form-fill' ||
+				step === 'fill_form_field_timeout_recovery' ||
+				step === 'resolve_duplicate_field_conflict' ||
+				step === 'resolve_field_validation_error'
+		}
+		return hasVerifiedProgress(item) &&
+			/(form|field|dropdown|cascader|duplicate|resolve)/i.test(`${workflow} ${step}`)
 	}
 
 	function getUnsafeDoneSuccessReason(session, decision) {

@@ -44,15 +44,27 @@ async function main() {
 	await assertPlannerHeuristicTaskIntentBeforeNavigation()
 	await assertPlannerCompactRetryAfterTimeout()
 	await assertPlannerStartsCompactForLargeObservation()
+	await assertPlannerUsesConfiguredObservationLimits()
 	await assertPlannerDoesNotRepeatCompactTimeoutForLargeObservation()
 	await assertPlannerPublishesPlanningProgress()
 	await assertPlannerModelClientTraceDiagnostics()
 	await assertPlannerTimeoutWithoutRecoveryEndsGracefully()
+	await assertPlannerTimeoutRecoveryOpensCreateEntry()
 	await assertPlannerTimeoutRecoverySelectsExplicitCascaderPath()
 	await assertPlannerTimeoutRecoveryFillsAssignedTextBeforeCascader()
 	await assertPlannerTimeoutRecoveryCleansDanglingCascaderPunctuation()
 	await assertPlannerTimeoutRecoveryClicksVisibleCascaderCandidate()
 	await assertPlannerTimeoutRecoverySubmitsAfterFormFillRecovery()
+	await assertPlannerPreModelFormFillSkipsModelWhenDeterministic()
+	await assertPlannerPreModelFormFillMatchesSpecificNameAlias()
+	await assertPlannerDuplicateFormConflictAsksForReplacement()
+	await assertPlannerAmbiguousDuplicateFormConflictUsesModel()
+	await assertPlannerAmbiguousDuplicateAfterReplacementUsesModel()
+	await assertPlannerDuplicateFormConflictUsesUserReplacement()
+	await assertPlannerDuplicateFormConflictSubmitsAfterReplacement()
+	await assertPlannerDuplicateFormConflictIgnoresLoopGuardAfterReplacement()
+	await assertPlannerValidationErrorCorrectsForbiddenCharacters()
+	await assertPlannerValidationCorrectionSubmits()
 	await assertPlannerHistoryOutcomeGuidesReplanning()
 	await assertPlannerRejectsRepeatedFailedDropdownRequest()
 	await assertPlannerRejectsRepeatedDropdownOpenAfterVisibleOptions()
@@ -88,6 +100,8 @@ async function main() {
 	assertDropdownActionsUseCompositePickerTriggers()
 	assertObserverPreservesNestedNavigationItems()
 	assertObserverKeepsCrudTextActionCandidates()
+	assertActionsPreferNestedActionClickTargets()
+	assertObservationActionLinesExposeRects()
 	assertVisionHitTestClickableSemantics()
 	assertVisionCandidatesUseSemanticTargetDescription()
 	assertVisionCaptureHidesNaturalClickOverlays()
@@ -125,12 +139,15 @@ async function main() {
 	assertNestedSelectionControlStateChangesAreVerified()
 	await assertVerifierRejectsDropdownSelectionWithoutValueChange()
 	await assertVerifierRetriesDropdownSelectionUntilFieldValueChanges()
+	await assertVerifierAcceptsTimedOutSelectionWhenValueIsSatisfied()
 	await assertVerifierRejectsDialogCloseAfterFieldSelection()
+	await assertVerifierSeparatesSubmitFromCreateEntryVerification()
 	await assertLocateByVisionDelegatesToExecutableCoordinateAction()
 	assertVisionFallbackPreservesCoordinateActionOutcome()
 	assertLocateByVisionRegisteredAsBackgroundTool()
 	await assertVerifierChecksLocateByVisionInput()
 	await assertVerifierRejectsNoopClick()
+	await assertVerifierRejectsCreateClickWithoutForm()
 	await assertVerifierRejectsFocusOnlyClick()
 	await assertVerifierRetriesTransitionObservation()
 	await assertVerifierAcceptsDropdownOpenProbe()
@@ -146,6 +163,7 @@ async function main() {
 	assertSessionRecordsExtractedFromSessionEngine()
 	assertSessionRecoveryExtractedFromSessionEngine()
 	assertSessionRecoveryRecognizesStructuredSemanticFailures()
+	assertSessionRecoverySkipsSubmitVerificationVisionRecovery()
 	assertSessionTimingExtractedFromSessionEngine()
 	assertSessionLifecycleExtractedFromSessionEngine()
 	assertPlannerContextExtractedFromPlanner()
@@ -154,6 +172,9 @@ async function main() {
 	assertPlannerModelClientExtractedFromPlanner()
 	assertPlannerDecisionExtractedFromPlanner()
 	assertPlannerPromptExtractedFromPlanner()
+	assertPlannerPromptHandlesCreateFormNotOpened()
+	assertPlannerCompactPromptTrimsTabsAndToolDescriptions()
+	assertPlanningContextConfigIsUserConfigurable()
 	assertLoginWorkflowBehavior()
 	assertTaskNavigationWorkflowBehavior()
 	assertSearchWorkflowBehavior()
@@ -161,6 +182,7 @@ async function main() {
 	assertObserverUsesCentralSemantics()
 	assertObserverSupportsShadowDomAndBroaderControls()
 	assertObserverOptionSnapshotsExposePopupOwner()
+	assertObserverCapturesFormValidationFeedback()
 	assertActionStateExtractedFromActions()
 	assertActionInputExtractedFromActions()
 	assertActionFailuresUseStructuredOutcomes()
@@ -173,6 +195,7 @@ async function main() {
 	assertSelectionFailuresUseStructuredOutcomes()
 	await assertVerifierUsesStructuredOutcome()
 	assertModelReasoningIsSurfaced()
+	assertSidepanelExposesPlanningContextSettings()
 	assertManifestVersion()
 
 	console.log(`runtime contracts ok (${checked.length} js files checked)`)
@@ -241,6 +264,9 @@ function assertPlannerBudgetCoversInternalRounds() {
 	}
 	if (!sessionTiming.includes('function getEffectiveModelRoundTimeoutMs') || !sessionTiming.includes('MAX_MODEL_PLANNING_CALLS') || !sessionTiming.includes('MAX_CONFIGURED_MODEL_ROUND_TIMEOUT_MS')) {
 		throw new Error('session planning timeout should be derived from the effective per-round model timeout')
+	}
+	if (!sessionTiming.includes("workflowStep === 'submit_form_timeout_recovery'") || !sessionTiming.includes('await sleep(900)')) {
+		throw new Error('form submit actions should settle longer before verification to avoid duplicate recovery clicks')
 	}
 }
 
@@ -458,6 +484,47 @@ function assertObserverKeepsCrudTextActionCandidates() {
 	}
 	if (!diagnosticsFn.includes('unindexedTextActionProbes') || !diagnosticsFn.includes('outerHTML')) {
 		throw new Error('observer should export unindexed text-action diagnostics for copied sessions')
+	}
+}
+
+function assertActionsPreferNestedActionClickTargets() {
+	const actions = read('naturalclick-extension/content/actions.js')
+	const executeFn = extractFunctionSource(actions, 'executeAction')
+	const clickFn = extractFunctionSource(actions, 'clickByIndex')
+	const resolveFn = extractFunctionSource(actions, 'resolveClickElement')
+	const pointFn = extractFunctionSource(actions, 'getPreferredClickPoint')
+	if (!/clickByIndex\(index,\s*inputMode,\s*input\)/.test(executeFn)) {
+		throw new Error('click_element_by_index should pass action input through to the click executor')
+	}
+	if (
+		!actions.includes('clickTarget: clickInfo?.clickTarget') ||
+		!actions.includes('hitTarget: clickInfo?.hitTarget') ||
+		!actions.includes('formatClickTargetMessage(clickInfo)')
+	) {
+		throw new Error('click results should log the resolved click target and hit-test details')
+	}
+	if (!actions.includes('findNestedActionControl(element, input)')) {
+		throw new Error('click resolution should prefer nested action controls for create/add buttons inside broad containers')
+	}
+	if (!actions.includes('findNestedActionTextPoint(element, input)')) {
+		throw new Error('click targeting should prefer the nested action text point before falling back to container center')
+	}
+	for (const expected of ['target_label', 'workflow_create_label', 'target_description']) {
+		if (!actions.includes(expected)) {
+			throw new Error(`nested action targeting/recovery diagnostics should include ${expected}`)
+		}
+	}
+}
+
+function assertObservationActionLinesExposeRects() {
+	const observer = read('naturalclick-extension/content/observer.js')
+	const plannerContext = read('naturalclick-extension/background/planner-context.js')
+	if (!observer.includes('rect=${formatObservationRect(action.rect)}') || !observer.includes('function formatObservationRect')) {
+		throw new Error('observer action lines should include action rect geometry for debugging bad clicks')
+	}
+	const formatActionLine = extractFunctionSource(plannerContext, 'formatActionLine')
+	if (!formatActionLine.includes('rect=${formatRect(action.rect)}')) {
+		throw new Error('planner context action lines should include rect geometry')
 	}
 }
 
@@ -793,9 +860,22 @@ function assertTaskIntentBehavior() {
 		customerCreate?.operation !== 'create' ||
 		!customerCreateKeys.includes('客户管理') ||
 		!customerCreateKeys.includes('客户') ||
-		customerCreateKeys.some((key) => /现在帮我|一条客户/.test(key))
+		customerCreateKeys.some((key) => /现在帮我|一条客户|客户管理管理/.test(key))
 	) {
 		throw new Error(`task-intent heuristic should ignore helper/count phrases in customer create tasks, got intent=${JSON.stringify(customerCreate)} keys=${JSON.stringify(customerCreateKeys)}`)
+	}
+	const exportedCustomerTask = '打开这个页面 http://116.205.97.39:8201/ 账号 admin 密码 123456 找到客户管理。你现在帮我新建一条客户数据，客户名称是张三，联系方式是145555555 纳税人识别号是IOOO123456 客户等级是核心，客户性质是IT，产品类别是：民品件，客户所在地是江苏省，南京市，江宁区'
+	const exportedCustomer = taskIntent.deriveHeuristicTaskIntent(exportedCustomerTask)
+	const exportedCustomerSession = { task: exportedCustomerTask, latestTask: exportedCustomerTask, workflowState: {} }
+	taskIntent.storeTaskIntent(exportedCustomerSession, exportedCustomer, { model: 'local-heuristic' })
+	const exportedCustomerKeys = taskIntent.getNavigationTargetKeys(exportedCustomerSession)
+	if (
+		exportedCustomer?.operation !== 'create' ||
+		!exportedCustomerKeys.includes('客户管理') ||
+		!exportedCustomerKeys.includes('客户') ||
+		exportedCustomerKeys.some((key) => /现在帮我|一条客户|地是江苏省|客户管理管理/.test(key))
+	) {
+		throw new Error(`task-intent heuristic should keep exported customer-create task focused on the customer module, got intent=${JSON.stringify(exportedCustomer)} keys=${JSON.stringify(exportedCustomerKeys)}`)
 	}
 	const genericCreate = taskIntent.deriveHeuristicTaskIntent('打开 http://example.test/app，帮我新增一条数据')
 	if (genericCreate?.navigationTargets?.length) {
@@ -1208,6 +1288,13 @@ async function assertPlannerStartsCompactForLargeObservation() {
 	if (!events.some((event) => event.stage === 'model_compact_request')) {
 		throw new Error(`large observation should publish compact first-round progress, got ${JSON.stringify(events)}`)
 	}
+	const compactEvent = events.find((event) => event.stage === 'model_compact_request')
+	const compactText = String(compactEvent?.text || '')
+	for (const expected of ['触发：', 'raw=140/80', '完整≈', '精简≈', '模型=fake-model', '最多等待 60 秒']) {
+		if (!compactText.includes(expected)) {
+			throw new Error(`large observation compact progress should include ${expected}, got ${compactText}`)
+		}
+	}
 	const plannerTests = loadBackgroundModule('naturalclick-extension/background/planner.js', {
 		NC_BG_UTILS: { safeJsonParse: JSON.parse, generateId: () => 'test_id' },
 		NC_BG_CONSTANTS: { MAX_TRACE_ITEMS: 80 },
@@ -1221,6 +1308,94 @@ async function assertPlannerStartsCompactForLargeObservation() {
 	}
 	if (plannerTests.shouldStartWithCompactObservation(buildTestObservation({ rawCount: 2 }), 'short')) {
 		throw new Error('planner test hook should keep small observations on full first-round context')
+	}
+	if (plannerTests.shouldStartWithCompactObservation(buildTestObservation({ rawCount: 2 }), 'x'.repeat(8000))) {
+		throw new Error('planner should not compact only because observation text is around the previous 7600-char threshold')
+	}
+	if (plannerTests.shouldStartWithCompactObservation(buildTestObservation({ rawCount: 2 }), 'x'.repeat(102400))) {
+		throw new Error('planner should not compact at 102400 chars with the default 262144-char threshold')
+	}
+	if (!plannerTests.shouldStartWithCompactObservation(buildTestObservation({ rawCount: 2 }), 'x'.repeat(262144))) {
+		throw new Error('planner should compact when observation text reaches the default 262144-char safety threshold')
+	}
+}
+
+async function assertPlannerUsesConfiguredObservationLimits() {
+	const fetchBodies = []
+	const events = []
+	const observation = {
+		...buildTestObservation(),
+		forms: [],
+		actions: [],
+		elements: [],
+		simplifiedDom: [],
+		rawCandidates: Array.from({ length: 36 }, (_, index) => `candidate-${index} ${'x'.repeat(260)}`),
+	}
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async (_url, init) => {
+			fetchBodies.push(JSON.parse(init.body))
+			return fakeJsonResponse({
+				evaluation_previous_goal: '配置阈值触发精简上下文。',
+				memory: '使用用户配置的规划上下文上限。',
+				thought: '观察文本达到用户配置的完整上限，先用精简上下文规划。',
+				next_goal: '完成配置测试。',
+				action: { name: 'done', input: { text: 'ok', success: true } },
+			})
+		},
+		observation,
+		sessionOverrides: {
+			config: {
+				textLLM: { baseURL: 'http://model.test/v1', model: 'fake-model', apiKey: '' },
+				planning: {
+					fullObservationMaxChars: 7600,
+					compactObservationMaxChars: 1000,
+					compactElementThreshold: 999,
+					compactRawCandidateThreshold: 30,
+				},
+			},
+		},
+		planOptions: {
+			onProgress: (event) => events.push(event),
+		},
+	})
+	assertAction(decision.result, 'done')
+	if (fetchBodies.length !== 1) {
+		throw new Error(`configured observation limits should keep compact-first planning to one request, got ${fetchBodies.length}`)
+	}
+	const firstUser = getUserMessageText(fetchBodies[0])
+	if (!firstUser.includes('omitted="large_observation"')) {
+		throw new Error(`configured full observation limit should trigger compact-first planning, got ${firstUser}`)
+	}
+	const compactText = String(events.find((event) => event.stage === 'model_compact_request')?.text || '')
+	if (!compactText.includes('/7600')) {
+		throw new Error(`compact progress should report configured full limit, got ${compactText}`)
+	}
+	if (!compactText.includes('raw=36/30')) {
+		throw new Error(`compact progress should report configured raw candidate threshold, got ${compactText}`)
+	}
+	const plannerTests = loadBackgroundModule('naturalclick-extension/background/planner.js', {
+		NC_BG_UTILS: { safeJsonParse: JSON.parse, generateId: () => 'test_id' },
+		NC_BG_CONSTANTS: { MAX_TRACE_ITEMS: 80 },
+		NC_BG_TOOLS: { getToolPromptLines: () => [] },
+		chrome: { tabs: { query: async () => [] } },
+		fetch: async () => fakeJsonResponse({ action: { name: 'done', input: { text: 'ok', success: true } } }),
+		AbortController,
+	}).NC_BG_PLANNER_TESTS
+	const configured = plannerTests.getPlanningContextConfig({
+		planning: {
+			fullObservationMaxChars: 7600,
+			compactObservationMaxChars: 999999,
+			compactElementThreshold: 12,
+			compactRawCandidateThreshold: 20000,
+		},
+	})
+	if (
+		configured.fullObservationMaxChars !== 7600 ||
+		configured.compactObservationMaxChars !== 7600 ||
+		configured.compactElementThreshold !== 20 ||
+		configured.compactRawCandidateThreshold !== 10000
+	) {
+		throw new Error(`planner should clamp compact observation to the full limit when configured too high, got ${JSON.stringify(configured)}`)
 	}
 }
 
@@ -1306,6 +1481,13 @@ async function assertPlannerPublishesPlanningProgress() {
 	if (!retryEvents.some((event) => event.stage === 'compact_retry' && /压缩上下文重试/.test(event.text))) {
 		throw new Error(`planner should publish compact retry progress, got ${JSON.stringify(retryEvents)}`)
 	}
+	const retryCompactEvent = retryEvents.find((event) => event.stage === 'compact_retry')
+	const retryCompactText = String(retryCompactEvent?.text || '')
+	for (const expected of ['原因：首轮完整上下文超时', '完整≈', '精简≈', '模型=fake-model', '最多等待 60 秒']) {
+		if (!retryCompactText.includes(expected)) {
+			throw new Error(`compact retry progress should include ${expected}, got ${retryCompactText}`)
+		}
+	}
 }
 
 async function assertPlannerModelClientTraceDiagnostics() {
@@ -1318,6 +1500,7 @@ async function assertPlannerModelClientTraceDiagnostics() {
 			},
 		},
 		AbortController,
+		TextDecoder,
 		fetch: async () => ({
 			ok: true,
 			json: async () => ({
@@ -1378,6 +1561,80 @@ async function assertPlannerModelClientTraceDiagnostics() {
 		throw new Error(`model response preview should combine JSON thought and provider reasoning into displayThought, got ${JSON.stringify(result.io?.response)}`)
 	}
 
+	const contentJson = JSON.stringify({
+		evaluation_previous_goal: 'stream-ok',
+		memory: 'stream-ok',
+		thought: 'stream-thought',
+		next_goal: 'done',
+		action: { name: 'done', input: { text: 'ok', success: true } },
+	})
+	const streamChunks = [
+		{ id: 'chatcmpl-stream', model: 'fake-model', choices: [{ delta: { reasoning_content: '流式推理摘要' } }] },
+		{ id: 'chatcmpl-stream', model: 'fake-model', choices: [{ delta: { content: contentJson.slice(0, 32) } }] },
+		{ id: 'chatcmpl-stream', model: 'fake-model', choices: [{ delta: { content: contentJson.slice(32) } }], usage: { total_tokens: 2 } },
+	]
+	const encodedStreamChunks = streamChunks
+		.map((payload) => `data: ${JSON.stringify(payload)}\n\n`)
+		.concat('data: [DONE]\n\n')
+		.map((chunk) => new TextEncoder().encode(chunk))
+	let sentStreamBody = null
+	let streamReadIndex = 0
+	const streamEvents = []
+	const streamSandbox = loadBackgroundModule('naturalclick-extension/background/planner-model-client.js', {
+		NC_BG_PLANNER_CONTEXT: {
+			shortText: (value, maxLen) => {
+				const text = String(value || '')
+				if (text.length <= maxLen) return text
+				return `${text.slice(0, maxLen)} ...[truncated ${text.length - maxLen}]`
+			},
+		},
+		AbortController,
+		TextDecoder,
+		fetch: async (_url, init) => {
+			sentStreamBody = JSON.parse(init.body)
+			return {
+				ok: true,
+				body: {
+					getReader: () => ({
+						read: async () => {
+							if (streamReadIndex >= encodedStreamChunks.length) return { done: true }
+							return { done: false, value: encodedStreamChunks[streamReadIndex++] }
+						},
+					}),
+				},
+				json: async () => {
+					throw new Error('streaming model client should not fall back to response.json() when a reader exists')
+				},
+			}
+		},
+	})
+	const streamResult = await streamSandbox.NC_BG_PLANNER_MODEL_CLIENT.callOpenAI(
+		{ baseURL: 'http://model.test/v1', model: 'fake-model', apiKey: '', stream: true },
+		[
+			{ role: 'system', content: '系统提示' },
+			{ role: 'user', content: '用户观察' },
+		],
+		{ returnMeta: true, timeoutMs: 60000, onStream: (event) => streamEvents.push(event) }
+	)
+	if (sentStreamBody?.stream !== true) {
+		throw new Error(`model client should request streaming responses by default, got ${JSON.stringify(sentStreamBody)}`)
+	}
+	if (!String(streamResult.content || '').includes('stream-thought') || streamResult.io?.response?.stream !== true) {
+		throw new Error(`streaming model client should concatenate streamed content and mark response stream=true, got ${JSON.stringify(streamResult)}`)
+	}
+	if (!String(streamResult.io?.response?.displayThought || '').includes('流式推理摘要')) {
+		throw new Error(`streaming model response should preserve streamed reasoning in displayThought, got ${JSON.stringify(streamResult.io?.response)}`)
+	}
+	if (!streamEvents.some((event) => event.done === false && String(event.reasoning || '').includes('流式推理摘要'))) {
+		throw new Error(`streaming model client should publish interim stream deltas, got ${JSON.stringify(streamEvents)}`)
+	}
+	if (!streamEvents.some((event) => event.done === true && String(event.content || '').includes('stream-thought'))) {
+		throw new Error(`streaming model client should publish a final stream event, got ${JSON.stringify(streamEvents)}`)
+	}
+	if (streamSandbox.NC_BG_PLANNER_MODEL_CLIENT.parseStreamLine('data: [DONE]')?.done !== true) {
+		throw new Error('streaming model client should parse SSE done sentinels')
+	}
+
 	const reasoningOnlyDecision = await runPlannerWithFakeModel({
 		fetchImpl: async () => fakeJsonResponse({
 			evaluation_previous_goal: '已收到观察。',
@@ -1426,6 +1683,174 @@ async function assertPlannerTimeoutWithoutRecoveryEndsGracefully() {
 	}
 	if (!decision.session.traceItems.some((item) => item.title === '模型调用: 文本规划压缩重试' && item.kind === 'error')) {
 		throw new Error(`timeout without recovery should preserve compact retry error trace, got ${JSON.stringify(decision.session.traceItems)}`)
+	}
+}
+
+async function assertPlannerTimeoutRecoveryOpensCreateEntry() {
+	const task = '新建一条客户数据，客户名称是张三。'
+	const observation = {
+		...buildTestObservation(),
+		url: 'http://example.test/app#/crm/customer',
+		title: '客户管理-客户-示例系统',
+		forms: [
+			{
+				id: 'page_form',
+				name: '页面表单',
+				fields: [
+					{ index: 2, region: 'content', fieldType: 'select', kind: 'dropdown', label: '首页个人信息退出登录', valueState: 'selected:首页个人信息退出登录', role: 'combobox' },
+				],
+			},
+		],
+		actions: [
+			{ index: 5, region: 'sidebar', role: 'menuitem', label: '客户管理', state: 'classState=is-active|is-opened', valueState: 'unknown' },
+			{ index: 7, region: 'sidebar', role: 'menuitem', label: '客户', state: 'classState=is-active', valueState: 'unknown' },
+			{ index: 37, region: 'content', label: 'llm自然语言识别新增客户2', actionIntent: 'create', valueState: 'unknown' },
+			{ index: 39, region: 'content', label: 'llm自然语言识别新增客户1', actionIntent: 'create', valueState: 'unknown' },
+			{ index: 27, region: 'sidebar', role: 'button', label: '新 增', actionIntent: 'create', valueState: 'unknown', rect: { left: 240, top: 130 } },
+		],
+		elements: [],
+		simplifiedDom: [],
+	}
+	const intentState = {
+		version: 2,
+		status: 'ready',
+		intent: {
+			navigationTargets: [
+				{ raw: '客户管理', canonical: '客户管理', aliases: ['客户管理'] },
+				{ raw: '客户', canonical: '客户', aliases: ['客户'] },
+			],
+			operation: 'create',
+			createEntryLabels: ['新增', '新建', '创建', '添加', '新 增'],
+			forbiddenNavigationTargets: ['客户新增', '客户管理新增'],
+		},
+	}
+	const events = []
+	const requestBodies = []
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async (_url, init) => {
+			requestBodies.push(JSON.parse(init.body))
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: { taskIntent: intentState },
+		},
+		planOptions: {
+			onProgress: (event) => events.push(event),
+		},
+	})
+	assertAction(decision.result, 'click_element_by_index')
+	if (
+		decision.result.action.input.index !== 27 ||
+		decision.result.action.input.workflow !== 'create-task' ||
+		decision.result.action.input.workflow_step !== 'open_create_form_timeout_recovery'
+	) {
+		throw new Error(`timeout recovery should click the strong create entry, got ${JSON.stringify(decision.result)}`)
+	}
+	if (requestBodies.length !== 2) {
+		throw new Error(`create-entry timeout recovery should run only after full and compact model timeouts, got ${requestBodies.length}`)
+	}
+	if (!events.some((event) => event.stage === 'timeout_recovery')) {
+		throw new Error(`create-entry timeout recovery should publish timeout_recovery progress, got ${JSON.stringify(events)}`)
+	}
+
+	const repeatedDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: { taskIntent: intentState },
+			history: [
+				{
+					action: 'click_element_by_index',
+					input: {
+						index: 27,
+						target_label: '新 增',
+						workflow: 'create-task',
+						workflow_step: 'open_create_form_timeout_recovery',
+						workflow_create_label: '新 增',
+					},
+					success: false,
+				},
+			],
+		},
+	})
+	assertAction(repeatedDecision.result, 'locate_by_vision')
+	if (
+		!String(repeatedDecision.result.action.input.target_description || '').includes('工具栏') ||
+		!String(repeatedDecision.result.action.input.target_description || '').includes('导入开关') ||
+		repeatedDecision.result.action.input.workflow_step !== 'open_create_form_timeout_recovery'
+	) {
+		throw new Error(`create-entry timeout recovery should use constrained vision after a failed create entry, got ${JSON.stringify(repeatedDecision.result)}`)
+	}
+
+	const modelFailedDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: { taskIntent: intentState },
+			history: [
+				{
+					action: 'click_element_by_index',
+					input: { index: 27 },
+					output: 'create_form_not_opened: 创建入口点击后未观察到新增表单/弹层字段。',
+					success: false,
+				},
+			],
+		},
+	})
+	assertAction(modelFailedDecision.result, 'locate_by_vision')
+	if (modelFailedDecision.result.action.input.action_name !== 'click_element_by_index') {
+		throw new Error(`model create-entry failure should recover with executable vision click, got ${JSON.stringify(modelFailedDecision.result)}`)
+	}
+
+	const submitThenClosedDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: { taskIntent: intentState },
+			history: [
+				{
+					action: 'click_element_by_index',
+					input: {
+						index: 19,
+						target_label: '保存',
+						workflow: 'form-fill',
+						workflow_step: 'submit_form_timeout_recovery',
+					},
+					output: 'form_submit_failed: 表单提交后观察到错误/校验提示: required',
+					success: false,
+				},
+			],
+		},
+	})
+	assertAction(submitThenClosedDecision.result, 'done')
+	if (
+		submitThenClosedDecision.result.action.input.success !== true ||
+		submitThenClosedDecision.result.action.input.workflow_step !== 'finish_create_after_submit_no_form'
+	) {
+		throw new Error(`create-entry recovery should not reopen create form after submit made the form disappear, got ${JSON.stringify(submitThenClosedDecision.result)}`)
 	}
 }
 
@@ -1481,11 +1906,11 @@ async function assertPlannerTimeoutRecoverySelectsExplicitCascaderPath() {
 	) {
 		throw new Error(`timeout recovery should select the explicit cascader path, got ${JSON.stringify(decision.result)}`)
 	}
-	if (requestBodies.length !== 2) {
-		throw new Error(`cascader timeout recovery should run only after full and compact model timeouts, got ${requestBodies.length}`)
+	if (requestBodies.length !== 0) {
+		throw new Error(`deterministic cascader form fill should skip model calls, got ${requestBodies.length}`)
 	}
-	if (!events.some((event) => event.stage === 'timeout_recovery')) {
-		throw new Error(`cascader timeout recovery should publish timeout_recovery progress, got ${JSON.stringify(events)}`)
+	if (events.some((event) => event.stage === 'timeout_recovery')) {
+		throw new Error(`deterministic cascader form fill should not be reported as timeout recovery, got ${JSON.stringify(events)}`)
 	}
 
 	const repeatedDecision = await runPlannerWithFakeModel({
@@ -1853,6 +2278,541 @@ async function assertPlannerTimeoutRecoverySubmitsAfterFormFillRecovery() {
 	assertAction(repeatedSubmitDecision.result, 'done')
 	if (repeatedSubmitDecision.result.action.input.success !== false) {
 		throw new Error(`submit timeout recovery should not repeat after a recent failed submit attempt, got ${JSON.stringify(repeatedSubmitDecision.result)}`)
+	}
+}
+
+async function assertPlannerPreModelFormFillSkipsModelWhenDeterministic() {
+	let requestCount = 0
+	const task = '新建一条记录，名称是晨会，类型是会议。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called for deterministic form fill')
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '记录-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '新增弹层',
+					fields: [
+						{ index: 1, region: 'dialog', fieldType: 'name', kind: 'text', label: '名称', valueState: 'empty', role: 'textbox' },
+						{ index: 2, region: 'dialog', fieldType: 'select', kind: 'dropdown', label: '类型', valueState: 'empty', role: 'combobox', selectionControl: 'dropdown' },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+			],
+			elements: [],
+			simplifiedDom: [],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: {
+				taskIntent: {
+					version: 2,
+					status: 'ready',
+					intent: {
+						navigationTargets: [],
+						operation: 'create',
+						createEntryLabels: ['新增', '新建', '创建', '添加'],
+						forbiddenNavigationTargets: [],
+					},
+				},
+			},
+		},
+	})
+	assertAction(decision.result, 'input_text')
+	if (requestCount !== 0 || decision.result.action.input.index !== 1 || decision.result.action.input.text !== '晨会') {
+		throw new Error(`deterministic form-fill should skip model and fill the first assigned field, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+	if (!String(decision.result.evaluation_previous_goal || '').includes('唯一确定')) {
+		throw new Error(`pre-model form-fill decision should not claim a model timeout, got ${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerPreModelFormFillMatchesSpecificNameAlias() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是北星科技，联系方式是145555555。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called for deterministic alias form fill')
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '主体档案-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '新增弹层',
+					fields: [
+						{ index: 2, region: 'dialog', fieldType: 'name', kind: 'text', label: '主体公司名称', valueState: 'empty', role: 'textbox' },
+						{ index: 3, region: 'dialog', fieldType: 'phone', kind: 'text', label: '联系方式', valueState: 'empty', role: 'textbox' },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+			],
+			elements: [],
+			simplifiedDom: [],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: {
+				taskIntent: {
+					version: 2,
+					status: 'ready',
+					intent: {
+						navigationTargets: [],
+						operation: 'create',
+						createEntryLabels: ['新增', '新建', '创建', '添加'],
+						forbiddenNavigationTargets: [],
+					},
+				},
+			},
+		},
+	})
+	assertAction(decision.result, 'input_text')
+	if (requestCount !== 0 || decision.result.action.input.index !== 2 || decision.result.action.input.text !== '北星科技') {
+		throw new Error(`deterministic form-fill should map concise task label to specific organization-name field, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerDuplicateFormConflictAsksForReplacement() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called for duplicate conflict handling')
+		},
+		observation: buildDuplicateConflictObservation(),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildDuplicateSubmitFailureHistory('主体名称已存在'),
+			],
+		},
+	})
+	assertAction(decision.result, 'ask_user')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.workflow_step !== 'resolve_duplicate_field_conflict' ||
+		decision.result.action.input.workflow_field_index !== 2 ||
+		!/重复|已存在/.test(String(decision.result.action.input.question || ''))
+	) {
+		throw new Error(`duplicate submit conflict should ask the user for a replacement value, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerAmbiguousDuplicateFormConflictUsesModel() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三，联系方式是145555555。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			return fakeJsonResponse({
+				evaluation_previous_goal: '提交后只看到泛化重复提示，无法可靠定位冲突字段。',
+				memory: '不要把没有字段名的重复提示默认归因到名称字段。',
+				thought: '当前错误缺少字段名，需要交由模型结合页面和历史重新判断。',
+				next_goal: '停止并报告字段冲突不明确',
+				action: {
+					name: 'done',
+					input: {
+						success: false,
+						text: '表单提示重复，但当前观察无法确认是哪个字段冲突。',
+					},
+				},
+			})
+		},
+		observation: buildDuplicateConflictObservation(),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildDuplicateSubmitFailureHistory('重复'),
+			],
+		},
+	})
+	assertAction(decision.result, 'done')
+	if (requestCount !== 1 || decision.result.action.input.success !== false) {
+		throw new Error(`ambiguous duplicate conflict should be delegated to the model, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerAmbiguousDuplicateAfterReplacementUsesModel() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三，联系方式是145555555。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			return fakeJsonResponse({
+				evaluation_previous_goal: '名称已改写后仍出现泛化重复提示。',
+				memory: '上次已经改过名称字段；缺少字段名时不继续猜测同一字段。',
+				thought: '重复提示可能来自其他唯一字段，需要重新分析当前页面错误。',
+				next_goal: '重新判断冲突字段',
+				action: {
+					name: 'done',
+					input: {
+						success: false,
+						text: '名称改写后仍提示重复，当前观察无法确认新的冲突字段。',
+					},
+				},
+			})
+		},
+		observation: buildDuplicateConflictObservation('张三ab12'),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildDuplicateSubmitFailureHistory('主体名称已存在'),
+				{
+					action: 'ask_user',
+					input: {
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_field_index: 2,
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '用户回答: 张三ab12',
+				},
+				{
+					action: 'input_text',
+					input: {
+						index: 2,
+						text: '张三ab12',
+						workflow: 'form-fill',
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '已在索引 2 输入文本。 | 动作结果: value_changed progress=true',
+				},
+				buildDuplicateSubmitFailureHistory('重复'),
+			],
+		},
+	})
+	assertAction(decision.result, 'done')
+	if (requestCount !== 1 || decision.result.action.input.success !== false) {
+		throw new Error(`ambiguous duplicate after replacement should be delegated to the model, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerDuplicateFormConflictUsesUserReplacement() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called after user supplies duplicate replacement')
+		},
+		observation: buildDuplicateConflictObservation(),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildDuplicateSubmitFailureHistory('主体名称已存在'),
+				{
+					action: 'ask_user',
+					input: {
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_field_index: 2,
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '用户回答: 张三-2',
+				},
+			],
+		},
+	})
+	assertAction(decision.result, 'input_text')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 2 ||
+		decision.result.action.input.text !== '张三-2' ||
+		decision.result.action.input.workflow_step !== 'resolve_duplicate_field_conflict'
+	) {
+		throw new Error(`duplicate conflict should rewrite the conflicting field with the user replacement, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerDuplicateFormConflictSubmitsAfterReplacement() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called after duplicate replacement has been written')
+		},
+		observation: buildDuplicateConflictObservation('张三-2'),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildDuplicateSubmitFailureHistory('主体名称已存在'),
+				{
+					action: 'ask_user',
+					input: {
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_field_index: 2,
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '用户回答: 张三-2',
+				},
+				{
+					action: 'input_text',
+					input: {
+						index: 2,
+						text: '张三-2',
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '已在索引 2 输入文本。 | 动作结果: value_changed progress=true',
+				},
+			],
+		},
+	})
+	assertAction(decision.result, 'click_element_by_index')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 18 ||
+		decision.result.action.input.workflow_step !== 'submit_form_timeout_recovery'
+	) {
+		throw new Error(`duplicate conflict replacement should be followed by submitting the form, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerDuplicateFormConflictIgnoresLoopGuardAfterReplacement() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called when recovering from a loop-guarded submit retry')
+		},
+		observation: buildDuplicateConflictObservation('张三-2'),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildDuplicateSubmitFailureHistory('主体名称已存在'),
+				{
+					action: 'ask_user',
+					input: {
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_field_index: 2,
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '用户回答: 张三-2',
+				},
+				{
+					action: 'input_text',
+					input: {
+						index: 2,
+						text: '张三-2',
+						workflow: 'form-fill',
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '已在索引 2 输入文本。 | 动作结果: value_changed progress=true',
+					outcome: { kind: 'value_changed', progress: true },
+				},
+				{
+					action: 'click_element_by_index.loop_guard',
+					input: {
+						index: 18,
+						workflow: 'form-fill',
+						workflow_step: 'submit_form_timeout_recovery',
+						workflow_submit_label: '保存',
+					},
+					success: false,
+					output: '检测到同一失败动作参数重复：click_element_by_index {"index":18,"workflow":"form-fill","workflow_step":"submit_form_timeout_recovery","workflow_submit_label":"保存"}',
+				},
+			],
+		},
+	})
+	assertAction(decision.result, 'click_element_by_index')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 18 ||
+		decision.result.action.input.workflow_step !== 'submit_form_timeout_recovery'
+	) {
+		throw new Error(`loop-guard repeat feedback should not be treated as duplicate field conflict, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerValidationErrorCorrectsForbiddenCharacters() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called for deterministic validation correction')
+		},
+		observation: buildDuplicateConflictObservation('张三-ab12', '主体名称不能包含 - 字符'),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildDuplicateSubmitFailureHistory('主体名称已存在'),
+				{
+					action: 'ask_user',
+					input: {
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_field_index: 2,
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '用户回答: 张三-ab12',
+				},
+				{
+					action: 'input_text',
+					input: {
+						index: 2,
+						text: '张三-ab12',
+						workflow: 'form-fill',
+						workflow_step: 'resolve_duplicate_field_conflict',
+						workflow_field_label: '主体名称',
+						workflow_old_value: '张三',
+					},
+					success: true,
+					output: '已在索引 2 输入文本。 | 动作结果: value_changed progress=true',
+				},
+				buildSubmitFailureHistory('请输入'),
+			],
+		},
+	})
+	assertAction(decision.result, 'input_text')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 2 ||
+		decision.result.action.input.text !== '张三ab12' ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error'
+	) {
+		throw new Error(`field validation error should be corrected from page feedback, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerValidationCorrectionSubmits() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called after validation correction')
+		},
+		observation: buildDuplicateConflictObservation('张三ab12'),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请输入'),
+				{
+					action: 'input_text',
+					input: {
+						index: 2,
+						text: '张三ab12',
+						workflow: 'form-fill',
+						workflow_step: 'resolve_field_validation_error',
+						workflow_field_label: '主体名称',
+						workflow_old_value: '张三-ab12',
+					},
+					success: true,
+					output: '已在索引 2 输入文本。 | 动作结果: value_changed progress=true',
+				},
+			],
+		},
+	})
+	assertAction(decision.result, 'click_element_by_index')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 18 ||
+		decision.result.action.input.workflow_step !== 'submit_form_timeout_recovery'
+	) {
+		throw new Error(`validation correction should be followed by submitting the form, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+function buildDuplicateConflictObservation(nameValue = '张三', validationError = '') {
+	const invalid = !!validationError
+	return {
+		...buildTestObservation(),
+		title: '主体档案-示例系统',
+		forms: [
+			{
+				id: 'dialog',
+				name: '新增弹层',
+				fields: [
+					{ index: 2, region: 'dialog', fieldType: 'name', kind: 'text', label: '主体名称', valueState: `filled:${nameValue}`, role: 'textbox', invalid, error: validationError },
+					{ index: 3, region: 'dialog', fieldType: 'phone', kind: 'text', label: '联系方式', valueState: 'filled:145555555', role: 'textbox' },
+				],
+			},
+		],
+		actions: [
+			{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+		],
+		elements: [],
+		simplifiedDom: [],
+	}
+}
+
+function buildCreateIntentState() {
+	return {
+		taskIntent: {
+			version: 2,
+			status: 'ready',
+			intent: {
+				navigationTargets: [],
+				operation: 'create',
+				createEntryLabels: ['新增', '新建', '创建', '添加'],
+				forbiddenNavigationTargets: [],
+			},
+		},
+	}
+}
+
+function buildDuplicateSubmitFailureHistory(message) {
+	return buildSubmitFailureHistory(message)
+}
+
+function buildSubmitFailureHistory(message) {
+	return {
+		action: 'click_element_by_index',
+		input: {
+			index: 18,
+			workflow: 'form-fill',
+			workflow_step: 'submit_form_timeout_recovery',
+			workflow_submit_label: '保存',
+		},
+		success: false,
+		output: `动作校验失败: form_submit_failed: 表单提交后观察到错误/校验提示: ${message}`,
 	}
 }
 
@@ -3616,6 +4576,50 @@ function assertLoopGuardBehavior() {
 		throw new Error('loop guard should block repeated identical failed click actions before a third execution')
 	}
 
+	const submitAfterFieldChangeHistory = [
+		{
+			stepIndex: 17,
+			action: 'click_element_by_index',
+			input: { index: 19, workflow: 'form-fill', workflow_step: 'submit_form_timeout_recovery', workflow_submit_label: '保存' },
+			nextGoal: '提交当前表单',
+			success: true,
+			output: '已点击索引 19。 | 动作结果: none progress=false',
+			outcome: { kind: 'none', progress: false },
+		},
+		{
+			stepIndex: '17.v',
+			action: 'click_element_by_index.verify',
+			input: { index: 19, workflow: 'form-fill', workflow_step: 'submit_form_timeout_recovery', workflow_submit_label: '保存' },
+			nextGoal: '提交当前表单',
+			success: false,
+			output: '动作校验失败: form_submit_failed: 字段重复',
+		},
+		{
+			stepIndex: 18,
+			action: 'ask_user',
+			input: { workflow: 'form-fill', workflow_step: 'resolve_duplicate_field_conflict' },
+			nextGoal: '询问字段的新值',
+			success: true,
+			output: '用户回答: 张三-2',
+		},
+		{
+			stepIndex: 19,
+			action: 'input_text',
+			input: { index: 2, text: '张三-2', workflow: 'form-fill', workflow_step: 'resolve_duplicate_field_conflict' },
+			nextGoal: '改写字段',
+			success: true,
+			output: '已在索引 2 输入文本。 | 动作结果: value_changed progress=true',
+			outcome: { kind: 'value_changed', progress: true },
+		},
+	]
+	const submitAfterFieldChangeDecision = {
+		next_goal: '提交当前表单',
+		action: { name: 'click_element_by_index', input: { index: 19, workflow: 'form-fill', workflow_step: 'submit_form_timeout_recovery', workflow_submit_label: '保存' } },
+	}
+	if (sessionTests.detectActionLoop({ history: submitAfterFieldChangeHistory }, submitAfterFieldChangeDecision).blocked) {
+		throw new Error('loop guard should allow re-submitting the same form button after a field value changed')
+	}
+
 	const equivalentFailedClick = {
 		history: [
 			{ stepIndex: 1, action: 'click_element_by_index', input: { index: '8' }, nextGoal: '点一次', success: false, output: 'failed' },
@@ -4170,6 +5174,7 @@ function assertVisionFallbackSkipsSemanticActionFailures() {
 		'select_dropdown_option 缺少 index 或 text。',
 		'检测到同一输入框索引 3 重复写入相同文本。',
 		'选择失败：select 中没有匹配选项 "WEB"。',
+		'create_form_not_opened: 创建入口点击后未观察到新增表单。',
 	]) {
 		if (shouldAttempt(message)) {
 			throw new Error(`semantic action failure should not trigger vision fallback: ${message}`)
@@ -5654,6 +6659,18 @@ function assertSessionRecoveryRecognizesStructuredSemanticFailures() {
 	}
 }
 
+function assertSessionRecoverySkipsSubmitVerificationVisionRecovery() {
+	const sessionRecovery = read('naturalclick-extension/background/session-recovery.js')
+	const skipFn = extractFunctionSource(sessionRecovery, 'getVerificationVisionRecoverySkipReason')
+	const submitFn = extractFunctionSource(sessionRecovery, 'isFormSubmitRecoveryAction')
+	if (!skipFn.includes('isFormSubmitRecoveryAction(action)') || !skipFn.includes('误点列表页新增')) {
+		throw new Error('submit verification failures should not trigger vision recovery that can click create buttons after a successful submit')
+	}
+	if (!submitFn.includes('submit_form_timeout_recovery') || !submitFn.includes('workflow_submit_label')) {
+		throw new Error('submit recovery skip should recognize form-submit workflow actions and submit labels')
+	}
+}
+
 function assertSessionTimingExtractedFromSessionEngine() {
 	const sessionEngine = read('naturalclick-extension/background/session-engine.js')
 	const sessionTiming = read('naturalclick-extension/background/session-timing.js')
@@ -5842,6 +6859,110 @@ function assertPlannerPromptExtractedFromPlanner() {
 		!prompt.includes('task_intent operation=create')
 	) {
 		throw new Error('planner prompt should keep business actions model-owned while guiding context requests for create tasks')
+	}
+}
+
+function assertPlannerPromptHandlesCreateFormNotOpened() {
+	const prompt = read('naturalclick-extension/background/planner-prompt.js')
+	for (const expected of ['create_form_not_opened', '禁止重复同一 index', 'locate_by_vision', '导入开关', '侧边栏菜单']) {
+		if (!prompt.includes(expected)) {
+			throw new Error(`planner prompt should guide create-entry replanning after failed form opening: missing ${expected}`)
+		}
+	}
+	for (const expected of ['唯一约束', '不要重复提交原值', 'ask_user 确认新值']) {
+		if (!prompt.includes(expected)) {
+			throw new Error(`planner prompt should guide duplicate form conflict handling: missing ${expected}`)
+		}
+	}
+}
+
+function assertPlannerCompactPromptTrimsTabsAndToolDescriptions() {
+	const planner = read('naturalclick-extension/background/planner.js')
+	const prompt = read('naturalclick-extension/background/planner-prompt.js')
+	if (!planner.includes('compact: useCompactObservation') || !planner.includes('compact: true')) {
+		throw new Error('planner should tell the prompt builder when compact context is being used')
+	}
+	if (!prompt.includes('function formatTabsSummaryForPrompt') || !prompt.includes('current id=') || !prompt.includes('... omitted ${tabs.length - rows.length} tabs')) {
+		throw new Error('compact planner prompt should summarize tabs instead of dumping full tab JSON')
+	}
+	if (!prompt.includes('function formatToolLinesForPrompt') || !prompt.includes('match[1]') || !prompt.includes('input=')) {
+		throw new Error('compact planner prompt should trim verbose tool descriptions down to tool schemas')
+	}
+}
+
+function assertPlanningContextConfigIsUserConfigurable() {
+	const constants = read('naturalclick-extension/background/constants.js')
+	const config = read('naturalclick-extension/background/config.js')
+	const planner = read('naturalclick-extension/background/planner.js')
+	const plannerContext = read('naturalclick-extension/background/planner-context.js')
+	for (const expected of [
+		'planning',
+		'fullObservationMaxChars',
+		'compactObservationMaxChars',
+		'compactElementThreshold',
+		'compactRawCandidateThreshold',
+		'textLLM',
+		'timeoutMs',
+		'stream',
+		'262144',
+		'4200',
+		'120',
+		'80',
+		'60000',
+	]) {
+		if (!constants.includes(expected)) {
+			throw new Error(`default config should include planning context ${expected}`)
+		}
+	}
+	if (!config.includes('normalizePlanningConfig') || !config.includes('1048576') || !config.includes('65536') || !config.includes('180000')) {
+		throw new Error('config normalization should clamp user planning context and timeout limits')
+	}
+	if (
+		!planner.includes('getPlanningContextConfig(session.config)') ||
+		!planner.includes('planningConfig.fullObservationMaxChars') ||
+		!planner.includes('planningConfig.compactObservationMaxChars') ||
+		!planner.includes('compactElementThreshold') ||
+		!planner.includes('compactRawCandidateThreshold')
+	) {
+		throw new Error('planner should consume user-configured observation limits')
+	}
+	if (!plannerContext.includes('DEFAULT_FULL_OBSERVATION_MAX_CHARS = 262144') || !plannerContext.includes('DEFAULT_COMPACT_OBSERVATION_MAX_CHARS = 4200')) {
+		throw new Error('planner context fallback defaults should match configurable planning context defaults')
+	}
+	const sandbox = { console }
+	sandbox.globalThis = sandbox
+	vm.runInNewContext(constants, sandbox, { filename: 'naturalclick-extension/background/constants.js' })
+	vm.runInNewContext(config, sandbox, { filename: 'naturalclick-extension/background/config.js' })
+	const normalized = sandbox.NC_BG_CONFIG.normalizeConfig({
+		textLLM: { baseURL: 'http://model.test/v1', model: 'm', apiKey: 'k', timeoutMs: 999999, stream: false },
+		multiModalLLM: { baseURL: 'http://model.test/v1', model: 'mm', apiKey: 'k' },
+		planning: {
+			fullObservationMaxChars: 2000000,
+			compactObservationMaxChars: 999999,
+			compactElementThreshold: 1,
+			compactRawCandidateThreshold: 999999,
+		},
+	})
+	if (
+		normalized.planning.fullObservationMaxChars !== 1048576 ||
+		normalized.planning.compactObservationMaxChars !== 65536 ||
+		normalized.planning.compactElementThreshold !== 20 ||
+		normalized.planning.compactRawCandidateThreshold !== 10000 ||
+		normalized.textLLM.timeoutMs !== 180000 ||
+		normalized.textLLM.stream !== false
+	) {
+		throw new Error(`config should clamp large planning and timeout values, got ${JSON.stringify(normalized)}`)
+	}
+	const fallback = sandbox.NC_BG_CONFIG.normalizeConfig({})
+	if (
+		fallback.planning.fullObservationMaxChars !== 262144 ||
+		fallback.planning.compactObservationMaxChars !== 4200 ||
+		fallback.planning.compactElementThreshold !== 120 ||
+		fallback.planning.compactRawCandidateThreshold !== 80 ||
+		fallback.textLLM.timeoutMs !== 60000 ||
+		fallback.textLLM.stream !== true
+	) {
+		throw new Error(`config should default planning context and timeout values, got ${JSON.stringify(fallback)}`)
 	}
 }
 
@@ -7537,6 +8658,9 @@ function assertPlannerWorkflowRegistryBehavior() {
 			throw new Error(`workflow registry should not infer deterministic create workflow ownership from workflow_step ${createStep}`)
 		}
 	}
+	if (plannerTests.resolveDecisionWorkflowName({ action: { input: { workflow_step: 'open_create_form_timeout_recovery' } } }) !== 'create-task') {
+		throw new Error('workflow registry should route the generic create-entry timeout recovery step')
+	}
 	if (/deriveFastPathDecision\(session,\s*observation,\s*tabsSummary\)/.test(planner)) {
 		throw new Error('planner should not call fast-path policy directly; route it through background/workflows.js')
 	}
@@ -8158,6 +9282,57 @@ function assertObserverOptionSnapshotsExposePopupOwner() {
 	}
 	if (!popupHintsFn.includes('shortText(popup.id, 96)')) {
 		throw new Error('popup owner hints should preserve long generated popup ids')
+	}
+}
+
+function assertObserverCapturesFormValidationFeedback() {
+	const observer = read('naturalclick-extension/content/observer.js')
+	const verifier = read('naturalclick-extension/background/verifier.js')
+	const plannerContext = read('naturalclick-extension/background/planner-context.js')
+	const snapshotFn = extractFunctionSource(observer, 'buildElementSnapshot')
+	const observeFn = extractFunctionSource(observer, 'observePage')
+	const collectValidationFn = extractFunctionSource(observer, 'collectValidationMessages')
+	const collectFeedbackFn = extractFunctionSource(observer, 'collectPageFeedbackMessages')
+	const formatElementFn = extractFunctionSource(observer, 'formatElementLine')
+	const feedbackFn = extractFunctionSource(verifier, 'collectObservationFeedbackText')
+	const fieldLineFn = extractFunctionSource(plannerContext, 'formatFieldLine')
+	for (const expected of ['validationMessage', 'validationSource', 'invalid']) {
+		if (!snapshotFn.includes(expected)) {
+			throw new Error(`observer snapshots should include structured validation feedback: missing ${expected}`)
+		}
+	}
+	for (const expected of ['aria-invalid', 'aria-errormessage', 'aria-describedby', 'validationMessage']) {
+		if (!observer.includes(expected)) {
+			throw new Error(`observer should collect generic field validation source: missing ${expected}`)
+		}
+	}
+	for (const expected of ['.el-form-item__error', '.ant-form-item-explain-error', '.invalid-feedback', 'role="alert"', '[class*="error"]']) {
+		if (!collectValidationFn.includes(expected)) {
+			throw new Error(`observer should recognize common validation message nodes: missing ${expected}`)
+		}
+	}
+	if (!formatElementFn.includes('error="') || !formatElementFn.includes('invalid="true"')) {
+		throw new Error('raw observer candidates should expose validation error text and invalid state')
+	}
+	if (!observer.includes('invalid=${field.invalid') || !observer.includes('error="${field.validationMessage')) {
+		throw new Error('form observation text should expose per-field validation errors')
+	}
+	if (!fieldLineFn.includes('validationMessage') || !fieldLineFn.includes('invalid=${field.invalid')) {
+		throw new Error('planner context field lines should preserve validation errors in compact/requested context')
+	}
+	if (!feedbackFn.includes('validationMessage') || !feedbackFn.includes('field?.error')) {
+		throw new Error('submit verifier should consume structured observer validation feedback')
+	}
+	if (!observeFn.includes('collectPageFeedbackMessages()') || !observer.includes('<feedback>')) {
+		throw new Error('observer should include global feedback/toast messages in observation text')
+	}
+	for (const expected of ['.el-message', '.ant-message-notice-content', '.n-message', 'role="alert"', 'aria-live="assertive"']) {
+		if (!collectFeedbackFn.includes(expected)) {
+			throw new Error(`observer should collect common global feedback source: missing ${expected}`)
+		}
+	}
+	if (!feedbackFn.includes('observation?.feedback')) {
+		throw new Error('submit verifier should consume global feedback/toast messages')
 	}
 }
 
@@ -8957,6 +10132,67 @@ async function assertVerifierRetriesDropdownSelectionUntilFieldValueChanges() {
 	}
 }
 
+async function assertVerifierAcceptsTimedOutSelectionWhenValueIsSatisfied() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { VERIFY_INPUT: 'NC_VERIFY_INPUT', VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async () => ({ success: false, matched: false }),
+		},
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					url: 'http://example.test/app',
+					content: 'dialog-still-open',
+					forms: [
+						{
+							id: 'dialog',
+							name: '弹层',
+							fields: [
+								{
+									index: 8,
+									region: 'dialog',
+									label: '所在地',
+									valueState: 'selected:江苏省 / 南京市 / 江宁区',
+									role: 'combobox',
+									selectionControl: 'cascader-parent',
+								},
+							],
+						},
+					],
+				},
+			}),
+		},
+	})
+	const result = await sandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{ name: 'select_cascader_path', input: { index: 8, path: ['江苏省', '南京市', '江宁区'] } },
+		{
+			url: 'http://example.test/app',
+			content: 'dialog-open-empty',
+			forms: [
+				{
+					id: 'dialog',
+					name: '弹层',
+					fields: [
+						{ index: 8, region: 'dialog', label: '所在地', valueState: 'empty', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+		},
+		{
+			success: false,
+			message: '页面动作超时（17秒），已放弃等待。',
+			meta: { outcome: { kind: 'failed', progress: false, reason: '页面动作超时（17秒），已放弃等待。' } },
+		}
+	)
+	if (!result.ok || !String(result.reason || '').includes('字段值已')) {
+		throw new Error(`timed-out selection should pass when observation satisfies the requested value, got ${JSON.stringify(result)}`)
+	}
+}
+
 async function assertVerifierRejectsDialogCloseAfterFieldSelection() {
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
 		NC_BG_CONSTANTS: {
@@ -9018,6 +10254,231 @@ async function assertVerifierRejectsDialogCloseAfterFieldSelection() {
 	}
 }
 
+async function assertVerifierSeparatesSubmitFromCreateEntryVerification() {
+	const baseSandbox = {
+		NC_BG_CONSTANTS: {
+			TYPES: { VERIFY_INPUT: 'NC_VERIFY_INPUT', VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async () => ({ success: false, matched: false }),
+		},
+	}
+	const preObservation = {
+		url: 'http://example.test/app',
+		content: 'dialog-before',
+		forms: [
+			{
+				id: 'dialog',
+				name: '弹层',
+				fields: [
+					{ index: 2, region: 'dialog', label: '名称', valueState: 'filled:晨会', role: 'textbox' },
+				],
+			},
+		],
+		actions: [
+			{ index: 19, region: 'dialog', role: 'button', label: '保 存', actionIntent: 'create' },
+		],
+	}
+	const noFeedbackSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		...baseSandbox,
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					...preObservation,
+					content: 'dialog-before',
+				},
+			}),
+		},
+	})
+	const rejected = await noFeedbackSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				index: 19,
+				workflow_step: 'submit_form_timeout_recovery',
+				workflow_submit_label: '保存',
+			},
+		},
+		preObservation,
+		{
+			success: true,
+			message: '已点击索引 19。',
+			meta: { outcome: { kind: 'none', progress: false } },
+		}
+	)
+	if (rejected.ok || !String(rejected.reason || '').includes('form_submit_dialog_still_open') || String(rejected.reason || '').includes('create_form_not_opened')) {
+		throw new Error(`submit click with no feedback should fail as submit, not create-entry, got ${JSON.stringify(rejected)}`)
+	}
+
+	const validationFeedbackSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		...baseSandbox,
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					...preObservation,
+					content: 'dialog-before',
+					forms: [
+						{
+							id: 'dialog',
+							name: '弹层',
+							fields: [
+								{
+									index: 2,
+									region: 'dialog',
+									label: '名称',
+									valueState: 'empty',
+									role: 'textbox',
+									invalid: true,
+									validationMessage: '请输入名称',
+								},
+							],
+						},
+					],
+				},
+			}),
+		},
+	})
+	const rejectedValidation = await validationFeedbackSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				index: 19,
+				workflow_step: 'submit_form_timeout_recovery',
+				workflow_submit_label: '保存',
+			},
+		},
+		preObservation,
+		{
+			success: true,
+			message: '已点击索引 19。',
+			meta: { outcome: { kind: 'none', progress: false } },
+		}
+	)
+	if (
+		rejectedValidation.ok ||
+		!String(rejectedValidation.reason || '').includes('form_submit_failed') ||
+		!String(rejectedValidation.reason || '').includes('请输入')
+	) {
+		throw new Error(`submit click should fail with structured validation feedback, got ${JSON.stringify(rejectedValidation)}`)
+	}
+
+	const duplicateFeedbackSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		...baseSandbox,
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					...preObservation,
+					content: 'dialog-before',
+					feedback: [
+						{ kind: 'error', text: '主体名称已存在，请勿重复提交' },
+					],
+				},
+			}),
+		},
+	})
+	const rejectedDuplicate = await duplicateFeedbackSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				index: 19,
+				workflow_step: 'submit_form_timeout_recovery',
+				workflow_submit_label: '保存',
+			},
+		},
+		preObservation,
+		{
+			success: true,
+			message: '已点击索引 19。',
+			meta: { outcome: { kind: 'none', progress: false } },
+		}
+	)
+	if (
+		rejectedDuplicate.ok ||
+		!String(rejectedDuplicate.reason || '').includes('form_submit_failed') ||
+		!String(rejectedDuplicate.reason || '').includes('主体名称已存在，请勿重复提交')
+	) {
+		throw new Error(`submit click should fail with duplicate/global feedback, got ${JSON.stringify(rejectedDuplicate)}`)
+	}
+
+	const changedDialogSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		...baseSandbox,
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					...preObservation,
+					content: 'dialog-after-validation',
+				},
+			}),
+		},
+	})
+	const rejectedChanged = await changedDialogSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				index: 19,
+				workflow_step: 'submit_form_timeout_recovery',
+				workflow_submit_label: '保存',
+			},
+		},
+		preObservation,
+		{
+			success: true,
+			message: '已点击索引 19。',
+			meta: { outcome: { kind: 'dom_changed', progress: true } },
+		}
+	)
+	if (
+		rejectedChanged.ok ||
+		!String(rejectedChanged.reason || '').includes('form_submit_dialog_still_open') ||
+		String(rejectedChanged.reason || '').includes('DOM 摘要已变化')
+	) {
+		throw new Error(`submit click should not pass just because DOM changed while dialog is still open, got ${JSON.stringify(rejectedChanged)}`)
+	}
+
+	const closedSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		...baseSandbox,
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					url: 'http://example.test/app',
+					content: 'list-after-submit\nfield index=2 required=false invalid=false error="" progress=false',
+					forms: [],
+					actions: [],
+				},
+			}),
+		},
+	})
+	const accepted = await closedSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				index: 19,
+				workflow_step: 'submit_form_timeout_recovery',
+				workflow_submit_label: '保存',
+			},
+		},
+		preObservation,
+		{
+			success: true,
+			message: '已点击索引 19。',
+			meta: { outcome: { kind: 'none', progress: false } },
+		}
+	)
+	if (!accepted.ok || !String(accepted.reason || '').includes('弹层已关闭')) {
+		throw new Error(`submit click should pass when the dialog closes, got ${JSON.stringify(accepted)}`)
+	}
+}
+
 async function assertVerifierRejectsNoopClick() {
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
 		NC_BG_CONSTANTS: {
@@ -9056,6 +10517,104 @@ async function assertVerifierRejectsNoopClick() {
 	)
 	if (result.ok || !String(result.reason || '').includes('无可见变化')) {
 		throw new Error(`noop click should fail verification, got ${JSON.stringify(result)}`)
+	}
+}
+
+async function assertVerifierRejectsCreateClickWithoutForm() {
+	let observations = 0
+	const preObservation = {
+		url: 'http://example.test/app#/crm/customer',
+		content: 'customer-list-before',
+		forms: [
+			{
+				id: 'page_form',
+				name: '页面表单',
+				fields: [
+					{ index: 2, region: 'content', fieldType: 'select', kind: 'dropdown', label: '首页个人信息退出登录', valueState: 'selected:首页个人信息退出登录', role: 'combobox' },
+				],
+			},
+		],
+		actions: [
+			{ index: 27, region: 'sidebar', role: 'button', label: '新 增', actionIntent: 'create' },
+		],
+	}
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { VERIFY_INPUT: 'NC_VERIFY_INPUT', VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async () => ({ success: false, matched: false }),
+		},
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => {
+				observations += 1
+				return {
+					ok: true,
+					data: {
+						...preObservation,
+						content: 'customer-list-after',
+					},
+				}
+			},
+		},
+	})
+	const result = await sandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{ name: 'click_element_by_index', input: { index: 27 } },
+		preObservation,
+		{
+			success: true,
+			message: '视觉回退成功 | 动作结果: dom_changed progress=true reason="DOM 摘要已变化"',
+			meta: { outcome: { kind: 'dom_changed', progress: true, reason: 'DOM 摘要已变化' } },
+		}
+	)
+	if (!observations || observations < 3) {
+		throw new Error(`create-click verifier should wait for a form-bearing observation despite dom_changed, got ${observations}`)
+	}
+	if (result.ok || !String(result.reason || '').includes('create_form_not_opened')) {
+		throw new Error(`create click without form should fail verification with explicit reason, got ${JSON.stringify(result)}`)
+	}
+
+	const openedSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { VERIFY_INPUT: 'NC_VERIFY_INPUT', VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async () => ({ success: false, matched: false }),
+		},
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					...preObservation,
+					content: 'dialog-open',
+					forms: [
+						...preObservation.forms,
+						{
+							id: 'dialog',
+							name: '新增弹层',
+							fields: [
+								{ index: 41, region: 'dialog', label: '客户公司名称', valueState: 'empty', role: 'textbox' },
+								{ index: 42, region: 'dialog', label: '联系方式', valueState: 'empty', role: 'textbox' },
+							],
+						},
+					],
+				},
+			}),
+		},
+	})
+	const opened = await openedSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{ name: 'click_element_by_index', input: { index: 27 } },
+		preObservation,
+		{
+			success: true,
+			message: '已点击索引 27。',
+			meta: { outcome: { kind: 'dom_changed', progress: true } },
+		}
+	)
+	if (!opened.ok || !String(opened.reason || '').includes('创建入口点击后观察到目标状态')) {
+		throw new Error(`create click should pass when a create dialog form appears, got ${JSON.stringify(opened)}`)
 	}
 }
 
@@ -9566,6 +11125,47 @@ function assertModelReasoningIsSurfaced() {
 		!/planItems:\s*cloneJson\(state\.planItems/.test(sidepanel)
 	) {
 		throw new Error('sidepanel should persist planItems, activityText, and runtimeSessionId for exported history diagnostics')
+	}
+}
+
+function assertSidepanelExposesPlanningContextSettings() {
+	const sidepanel = read('naturalclick-extension/sidepanel.js')
+	const html = read('naturalclick-extension/sidepanel.html')
+	for (const expected of [
+		'cfg-text-timeout-sec',
+		'cfg-full-observation-max-chars',
+		'cfg-compact-observation-max-chars',
+		'cfg-compact-element-threshold',
+		'cfg-compact-raw-candidate-threshold',
+		'sp-reset-planning-context',
+		'文本模型单轮超时（秒）',
+		'完整观察最大字符数',
+		'精简观察最大字符数',
+		'触发精简元素数',
+		'触发精简 raw 数',
+		'恢复规划默认值',
+		'step="1"',
+	]) {
+		if (!html.includes(expected)) {
+			throw new Error(`settings UI should expose planning context control ${expected}`)
+		}
+	}
+	for (const expected of [
+		'DEFAULT_TEXT_MODEL_TIMEOUT_MS',
+		'DEFAULT_PLANNING_CONTEXT',
+		'normalizeTextModelTimeoutMsForUi',
+		'normalizePlanningContextForUi',
+		'setPlanningContextToForm',
+		'cfgTextTimeoutSec',
+		'cfgCompactElementThreshold',
+		'cfgCompactRawCandidateThreshold',
+		'resetPlanningContext.addEventListener',
+		'planning: normalizePlanningContextForUi',
+		'currentConfig = result.config || config',
+	]) {
+		if (!sidepanel.includes(expected)) {
+			throw new Error(`sidepanel should load/save/reset planning context config: missing ${expected}`)
+		}
 	}
 }
 

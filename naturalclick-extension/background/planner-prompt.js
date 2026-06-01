@@ -35,6 +35,8 @@
 			'当动作目标存在 action intent 时，优先选择 intent 匹配任务目标的按钮或链接。',
 			'当任务包含“创建/新增/新建/添加”等意图时，应由你根据当前页面的按钮 label、intent=create、位置和模块语义推断创建入口；若 <actions> 中看不到明显入口，优先 request_context source=actions region=content query="新增" 或 query="新建"，也可 inspect_region content。不要因为紧凑上下文没展示按钮就失败结束。',
 			'若 task_intent operation=create 且目标模块已到达，下一步应在 content/dialog/popover 查找新增/新建/添加入口；不要继续寻找带“新增”的导航页面。',
+			'若 <agent_history> 中出现 create_form_not_opened，说明上次创建入口点击没有打开新增表单；禁止重复同一 index 或同一 label，应改用其他 content/dialog/popover 创建入口、inspect_index/inspect_region 复核位置，或用 locate_by_vision 受限查找当前业务列表工具栏的新增按钮，排除表格行标题、导入开关、筛选项和侧边栏菜单。',
+			'若表单提交失败提示重复、已存在、唯一约束或 duplicate/unique，说明字段值冲突；不要重复提交原值，也不要重新打开新增表单。用户明确指定的字段值必须先 ask_user 确认新值，任务明确允许任意/测试值时才可生成后缀替代。若错误只说“重复”而没有字段名/字段级错误，不要默认改第一个名称字段，应先结合当前表单错误、历史改动和可见提示重新判断，必要时 ask_user 说明无法定位具体冲突字段。',
 			'普通下拉框/选择器流程：先用 open_dropdown(index) 打开字段，再用 choose_dropdown_option(index,text) 选择可见选项。',
 			'choose_dropdown_option 必须同时提供目标字段 index 和真实 text/label；禁止只按 text 全局选择弹层选项。',
 			'多选下拉框常见为 option 行内嵌 checkbox；优先使用 select_checkbox_option，并提供待选文本，不要点击文字中心。',
@@ -75,6 +77,8 @@
 			'先判断页面是否已到达任务目标；到达后根据任务意图分析 content/dialog/popover 里的按钮、表单和面板。若缺少关键元素，用 request_context/inspect_region 获取更多元素，不要直接 done。',
 			'创建/新增类任务应由你从按钮 label、intent=create、位置和上下文中推断入口；若紧凑观察未展示入口，先 request_context source=actions region=content query="新增" 或 query="新建"。',
 			'若 task_intent operation=create 且目标模块已到达，在 content/dialog/popover 查找新增/新建/添加入口；不要继续寻找带“新增”的导航页面。',
+			'若历史出现 create_form_not_opened，禁止重复同一新增 index/label；换 content/dialog/popover 候选，或 inspect/locate_by_vision 受限查找业务列表工具栏新增按钮，排除表格行、导入开关、筛选项、侧边栏。',
+			'若历史出现表单重复/已存在/唯一约束错误，禁止重复提交原值或重新点新增；用户明确给出的值需 ask_user 确认新值。若错误只说“重复”但没有字段名，不要默认继续修改名称字段，应根据可见字段级错误/历史改动重新判断或询问用户。',
 			'<workflow_hints> 只作为参考；目标模块 unresolved 时先定位/进入目标模块，不要测试泛化搜索区。',
 			'<workflow_hints> 中 search_state allComplete=true 时，若本地状态机尚未结束，输出 done(success=true) 并带 workflow_step=finish_search_fields。',
 			'filter/search 面板 collapsed 时先点 triggerIndex 或对应 open_filter/search 按钮展开。',
@@ -98,11 +102,15 @@
 		planningContext,
 		workflowContextText,
 		round,
+		compact,
 	}) {
+		const compactMode = !!compact
 		const contextText = planningContext.length
 			? ['<planning_context>', ...planningContext.map((item) => item.text), '</planning_context>'].join('\n')
 			: ''
 		const workflowText = String(workflowContextText || '').trim()
+		const formattedTabs = formatTabsSummaryForPrompt(tabsSummary, compactMode)
+		const formattedToolLines = formatToolLinesForPrompt(toolLines, compactMode)
 		return [
 			'<agent_state>',
 			`任务: ${session.task}`,
@@ -113,7 +121,7 @@
 			'</agent_state>',
 			'',
 			'<browser_state>',
-			`标签页列表:\n${JSON.stringify(tabsSummary, null, 2)}`,
+			`标签页列表:\n${formattedTabs}`,
 			observationText,
 			'</browser_state>',
 			'',
@@ -129,7 +137,7 @@
 			'</planning_tools>',
 			'',
 			'<available_tools>',
-			...toolLines,
+			...formattedToolLines,
 			'- done: 结束任务 input={text:string, success:boolean}',
 			'</available_tools>',
 			'',
@@ -146,6 +154,34 @@
 			'  "action": { "name": "动作名", "input": {} }',
 			'}',
 		].filter((line) => line !== null && line !== undefined).join('\n')
+	}
+
+	function formatTabsSummaryForPrompt(tabsSummary, compact) {
+		const tabs = Array.isArray(tabsSummary) ? tabsSummary : []
+		if (!compact) return JSON.stringify(tabs, null, 2)
+		const current = tabs.find((tab) => tab?.current) || tabs[0] || null
+		const others = tabs.filter((tab) => tab && tab !== current).slice(0, 3)
+		const rows = []
+		if (current) {
+			rows.push(`current id=${current.id} title="${shortText(current.title || '', 80)}" url="${shortText(current.url || '', 140)}"`)
+		}
+		for (const tab of others) {
+			rows.push(`other id=${tab.id} title="${shortText(tab.title || '', 50)}"`)
+		}
+		if (tabs.length > rows.length) rows.push(`... omitted ${tabs.length - rows.length} tabs`)
+		return rows.join('\n') || '[]'
+	}
+
+	function formatToolLinesForPrompt(toolLines, compact) {
+		const lines = Array.isArray(toolLines) ? toolLines : []
+		if (!compact) return lines
+		return lines.map((line) => {
+			const text = String(line || '').trim()
+			const match = text.match(/^-\s*([A-Za-z0-9_:-]+)\s*:\s*(.*)$/)
+			if (!match) return text
+			const input = match[2].match(/\binput=\{.*\}\s*$/)?.[0] || ''
+			return input ? `- ${match[1]} ${input}` : `- ${match[1]}`
+		})
 	}
 
 	function buildHistoryLine(item) {

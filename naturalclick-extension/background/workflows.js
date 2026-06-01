@@ -28,6 +28,9 @@
 		select_cascader_path_timeout_recovery: 'form-fill',
 		select_visible_cascader_option_timeout_recovery: 'form-fill',
 		submit_form_timeout_recovery: 'form-fill',
+		resolve_duplicate_field_conflict: 'form-fill',
+		resolve_field_validation_error: 'form-fill',
+		open_create_form_timeout_recovery: 'create-task',
 	}
 
 	const PRE_MODEL_WORKFLOWS = [
@@ -56,6 +59,11 @@
 			run: (session, observation) =>
 				deriveSearchWorkflowDecisionIfAllowed(session, observation),
 		},
+		{
+			name: 'form-fill',
+			run: (session, observation) =>
+				deriveFormFillPreModelDecision(session, observation),
+		},
 	]
 
 	const PRE_INTENT_WORKFLOWS = [
@@ -77,6 +85,11 @@
 				deriveFormCascaderTimeoutDecision(session, observation) ||
 				deriveFormSubmitTimeoutDecision(session, observation),
 		},
+		{
+			name: 'create-task',
+			run: (session, observation) =>
+				deriveCreateEntryTimeoutDecision(session, observation),
+		},
 	]
 
 	function derivePreModelWorkflowDecision(session, observation, context) {
@@ -89,6 +102,35 @@
 
 	function deriveTimeoutRecoveryWorkflowDecision(session, observation, context) {
 		return runWorkflowList(TIMEOUT_RECOVERY_WORKFLOWS, session, observation, context)
+	}
+
+	function deriveFormFillPreModelDecision(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		const operation = taskIntent?.getOperation?.(session) || ''
+		if (operation !== 'create' && !isCreateTask(taskText)) return null
+		if (!hasBusinessCreateFormOpen(observation)) return null
+		const decision =
+			deriveDuplicateFieldConflictDecision(session, observation) ||
+			deriveInvalidFormFieldCorrectionDecision(session, observation) ||
+			deriveVisibleCascaderOptionTimeoutDecision(session, observation) ||
+			deriveFormAssignedFieldTimeoutDecision(session, observation) ||
+			deriveFormCascaderTimeoutDecision(session, observation) ||
+			deriveFormSubmitTimeoutDecision(session, observation)
+		return decision ? adaptPreModelFormFillDecision(decision) : null
+	}
+
+	function adaptPreModelFormFillDecision(decision) {
+		if (!decision || typeof decision !== 'object') return decision
+		return {
+			...decision,
+			evaluation_previous_goal: String(decision.evaluation_previous_goal || '')
+				.replace(/^模型规划超时，但/, '当前表单动作可由任务文本和页面字段唯一确定，')
+				.replace(/^模型超时后，/, '无需等待模型，'),
+			memory: String(decision.memory || '').replace(/^使用通用表单恢复策略/, '使用通用表单自动推进策略'),
+			thought: String(decision.thought || '')
+				.replace(/^模型超时后，/, '无需等待模型，')
+				.replace(/且模型再次超时，/, '，'),
+		}
 	}
 
 	function buildWorkflowContextText(session, observation) {
@@ -181,6 +223,185 @@
 					text: `模型连续超时，且仍未到达任务目标模块: ${labels}。已停止以避免在错误页面继续测试。`,
 					workflow_step: 'navigate_to_task_target',
 					workflow_nav_key: unresolved[0],
+				},
+			},
+		}
+	}
+
+	function deriveCreateEntryTimeoutDecision(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		const operation = taskIntent?.getOperation?.(session) || ''
+		if (operation !== 'create' && !isCreateTask(taskText)) return null
+		const state = syncNavigationState(session)
+		const unresolved = getExpectedNavigationKeys(session, state)
+			.filter((key) => !isNavigationTargetReached(observation, key))
+		if (unresolved.length) return null
+		if (hasBusinessCreateFormOpen(observation)) return null
+		if (hasRecentExecutedFormSubmitClick(session)) {
+			return {
+				evaluation_previous_goal: '最近已执行过当前创建表单的提交动作，且当前观察中已没有新增表单。',
+				memory: '提交后表单消失时，不再自动重新点击新增入口，避免重复创建同一条数据。',
+				thought: '表单提交后已经回到列表/模块页，停止自动创建第二条记录。',
+				next_goal: '结束创建任务',
+				action: {
+					name: 'done',
+					input: {
+						success: true,
+						text: '表单已提交且当前未再观察到新增表单，已停止以避免重复创建。',
+						workflow: 'create-task',
+						workflow_step: 'finish_create_after_submit_no_form',
+					},
+				},
+			}
+		}
+		const entityHints = extractCreateEntityHints(taskText)
+		const candidates = uniqueCreateEntryCandidates(collectCreateEntryItems(observation)
+			.filter((item) => Number.isFinite(Number(item?.index)))
+			.filter((item) => isCreateEntryCandidateItem(item))
+			.filter((item) => isStrongCreateEntryCandidateItem(item)), entityHints)
+			.filter((item) => !hasRecentCreateEntryAttempt(session, item))
+		const candidate = candidates[0]
+		if (!candidate) return buildCreateEntryVisionFallbackDecision(session)
+		const label = getObservedItemLabel(candidate) || '新增'
+		return {
+			evaluation_previous_goal: '模型规划超时，但任务已到达目标模块且当前页面仍未观察到新增表单，页面存在明确的创建入口。',
+			memory: `使用通用创建任务恢复策略，只点击一次明确的 "${label}" 入口；若点击后仍无表单，将交给校验/下一轮处理。`,
+			thought: '目标模块已经到达，当前还没有业务表单，先重试页面上最明确的新增入口。',
+			next_goal: `打开新增表单：${label}`,
+			action: {
+				name: 'click_element_by_index',
+				input: {
+					index: Number(candidate.index),
+					target_label: label,
+					target_region: String(candidate.region || ''),
+					workflow_step: 'open_create_form_timeout_recovery',
+					workflow_create_label: label,
+					workflow_create_rect: formatCandidateRect(candidate?.rect),
+				},
+			},
+		}
+	}
+
+	function buildCreateEntryVisionFallbackDecision(session) {
+		if (!hasRecentCreateEntryFailure(session)) return null
+		if (hasRecentCreateEntryVisionAttempt(session)) return null
+		return {
+			evaluation_previous_goal: '近期点击创建入口后未观察到新增表单，且当前没有未尝试过的强可信 DOM 创建入口。',
+			memory: '改用受限视觉定位，只查找当前业务列表工具栏中的新增/新建/创建/添加按钮，排除表格行、导入开关、筛选项和侧边栏菜单。',
+			thought: 'DOM 候选已经出现过无效点击，需要用视觉约束重新定位真实的工具栏新增按钮。',
+			next_goal: '重新定位真实新增按钮',
+			action: {
+				name: 'locate_by_vision',
+				input: {
+					target_description: '当前业务列表工具栏中的新增、新建、创建或添加按钮；优先蓝色工具栏按钮，排除表格行标题、导入开关、筛选项、侧边栏菜单和浏览器/扩展界面',
+					action_name: 'click_element_by_index',
+					workflow_step: 'open_create_form_timeout_recovery',
+					workflow_create_label: '新增/新建/创建/添加',
+				},
+			},
+		}
+	}
+
+	function deriveDuplicateFieldConflictDecision(session, observation) {
+		const conflict = getRecentDuplicateFormSubmitFailure(session)
+		if (!conflict) return null
+		const field = findDuplicateConflictField(observation, conflict.text)
+		if (!field) return null
+		const index = Number(field.index)
+		if (!Number.isFinite(index)) return null
+		const label = normalizeFormFieldLabel(getObservedItemLabel(field)) || '该字段'
+		const currentValue = extractObservedFieldValue(field)
+		if (
+			hasRecentDuplicateConflictReplacementForField(session, label, index) &&
+			isAmbiguousDuplicateConstraintText(conflict.text, label, currentValue)
+		) {
+			return null
+		}
+		const answered = getRecentDuplicateConflictAnswer(session, label, index, currentValue)
+		if (answered.cancelled) {
+			return {
+				evaluation_previous_goal: `表单提交提示字段 "${label}" 的值冲突，用户选择不修改。`,
+				memory: '已停止重复提交，避免继续制造重复记录或覆盖用户明确指定的数据。',
+				thought: '唯一性冲突需要用户确认新值，用户未提供可替换值。',
+				next_goal: '停止重复提交',
+				action: {
+					name: 'done',
+					input: {
+						success: false,
+						text: `表单提交失败：字段「${label}」当前值「${currentValue || '空'}」重复/已存在，且没有新的替代值。`,
+					},
+				},
+			}
+		}
+		if (answered.value && answered.value !== currentValue) {
+			const decision = buildTextFormFieldRecoveryDecision(index, label, answered.value)
+			decision.evaluation_previous_goal = `表单提交提示字段 "${label}" 的值冲突，用户已提供新的替代值。`
+			decision.memory = `使用用户确认的新值改写字段 "${label}"，避免重复提交原值。`
+			decision.thought = '重复/已存在属于唯一性冲突，先改写冲突字段再重新提交。'
+			decision.next_goal = `改写${label}`
+			decision.action.input.workflow_step = 'resolve_duplicate_field_conflict'
+			decision.action.input.workflow_old_value = currentValue
+			decision.action.input.workflow_conflict_reason = shortWorkflowText(conflict.text, 120)
+			return decision
+		}
+		if (hasRecentDuplicateConflictAsk(session, label, index, currentValue)) return null
+		return {
+			evaluation_previous_goal: `表单提交提示字段 "${label}" 的值重复/已存在，继续提交同一值不会推进任务。`,
+			memory: '遇到唯一性冲突时不自动篡改用户明确指定的字段值；先询问用户新值，避免静默创建错误数据。',
+			thought: '当前报错是重复值冲突，需要用户确认是否换一个值。',
+			next_goal: `询问${label}的新值`,
+			action: {
+				name: 'ask_user',
+				input: {
+					question: `字段「${label}」当前值「${currentValue || '空'}」提交后提示重复/已存在。请提供一个新的值；如果不想修改，请回复“取消”。`,
+					placeholder: suggestDuplicateReplacementValue(currentValue),
+					timeout_ms: 120000,
+					workflow_step: 'resolve_duplicate_field_conflict',
+					workflow_field_label: label,
+					workflow_field_index: index,
+					workflow_old_value: currentValue,
+				},
+			},
+		}
+	}
+
+	function deriveInvalidFormFieldCorrectionDecision(session, observation) {
+		const candidates = collectObservedFormControlItems(observation)
+			.filter(isBusinessFormField)
+			.filter((field) => Number.isFinite(Number(field.index)))
+			.filter((field) => isPlainTextFormField(field))
+			.map((field) => {
+				const errorText = getFieldValidationErrorText(field)
+				const currentValue = extractObservedFieldValue(field)
+				const correctedValue = deriveValidationCorrectedValue(currentValue, errorText)
+				return {
+					field,
+					errorText,
+					currentValue,
+					correctedValue,
+				}
+			})
+			.filter((item) => item.errorText && item.currentValue && item.correctedValue && item.correctedValue !== item.currentValue)
+			.filter((item) => !hasRecentValidationCorrectionAttempt(session, Number(item.field.index), item.currentValue, item.correctedValue))
+			.sort((a, b) => getFormFieldOrderScore(a.field) - getFormFieldOrderScore(b.field))
+		const match = candidates[0]
+		if (!match) return null
+		const index = Number(match.field.index)
+		const label = normalizeFormFieldLabel(getObservedItemLabel(match.field)) || '该字段'
+		return {
+			evaluation_previous_goal: `当前表单字段 "${label}" 存在页面校验错误：${match.errorText}`,
+			memory: `使用通用表单校验恢复策略，根据页面错误提示修正字段 "${label}"。`,
+			thought: '页面已经给出字段级校验错误，先修正当前字段值再重新提交。',
+			next_goal: `修正${label}`,
+			action: {
+				name: 'input_text',
+				input: {
+					index,
+					text: match.correctedValue,
+					workflow_step: 'resolve_field_validation_error',
+					workflow_field_label: label,
+					workflow_old_value: match.currentValue,
+					workflow_validation_error: shortWorkflowText(match.errorText, 120),
 				},
 			},
 		}
@@ -380,6 +601,224 @@
 		}
 	}
 
+	function getRecentDuplicateFormSubmitFailure(session) {
+		for (const item of getRecentHistoryItems(session, 10)) {
+			if (isLoopGuardHistoryItem(item)) continue
+			if (isDuplicateConflictReplacementHistory(item)) return null
+			if (item?.success !== false) continue
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'submit_form_timeout_recovery') continue
+			const text = getHistoryFailureText(item)
+			if (isSystemRepeatGuardText(text)) continue
+			if (!isDuplicateConstraintText(text)) continue
+			return { item, text }
+		}
+		return null
+	}
+
+	function isDuplicateConstraintText(text) {
+		return /重复|已存在|已经存在|不能重复|唯一|duplicate|already\s+exists|exists|unique/i.test(String(text || ''))
+	}
+
+	function isSystemRepeatGuardText(text) {
+		return /循环保护|重复动作循环|同一失败动作参数重复|未验证进展的同一动作重复|同一动作参数重复执行|动作参数重复|被动等待.*重复|滚动.*重复|悬浮.*重复/i.test(String(text || ''))
+	}
+
+	function hasRecentDuplicateConflictReplacement(session) {
+		return getRecentHistoryItems(session, 8).some((item) => isDuplicateConflictReplacementHistory(item))
+	}
+
+	function isDuplicateConflictReplacementHistory(item) {
+		if (!item || item.success === false) return false
+		const action = String(item.action || '').replace(/\..*$/, '')
+		if (action !== 'input_text' && action !== 'type') return false
+		const input = item.input || {}
+		return String(input.workflow_step || '') === 'resolve_duplicate_field_conflict'
+	}
+
+	function findDuplicateConflictField(observation, failureText) {
+		const textKey = getNavigationKey(failureText)
+		const fields = collectObservedFormControlItems(observation)
+			.filter(isBusinessFormField)
+			.filter((field) => Number.isFinite(Number(field.index)))
+			.filter((field) => isPlainTextFormField(field))
+			.filter((field) => !isEmptyFormField(field))
+		if (!fields.length) return null
+		for (const field of fields) {
+			if (isDuplicateConstraintText(getFieldValidationErrorText(field))) return field
+		}
+		for (const field of fields) {
+			const label = normalizeFormFieldLabel(getObservedItemLabel(field))
+			if (label && textKey.includes(getNavigationKey(label))) return field
+		}
+		const valueMatches = fields.filter((field) => {
+			const value = getNavigationKey(extractObservedFieldValue(field))
+			return value && textKey.includes(value)
+		})
+		if (valueMatches.length === 1) return valueMatches[0]
+		return fields.length === 1 ? fields[0] : null
+	}
+
+	function getRecentDuplicateConflictAnswer(session, label, index, oldValue) {
+		for (const item of getRecentHistoryItems(session, 8)) {
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'resolve_duplicate_field_conflict') continue
+			if (String(item?.action || '').replace(/\..*$/, '') !== 'ask_user') continue
+			if (!isSameConflictAskInput(input, label, index, oldValue)) continue
+			if (item.success === false) return { value: '', cancelled: true }
+			const answer = parseAskUserAnswer(item)
+			if (!answer) continue
+			if (/^(取消|不用|不改|停止|算了|否|no|cancel)$/i.test(answer)) {
+				return { value: '', cancelled: true }
+			}
+			return { value: cleanAssignmentValue(answer), cancelled: false }
+		}
+		return { value: '', cancelled: false }
+	}
+
+	function hasRecentDuplicateConflictAsk(session, label, index, oldValue) {
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const input = item?.input || {}
+			return String(input.workflow_step || '') === 'resolve_duplicate_field_conflict' &&
+				String(item?.action || '').replace(/\..*$/, '') === 'ask_user' &&
+				isSameConflictAskInput(input, label, index, oldValue)
+		})
+	}
+
+	function hasRecentDuplicateConflictReplacementForField(session, label, index) {
+		return getRecentHistoryItems(session, 10).some((item) => {
+			if (!isDuplicateConflictReplacementHistory(item)) return false
+			const input = item?.input || {}
+			if (Number.isFinite(Number(input.index)) && Number(input.index) !== Number(index)) return false
+			const changedLabel = normalizeFormFieldLabel(input.workflow_field_label || '')
+			return !changedLabel || changedLabel === normalizeFormFieldLabel(label)
+		})
+	}
+
+	function isAmbiguousDuplicateConstraintText(text, label, value) {
+		const raw = String(text || '')
+		const key = getNavigationKey(raw)
+		if (!isDuplicateConstraintText(raw)) return false
+		const labelKey = getNavigationKey(label)
+		const valueKey = getNavigationKey(value)
+		if (labelKey && key.includes(labelKey)) return false
+		if (valueKey && key.includes(valueKey)) return false
+		return true
+	}
+
+	function isSameConflictAskInput(input, label, index, oldValue) {
+		if (Number.isFinite(Number(input.workflow_field_index)) && Number(input.workflow_field_index) !== Number(index)) return false
+		const askedLabel = normalizeFormFieldLabel(input.workflow_field_label || '')
+		if (askedLabel && askedLabel !== normalizeFormFieldLabel(label)) return false
+		const askedValue = String(input.workflow_old_value || '')
+		if (askedValue && oldValue && askedValue !== oldValue) return false
+		return true
+	}
+
+	function parseAskUserAnswer(item) {
+		const text = [
+			item?.output,
+			item?.message,
+			item?.detail,
+			item?.result,
+		].map((value) => String(value || '')).join('\n')
+		const match = text.match(/用户回答:\s*([\s\S]+?)(?:\s*\|\s*动作结果:|$)/)
+		return cleanAssignmentValue(match?.[1] || '')
+	}
+
+	function extractObservedFieldValue(field) {
+		const state = String(field?.valueState || '').trim()
+		const match = state.match(/^(?:filled|selected):\s*(.+)$/i)
+		if (match?.[1]) return cleanAssignmentValue(match[1])
+		const value = String(field?.value || field?.text || '').trim()
+		return cleanAssignmentValue(value)
+	}
+
+	function getFieldValidationErrorText(field) {
+		if (!field || typeof field !== 'object') return ''
+		const invalid = String(field.invalid || '').toLowerCase() === 'true' || field.invalid === true
+		const text = [
+			field.error,
+			field.validationMessage,
+			field.validationError,
+			field.message,
+			field.errorText,
+		].map((value) => cleanAssignmentValue(value)).filter(Boolean).join('；')
+		return invalid || text ? text : ''
+	}
+
+	function deriveValidationCorrectedValue(value, errorText) {
+		const current = cleanAssignmentValue(value)
+		const error = String(errorText || '')
+		if (!current || !error) return ''
+		const forbidden = extractForbiddenValidationToken(error)
+		if (forbidden) {
+			const corrected = removeForbiddenToken(current, forbidden)
+			if (corrected && corrected !== current) return corrected
+		}
+		if (/(只能|仅能|只允许|仅允许|must\s+only|only\s+allow|invalid|格式错误)/i.test(error)) {
+			const corrected = current.replace(/[^\u4e00-\u9fa5A-Za-z0-9_]/g, '')
+			if (corrected && corrected !== current) return corrected
+		}
+		return ''
+	}
+
+	function extractForbiddenValidationToken(errorText) {
+		const text = String(errorText || '').trim()
+		const patterns = [
+			/(?:不能|不得|不允许|禁止)(?:包含|含有|出现|输入)\s*["“”'‘’`]?([^\s"“”'‘’`，,。；;、]{1,12})["“”'‘’`]?\s*(?:字符|符号)?/i,
+			/cannot\s+contain\s*["']?([^"',.;\s]{1,12})["']?/i,
+			/must\s+not\s+contain\s*["']?([^"',.;\s]{1,12})["']?/i,
+		]
+		for (const pattern of patterns) {
+			const match = text.match(pattern)
+			const token = cleanAssignmentValue(match?.[1] || '')
+			if (token && !/^(字符|符号|内容|特殊字符)$/i.test(token)) return token
+		}
+		if (/空格|space/i.test(text) && /(不能|不得|不允许|禁止|cannot|must\s+not)/i.test(text)) {
+			return ' '
+		}
+		return ''
+	}
+
+	function removeForbiddenToken(value, token) {
+		const current = String(value || '')
+		const raw = String(token || '')
+		if (!current || !raw) return ''
+		if (/^(空格|space)$/i.test(raw)) return current.replace(/\s+/g, '')
+		const chars = [...raw]
+			.filter((char) => char && !/\s/.test(char))
+			.map(escapeRegExp)
+		if (!chars.length) return current
+		return current.replace(new RegExp(`[${chars.join('')}]`, 'g'), '')
+	}
+
+	function escapeRegExp(value) {
+		return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+	}
+
+	function suggestDuplicateReplacementValue(value) {
+		const text = cleanAssignmentValue(value)
+		if (!text) return '请输入新的不重复值'
+		return `${text}${Date.now().toString(36).slice(-4)}`
+	}
+
+	function hasRecentValidationCorrectionAttempt(session, index, oldValue, newValue) {
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const input = item?.input || {}
+			return String(input.workflow_step || '') === 'resolve_field_validation_error' &&
+				Number(input.index) === Number(index) &&
+				String(input.workflow_old_value || '') === String(oldValue || '') &&
+				String(input.text || '') === String(newValue || '')
+		})
+	}
+
+	function shortWorkflowText(value, maxLen) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		const limit = Math.max(20, Number(maxLen) || 120)
+		return text.length > limit ? `${text.slice(0, limit - 3)}...` : text
+	}
+
 	function deriveFormSubmitTimeoutDecision(session, observation) {
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		if (!taskText || !isCreateTask(taskText)) return null
@@ -388,7 +827,8 @@
 			.filter((key) => !isNavigationTargetReached(observation, key))
 		if (unresolved.length) return null
 		const assignedFieldsSatisfied = areTaskAssignedFormFieldsSatisfied(session, observation)
-		if (!hasRecentSuccessfulFormFillRecovery(session) && !assignedFieldsSatisfied) return null
+		const duplicateConflictResolved = hasRecentDuplicateConflictReplacement(session)
+		if (!hasRecentSuccessfulFormFillRecovery(session) && !assignedFieldsSatisfied && !duplicateConflictResolved) return null
 		if (hasRecentFormSubmitRecoveryAttempt(session)) return null
 		const candidates = collectFormSubmitCandidateItems(observation)
 			.filter(isFormSubmitCandidateItem)
@@ -641,12 +1081,12 @@
 		const lines = [
 			`- create_task status="active" guidance="任务包含创建/新增意图；页面动作仍由模型根据当前元素分析后决定。${escapeAttr(createLabelText)}若紧凑观察未展示创建入口，先 request_context source=actions region=content query='新增 新建 创建 添加' 或 inspect_region content，不要直接 done。"`,
 		]
-		const candidates = collectCreateEntryItems(observation)
+		const candidates = uniqueCreateEntryCandidates(collectCreateEntryItems(observation)
 			.filter((item) => Number.isFinite(Number(item?.index)))
 			.filter((item) => isCreateEntryCandidateItem(item))
-			.sort((a, b) => scoreCreateEntryCandidate(a, extractCreateEntityHints(taskText)) - scoreCreateEntryCandidate(b, extractCreateEntityHints(taskText)))
+			.filter((item) => isStrongCreateEntryCandidateItem(item)), extractCreateEntityHints(taskText))
 			.slice(0, 5)
-			.map((item) => `index=${Number(item.index)} label="${escapeAttr(getObservedItemLabel(item) || '')}" region="${escapeAttr(item.region || '')}" intent="${escapeAttr(item.actionIntent || item.intent || '')}"`)
+			.map((item) => `index=${Number(item.index)} label="${escapeAttr(getObservedItemLabel(item) || '')}" region="${escapeAttr(item.region || '')}" intent="${escapeAttr(item.actionIntent || item.intent || '')}" rect="${escapeAttr(formatCandidateRect(item?.rect))}"`)
 		if (candidates.length) {
 			lines.push(`- create_candidates ${candidates.join('; ')}`)
 		}
@@ -1107,9 +1547,14 @@
 
 	function isCreateEntryCandidateItem(item) {
 		const region = getNavigationKey(item?.region)
-		if (region && !/^(content|header|dialog|popover)$/.test(region)) return false
-		if (isSelectedOrActiveObservedItem(item)) return false
+		const exactCreateLabel = isExactCreateEntryLabel(getObservedItemLabel(item))
 		const role = getNavigationKey(item?.role)
+		if (
+			region &&
+			!/^(content|header|dialog|popover)$/.test(region) &&
+			!(region === 'sidebar' && exactCreateLabel && /^(button|link)$/.test(role))
+		) return false
+		if (isSelectedOrActiveObservedItem(item)) return false
 		const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)
 		if (/^(textbox|combobox|option|checkbox|radio|switch|listbox)$/.test(role)) return false
 		if (/(dropdown|select|checkbox|radio|cascader)/i.test(control)) return false
@@ -1121,22 +1566,103 @@
 		return false
 	}
 
+	function isStrongCreateEntryCandidateItem(item) {
+		const label = getNavigationKey(getObservedItemLabel(item))
+		const role = getNavigationKey(item?.role)
+		if (isExactCreateEntryLabel(label)) return true
+		if (/^(新增|新建|创建|添加|增加)[\u4e00-\u9fa5a-z0-9_-]{1,8}$/.test(label)) {
+			return !/(管理|审批|导入|搜索|查询|重置|删除|编辑)/.test(label)
+		}
+		if (/^(add|create|new)[a-z0-9_-]{1,16}$/.test(label)) return true
+		return /^(button|link)$/.test(role) &&
+			/(新增|新建|创建|添加|增加|add|create|new)/i.test(label) &&
+			label.length <= 16 &&
+			!/(管理|审批|导入|搜索|查询|重置|删除|编辑)/.test(label)
+	}
+
+	function isExactCreateEntryLabel(label) {
+		const key = getNavigationKey(label)
+		return /^(新增|新建|创建|添加|增加|add|create|new|\+)$/.test(key)
+	}
+
 	function scoreCreateEntryCandidate(item, entityHints) {
 		const label = getNavigationKey(getObservedItemLabel(item))
 		const intent = getNavigationKey(item?.actionIntent || item?.intent)
 		const region = getNavigationKey(item?.region)
+		const role = getNavigationKey(item?.role)
 		let score = 0
-		if (/^(新增|新建|创建|添加|增加|add|create|new)$/.test(label)) score -= 15
+		if (isExactCreateEntryLabel(label)) score -= 35
+		else if (isStrongCreateEntryCandidateItem(item)) score -= 20
 		if (/(新增|新建|创建|添加|增加|add|create|new)/i.test(intent)) score -= 12
 		for (const hint of entityHints) {
 			const key = getNavigationKey(hint)
 			if (key && label.includes(key)) score -= 10
 		}
-		if (region === 'content' || region === 'dialog') score -= 5
+		if (role === 'button' || role === 'link') score -= 8
+		if (region === 'content' || region === 'dialog') score -= 10
+		else if (region === 'sidebar' && isExactCreateEntryLabel(label)) score -= 4
 		else if (region === 'header') score -= 1
 		if (item?.newSinceLastObservation) score -= 2
+		if (label.length > 12) score += Math.min(8, Math.floor((label.length - 12) / 4) + 1)
 		const rect = item?.rect || {}
 		return score * 1000000 + (Number(rect.top) || 0) * 1000 + (Number(rect.left) || 0)
+	}
+
+	function uniqueCreateEntryCandidates(items, entityHints) {
+		const sorted = (Array.isArray(items) ? items : [])
+			.filter(Boolean)
+			.sort((a, b) => scoreCreateEntryCandidate(a, entityHints) - scoreCreateEntryCandidate(b, entityHints))
+		const seenStrict = new Set()
+		const seenLoose = new Set()
+		const result = []
+		for (const item of sorted) {
+			const strictKey = buildCreateEntryCandidateStrictKey(item)
+			const looseKey = buildCreateEntryCandidateLooseKey(item)
+			if (strictKey && seenStrict.has(strictKey)) continue
+			if (looseKey && seenLoose.has(looseKey)) continue
+			if (strictKey) seenStrict.add(strictKey)
+			if (looseKey) seenLoose.add(looseKey)
+			result.push(item)
+		}
+		return result
+	}
+
+	function buildCreateEntryCandidateStrictKey(item) {
+		const stableId = String(item?.stableId || '').trim()
+		if (stableId) return `sid:${stableId}`
+		const rectKey = buildRectBucketKey(item?.rect, 8)
+		const label = getNavigationKey(getObservedItemLabel(item))
+		const region = getNavigationKey(item?.region)
+		const role = getNavigationKey(item?.role)
+		if (rectKey) return `rect:${label}:${region}:${role}:${rectKey}`
+		const index = Number(item?.index)
+		return Number.isFinite(index) ? `index:${index}:${label}:${region}:${role}` : ''
+	}
+
+	function buildCreateEntryCandidateLooseKey(item) {
+		const label = getNavigationKey(getObservedItemLabel(item))
+		if (!isExactCreateEntryLabel(label)) return ''
+		const region = getNavigationKey(item?.region)
+		const role = getNavigationKey(item?.role)
+		const rectKey = buildRectBucketKey(item?.rect, 16)
+		return `${label}:${region}:${role}:${rectKey || 'no-rect'}`
+	}
+
+	function buildRectBucketKey(rect, bucketSize = 8) {
+		if (!rect || typeof rect !== 'object') return ''
+		const values = [rect.left, rect.top, rect.width, rect.height].map((value) => Number(value))
+		if (values.some((value) => !Number.isFinite(value))) return ''
+		const bucket = Math.max(1, Number(bucketSize) || 8)
+		return values.map((value) => Math.round(value / bucket)).join(',')
+	}
+
+	function formatCandidateRect(rect) {
+		if (!rect || typeof rect !== 'object') return ''
+		const left = Math.round(Number(rect.left) || 0)
+		const top = Math.round(Number(rect.top) || 0)
+		const width = Math.round(Number(rect.width) || 0)
+		const height = Math.round(Number(rect.height) || 0)
+		return `${left},${top},${width}x${height}`
 	}
 
 	function extractCreateEntityHints(taskText) {
@@ -1253,10 +1779,45 @@
 	}
 
 	function hasRecentFormSubmitRecoveryAttempt(session) {
-		return getRecentHistoryItems(session, 8).some((item) => {
+		for (const item of getRecentHistoryItems(session, 8)) {
+			if (isLoopGuardHistoryItem(item)) continue
+			if (isFormValueChangeHistory(item)) return false
 			const input = item?.input || {}
+			if (String(input.workflow_step || '') === 'submit_form_timeout_recovery') return true
+		}
+		return false
+	}
+
+	function isLoopGuardHistoryItem(item) {
+		return /\.loop_guard$/i.test(String(item?.action || ''))
+	}
+
+	function hasRecentExecutedFormSubmitClick(session) {
+		return getRecentHistoryItems(session, 6).some((item) => {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			const input = item?.input || {}
+			if (action !== 'click_element_by_index' && action !== 'click') return false
 			return String(input.workflow_step || '') === 'submit_form_timeout_recovery'
 		})
+	}
+
+	function isFormValueChangeHistory(item) {
+		if (!item || item.success === false) return false
+		const action = String(item.action || '').replace(/\..*$/, '')
+		const input = item.input || {}
+		const step = String(input.workflow_step || '')
+		if (action === 'input_text' || action === 'type') {
+			return step === 'fill_form_field_timeout_recovery' ||
+				step === 'resolve_duplicate_field_conflict' ||
+				step === 'resolve_field_validation_error'
+		}
+		return [
+			'choose_dropdown_option',
+			'select_dropdown_option',
+			'select_checkbox_option',
+			'select_cascader_path',
+			'click_element_by_index',
+		].includes(action) && /form|dropdown|cascader|visible_cascader_option/.test(step)
 	}
 
 	function getRecentHistoryItems(session, limit) {
@@ -1296,6 +1857,27 @@
 	function isBusinessFormField(item) {
 		const region = getNavigationKey(item?.region)
 		return !region || /^(content|dialog|popover)$/.test(region)
+	}
+
+	function hasBusinessCreateFormOpen(observation) {
+		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
+			const formName = getNavigationKey(form?.name || form?.id || '')
+			const fields = (Array.isArray(form?.fields) ? form.fields : [])
+				.filter((field) => isBusinessFormField(field))
+				.filter((field) => {
+					const label = normalizeFormFieldLabel(getObservedItemLabel(field))
+					const role = getNavigationKey(field?.role)
+					if (!label || label === '(empty)') return false
+					if (/^(button|link|menuitem|option|checkbox|radio|switch|tab)$/.test(role)) return false
+					if (/(首页|个人信息|退出登录|搜索内容|更多|共\d*条|条\/页)/.test(label)) return false
+					return true
+				})
+			if (!fields.length) continue
+			if (/(弹层|dialog|modal|drawer|新增|新建|创建|添加|create|new|add)/i.test(formName)) return true
+			if (fields.some((field) => /^(dialog|popover)$/.test(getNavigationKey(field?.region)))) return true
+			if (fields.length >= 2 && !/(搜索|筛选|filter|search)/i.test(formName)) return true
+		}
+		return false
 	}
 
 	function isCascaderFormField(item) {
@@ -1506,6 +2088,60 @@
 		})
 	}
 
+	function hasRecentCreateEntryAttempt(session, item) {
+		const index = Number(item?.index)
+		const label = getNavigationKey(getObservedItemLabel(item))
+		return getRecentHistoryItems(session, 8).some((historyItem) => {
+			const action = String(historyItem?.action || '').replace(/\..*$/, '')
+			const input = historyItem?.input || {}
+			if (action !== 'click_element_by_index' && action !== 'click') return false
+			const failedCreateEntry = isCreateEntryFailureHistory(historyItem)
+			const workflowCreateAttempt = String(input.workflow_step || '') === 'open_create_form_timeout_recovery'
+			if (!failedCreateEntry && !workflowCreateAttempt) return false
+			if (Number.isFinite(index) && Number(input.index) === index) return true
+			const attempted = getNavigationKey(input.workflow_create_label || input.target_label || '')
+			return !!label && attempted === label
+		})
+	}
+
+	function hasRecentCreateEntryFailure(session) {
+		return getRecentHistoryItems(session, 10).some((item) => isCreateEntryFailureHistory(item))
+	}
+
+	function hasRecentCreateEntryVisionAttempt(session) {
+		return getRecentHistoryItems(session, 10).some((historyItem) => {
+			const action = String(historyItem?.action || '').replace(/\..*$/, '')
+			const input = historyItem?.input || {}
+			if (action !== 'locate_by_vision') return false
+			return String(input.workflow_step || '') === 'open_create_form_timeout_recovery'
+		})
+	}
+
+	function isCreateEntryFailureHistory(historyItem) {
+		const action = String(historyItem?.action || '').replace(/\..*$/, '')
+		if (action !== 'click_element_by_index' && action !== 'click') return false
+		const input = historyItem?.input || {}
+		const text = getHistoryFailureText(historyItem)
+		if (/create_form_not_opened/i.test(text)) return true
+		if (historyItem?.success !== false) return false
+		if (String(input.workflow_step || '') === 'open_create_form_timeout_recovery') return true
+		const attempted = getNavigationKey(input.workflow_create_label || input.target_label || '')
+		return !!attempted && isExactCreateEntryLabel(attempted) && /(动作结果:\s*(?:no_effect|focused|none)|progress=false)/i.test(text)
+	}
+
+	function getHistoryFailureText(historyItem) {
+		return [
+			historyItem?.output,
+			historyItem?.message,
+			historyItem?.detail,
+			historyItem?.error,
+			historyItem?.result,
+			historyItem?.outcome?.reason,
+			historyItem?.meta?.outcome?.reason,
+			historyItem?.meta?.outcome?.kind,
+		].map((value) => String(value || '')).filter(Boolean).join(' ')
+	}
+
 	function normalizeFormFieldLabel(value) {
 		return String(value || '')
 			.replace(/^[\s*＊]+/g, '')
@@ -1533,10 +2169,35 @@
 	}
 
 	function findLooseLabelMatches(source, label) {
+		const matches = []
+		const seen = new Set()
+		for (const key of getFormFieldLabelAliases(label)) {
+			const pattern = new RegExp(Array.from(key).map(escapeRegExp).join('\\s*'), 'gi')
+			for (const match of String(source || '').matchAll(pattern)) {
+				const signature = `${Number(match.index)}:${String(match[0] || '')}`
+				if (seen.has(signature)) continue
+				seen.add(signature)
+				matches.push(match)
+			}
+		}
+		return matches.sort((a, b) => {
+			const diff = Number(a.index) - Number(b.index)
+			if (diff) return diff
+			return String(b[0] || '').length - String(a[0] || '').length
+		})
+	}
+
+	function getFormFieldLabelAliases(label) {
 		const key = normalizeFormFieldLabel(label)
 		if (!key) return []
-		const pattern = new RegExp(Array.from(key).map(escapeRegExp).join('\\s*'), 'gi')
-		return Array.from(String(source || '').matchAll(pattern))
+		const aliases = [key]
+		for (const qualifier of ['公司', '企业', '单位', '机构', '组织']) {
+			const suffix = `${qualifier}名称`
+			if (key.endsWith(suffix) && key.length > suffix.length) {
+				addUnique(aliases, `${key.slice(0, -suffix.length)}名称`)
+			}
+		}
+		return aliases.sort((a, b) => b.length - a.length)
 	}
 
 	function matchTaskAssignmentConnector(value) {
@@ -1546,11 +2207,11 @@
 
 	function findNextAssignmentLabelIndex(source, cursor, currentLabel, allLabels) {
 		let end = -1
-		const current = normalizeFormFieldLabel(currentLabel)
+		const currentAliases = new Set(getFormFieldLabelAliases(currentLabel))
 		for (const label of allLabels || []) {
-			const key = normalizeFormFieldLabel(label)
-			if (!key || key === current) continue
-			for (const match of findLooseLabelMatches(source.slice(cursor), key)) {
+			const aliases = getFormFieldLabelAliases(label)
+			if (!aliases.length || aliases.some((alias) => currentAliases.has(alias))) continue
+			for (const match of findLooseLabelMatches(source.slice(cursor), label)) {
 				const index = cursor + Number(match.index)
 				const after = source.slice(index + String(match[0] || '').length)
 				if (!matchTaskAssignmentConnector(after)) continue

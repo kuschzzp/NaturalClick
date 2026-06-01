@@ -39,8 +39,9 @@
 	}
 
 	async function attemptVerificationRecovery(session, decision, observation, reason, hooks = {}) {
-		if (shouldSkipVerificationVisionRecovery(decision?.action, reason)) {
-			return { success: false, message: '导航展开动作校验失败后不做视觉恢复，交给重新观察规划。' }
+		const skipReason = getVerificationVisionRecoverySkipReason(decision?.action, reason)
+		if (skipReason) {
+			return { success: false, message: skipReason }
 		}
 		if (!g.NC_BG_VISION.canUseVisionFallback(decision?.action)) {
 			return { success: false, message: '当前动作不支持视觉恢复。' }
@@ -69,11 +70,27 @@
 	}
 
 	function shouldSkipVerificationVisionRecovery(action, reason) {
+		return !!getVerificationVisionRecoverySkipReason(action, reason)
+	}
+
+	function getVerificationVisionRecoverySkipReason(action, reason) {
 		const input = action?.input || {}
-		if (String(input.workflow_step || '') !== 'reveal_navigation_options') return false
+		if (isFormSubmitRecoveryAction(action)) {
+			return '表单提交动作校验失败后不做视觉恢复，避免提交成功后误点列表页新增/提交按钮；交给重新观察规划。'
+		}
+		if (String(input.workflow_step || '') !== 'reveal_navigation_options') return ''
 		const text = String(reason || '')
-		if (!text) return true
+		if (!text) return '导航展开动作校验失败后不做视觉恢复，交给重新观察规划。'
 		return /focused|no_effect|无可见变化|未发现|未展开|没有变化|动作结果:\s*(focused|no_effect)/i.test(text)
+			? '导航展开动作校验失败后不做视觉恢复，交给重新观察规划。'
+			: ''
+	}
+
+	function isFormSubmitRecoveryAction(action) {
+		const input = action?.input || {}
+		if (String(input.workflow_step || '') === 'submit_form_timeout_recovery') return true
+		const label = String(input.workflow_submit_label || input.target_label || input.label || input.text || '').replace(/\s+/g, '').trim().toLowerCase()
+		return /^(保存|提交|确定|完成|确认|save|submit|ok|confirm|done)$/.test(label)
 	}
 
 	function shouldAttemptVisionFallbackForFailure(message) {
@@ -116,8 +133,10 @@
 			'unsupported_action',
 			'candidate_mismatch',
 			'options_not_visible',
+			'create_form_not_opened',
 			'dialog_closed',
 			'field_scoped',
+			'未观察到新增表单',
 			'检测到同一输入框索引',
 			'select 中没有匹配选项',
 		].some((part) => normalized.includes(part))
@@ -139,6 +158,7 @@
 		buildExecutionVisionFallbackActivityText,
 		shouldAttemptExecutionVisionFallback,
 		shouldAttemptVisionFallbackForFailure,
+		getVerificationVisionRecoverySkipReason,
 		shouldSkipVerificationVisionRecovery,
 	}
 })(globalThis)

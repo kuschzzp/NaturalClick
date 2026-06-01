@@ -195,6 +195,36 @@
 			await settleAfterAction(decision.action)
 			if (finalizeIfAborted(session, sessions)) return
 
+			if (
+				execution?.success === false &&
+				g.NC_BG_VERIFIER.shouldVerifyFailedExecution?.(decision.action, execution)
+			) {
+				session.activityText = `第 ${session.step} 步：动作超时，正在观察页面状态确认是否已生效...`
+				publishSession(session)
+				const postFailureVerify = await g.NC_BG_VERIFIER.verifyExecutionOutcome(
+					session,
+					decision.action,
+					observation.data,
+					execution
+				)
+				if (finalizeIfAborted(session, sessions)) return
+				if (postFailureVerify?.ok) {
+					const reason = String(postFailureVerify.reason || '动作后页面状态已满足目标')
+					execution = {
+						...execution,
+						success: true,
+						message: `${execution.message || '动作执行超时。'} | 观察复核成功: ${reason}`,
+						meta: {
+							...(execution.meta || {}),
+							verifiedAfterFailure: true,
+							outcome: postFailureVerify.outcome || createActionOutcome('input_verified', {
+								reason: `动作超时后观察复核成功: ${reason}`,
+							}),
+						},
+					}
+				}
+			}
+
 			const executionOutput = appendExecutionOutcomeSummary(execution.message, execution)
 			const executionOutcome = getExecutionOutcome(execution)
 			session.history.push({
@@ -243,7 +273,9 @@
 				continue
 			}
 
-			const shouldVerify = g.NC_BG_VERIFIER.shouldVerifyAction(decision.action)
+			const shouldVerify =
+				g.NC_BG_VERIFIER.shouldVerifyAction(decision.action) &&
+				!execution?.meta?.verifiedAfterFailure
 			if (shouldVerify) {
 				if (finalizeIfAborted(session, sessions)) return
 				const verify = await g.NC_BG_VERIFIER.verifyExecutionOutcome(

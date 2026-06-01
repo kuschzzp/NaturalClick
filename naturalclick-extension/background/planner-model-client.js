@@ -12,12 +12,15 @@
 		if (endpoint.apiKey) headers.Authorization = `Bearer ${endpoint.apiKey}`
 		const controller = new AbortController()
 		const timeoutMs = clampTimeoutMs(options.timeoutMs ?? endpoint.timeoutMs, 60000)
+		const useStream = options.stream !== false && endpoint.stream !== false
+		const streamState = createStreamState(useStream)
 		const timeout = setTimeout(() => controller.abort(), timeoutMs)
 		const requestBody = {
 			model: endpoint.model,
 			messages,
 			temperature: 0.2,
 			response_format: { type: 'json_object' },
+			...(useStream ? { stream: true } : {}),
 		}
 		const requestPreview = buildRequestPreview(url, requestBody, timeoutMs)
 
@@ -40,6 +43,9 @@
 				}
 				throw error
 			}
+			if (useStream && response.body?.getReader) {
+				return await readStreamingChatCompletion(response, requestPreview, options, streamState)
+			}
 			const data = await response.json()
 			const message = data?.choices?.[0]?.message || {}
 			const content = message?.content || ''
@@ -55,10 +61,16 @@
 			return content
 		} catch (error) {
 			if (error?.name === 'AbortError') {
-				const timeoutError = new Error(`模型请求超时（${Math.round(timeoutMs / 1000)}秒）`)
+				const timeoutError = new Error(buildTimeoutMessage(timeoutMs, streamState))
 				timeoutError.io = {
 					request: requestPreview,
-					response: { error: timeoutError.message },
+					response: {
+						error: timeoutError.message,
+						stream: streamState.enabled,
+						partialContent: streamState.content ? shortText(streamState.content, 2400) : undefined,
+						partialReasoning: streamState.reasoning ? shortText(streamState.reasoning, 2400) : undefined,
+						chunkCount: streamState.chunkCount,
+					},
 				}
 				throw timeoutError
 			}
@@ -69,13 +81,132 @@
 	}
 
 	function isModelTimeoutError(error) {
-		return String(error?.message || error || '').includes('模型请求超时')
+		return /模型(?:请求|流式响应)超时/.test(String(error?.message || error || ''))
 	}
 
 	function clampTimeoutMs(value, fallback) {
 		const raw = Number(value)
 		if (!Number.isFinite(raw) || raw <= 0) return fallback
 		return Math.max(5000, Math.min(180000, Math.floor(raw)))
+	}
+
+	async function readStreamingChatCompletion(response, requestPreview, options, streamState) {
+		const reader = response.body.getReader()
+		const decoder = new TextDecoder()
+		let buffer = ''
+		let lastPayload = null
+		let usage = null
+		while (true) {
+			const { value, done } = await reader.read()
+			if (done) break
+			buffer += decoder.decode(value, { stream: true })
+			const lines = buffer.split(/\r?\n/)
+			buffer = lines.pop() || ''
+			for (const line of lines) {
+				const parsed = parseStreamLine(line)
+				if (!parsed) continue
+				if (parsed.done) {
+					notifyStream(options, streamState, true)
+					continue
+				}
+				lastPayload = parsed.payload || lastPayload
+				usage = parsed.payload?.usage || usage
+				applyStreamPayload(streamState, parsed.payload)
+				notifyStream(options, streamState, false)
+			}
+		}
+		if (buffer.trim()) {
+			const parsed = parseStreamLine(buffer)
+			if (parsed?.payload) {
+				lastPayload = parsed.payload
+				usage = parsed.payload?.usage || usage
+				applyStreamPayload(streamState, parsed.payload)
+			}
+		}
+		notifyStream(options, streamState, true)
+		const data = {
+			id: lastPayload?.id || '',
+			model: lastPayload?.model || '',
+			choices: [
+				{
+					message: {
+						content: streamState.content,
+						reasoning_content: streamState.reasoning,
+					},
+				},
+			],
+			usage,
+		}
+		const result = {
+			content: streamState.content,
+			io: {
+				request: requestPreview,
+				response: {
+					...buildResponsePreview(data, streamState.content),
+					stream: true,
+					chunkCount: streamState.chunkCount,
+				},
+			},
+		}
+		if (!options?.returnMeta) return streamState.content
+		return result
+	}
+
+	function parseStreamLine(line) {
+		const text = String(line || '').trim()
+		if (!text || text.startsWith(':')) return null
+		const data = text.startsWith('data:') ? text.slice(5).trim() : text
+		if (!data) return null
+		if (data === '[DONE]') return { done: true }
+		try {
+			return { payload: JSON.parse(data) }
+		} catch (_) {
+			return null
+		}
+	}
+
+	function applyStreamPayload(streamState, payload) {
+		const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null
+		const delta = choice?.delta || choice?.message || {}
+		const contentDelta = String(delta.content || choice?.text || '')
+		const reasoningDelta = String(delta.reasoning_content || delta.reasoning || delta.thought || '')
+		if (contentDelta || reasoningDelta) {
+			streamState.gotFirstChunk = true
+			streamState.chunkCount += 1
+			streamState.content += contentDelta
+			streamState.reasoning += reasoningDelta
+		}
+	}
+
+	function notifyStream(options, streamState, done) {
+		if (typeof options?.onStream !== 'function') return
+		try {
+			options.onStream({
+				content: streamState.content,
+				reasoning: streamState.reasoning,
+				chunkCount: streamState.chunkCount,
+				done,
+			})
+		} catch (_) {}
+	}
+
+	function createStreamState(enabled) {
+		return {
+			enabled: !!enabled,
+			gotFirstChunk: false,
+			chunkCount: 0,
+			content: '',
+			reasoning: '',
+		}
+	}
+
+	function buildTimeoutMessage(timeoutMs, streamState) {
+		const seconds = Math.round(timeoutMs / 1000)
+		if (!streamState?.enabled) return `模型请求超时（${seconds}秒）`
+		if (!streamState.gotFirstChunk) return `模型请求超时（${seconds}秒，未收到首个流式片段）`
+		const chars = String(streamState.content || '').length
+		const reasoning = String(streamState.reasoning || '').length
+		return `模型流式响应超时（${seconds}秒，已收到正文 ${chars} 字、推理 ${reasoning} 字）`
 	}
 
 	function buildRequestPreview(url, body, timeoutMs) {
@@ -211,6 +342,7 @@
 	g.NC_BG_PLANNER_MODEL_CLIENT = {
 		callOpenAI,
 		isModelTimeoutError,
+		parseStreamLine,
 		sanitizeMessages,
 	}
 })(globalThis)

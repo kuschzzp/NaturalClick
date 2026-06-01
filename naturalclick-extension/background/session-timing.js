@@ -1,7 +1,7 @@
 ;(function (g) {
-	const DEFAULT_MODEL_ROUND_TIMEOUT_MS = 22000
+	const DEFAULT_MODEL_ROUND_TIMEOUT_MS = 60000
 	const MIN_CONFIGURED_MODEL_ROUND_TIMEOUT_MS = 8000
-	const MAX_CONFIGURED_MODEL_ROUND_TIMEOUT_MS = 60000
+	const MAX_CONFIGURED_MODEL_ROUND_TIMEOUT_MS = 180000
 	const MAX_MODEL_PLANNING_CALLS = 4
 	const PLANNING_OVERHEAD_MS = 15000
 	const maximumBudgetMs = MAX_MODEL_PLANNING_CALLS * MAX_CONFIGURED_MODEL_ROUND_TIMEOUT_MS + PLANNING_OVERHEAD_MS
@@ -45,6 +45,10 @@
 		}
 		if (workflow === 'task-navigation' && workflowStep === 'navigate_to_task_target') {
 			await sleep(520)
+			return
+		}
+		if (workflowStep === 'submit_form_timeout_recovery') {
+			await sleep(900)
 			return
 		}
 		if (name === 'select_cascader_path') {

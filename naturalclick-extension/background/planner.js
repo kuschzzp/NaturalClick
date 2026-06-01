@@ -63,12 +63,13 @@
 		deriveTimeoutRecoveryWorkflowDecision,
 	} = plannerWorkflows
 	const MAX_PLANNING_ROUNDS = 4
-	const MODEL_ROUND_TIMEOUT_MS = 22000
+	const MODEL_ROUND_TIMEOUT_MS = 60000
 	const MIN_MODEL_ROUND_TIMEOUT_MS = 8000
-	const MAX_MODEL_ROUND_TIMEOUT_MS = 60000
-	const LARGE_OBSERVATION_TEXT_THRESHOLD = 7600
-	const LARGE_OBSERVATION_ITEM_THRESHOLD = 120
-	const LARGE_RAW_CANDIDATE_THRESHOLD = 80
+	const MAX_MODEL_ROUND_TIMEOUT_MS = 180000
+	const DEFAULT_FULL_OBSERVATION_MAX_CHARS = 262144
+	const DEFAULT_COMPACT_OBSERVATION_MAX_CHARS = 4200
+	const DEFAULT_COMPACT_ELEMENT_THRESHOLD = 120
+	const DEFAULT_COMPACT_RAW_CANDIDATE_THRESHOLD = 80
 	const PLANNING_ACTIONS = new Set(['request_context', 'inspect_index', 'inspect_region', 'request_options_for'])
 
 	async function planAction(session, observation, options = {}) {
@@ -86,8 +87,12 @@
 			.slice(-5)
 			.map(buildHistoryLine)
 			.join('\n')
-		const observationText = buildObservationText(observation, { task: session.task })
-		const startCompactObservation = shouldStartWithCompactObservation(observation, observationText)
+		const planningConfig = getPlanningContextConfig(session.config)
+		const observationText = buildObservationText(observation, {
+			task: session.task,
+			maxChars: planningConfig.fullObservationMaxChars,
+		})
+		const startCompactObservation = shouldStartWithCompactObservation(observation, observationText, planningConfig)
 		const toolLines = g.NC_BG_TOOLS?.getToolPromptLines?.() || []
 		const availableActionNames = getAvailableActionNames()
 		const endpoint = session.config.textLLM
@@ -111,10 +116,14 @@
 				task: session.task,
 				compact: true,
 				compactReason: reason,
-				maxChars: 4200,
+				maxChars: planningConfig.compactObservationMaxChars,
 			})
 		for (let round = 0; round < MAX_PLANNING_ROUNDS; round++) {
 			const initialCompactRound = round === 0 && startCompactObservation
+			const compactReason = startCompactObservation ? 'large_observation' : 'compact_retry'
+			const compactObservationText = useCompactObservation
+				? buildCompactObservationText(compactReason)
+				: ''
 			notifyPlanningProgress(session, options, {
 				stage: round === 0
 					? (initialCompactRound ? 'model_compact_request' : 'model_request')
@@ -122,7 +131,7 @@
 				round: round + 1,
 				text: round === 0
 					? (initialCompactRound
-						? `第 ${session.step} 步：观察内容较大，使用精简上下文请求模型规划动作（最多等待 ${formatSeconds(modelRoundTimeoutMs)} 秒）...`
+						? buildCompactProgressText(session, observation, observationText, compactObservationText, endpoint, modelRoundTimeoutMs, '大页面阈值触发', planningConfig)
 						: `第 ${session.step} 步：请求模型规划动作（最多等待 ${formatSeconds(modelRoundTimeoutMs)} 秒）...`)
 					: `第 ${session.step} 步：模型补充上下文后继续规划（第 ${round + 1} 轮，最多等待 ${formatSeconds(modelRoundTimeoutMs)} 秒）...`,
 			})
@@ -131,13 +140,14 @@
 				observation,
 				tabsSummary,
 				observationText: useCompactObservation
-					? buildCompactObservationText(startCompactObservation ? 'large_observation' : 'compact_retry')
+					? compactObservationText
 					: observationText,
 				toolLines,
 				historyText,
 				planningContext,
 				workflowContextText,
 				round,
+				compact: useCompactObservation,
 			})
 			const systemForRound = useCompactObservation ? compactSystem : system
 			const messages = [
@@ -146,7 +156,12 @@
 			]
 			let content = ''
 			try {
-				const result = await callOpenAI(endpoint, messages, { returnMeta: true, timeoutMs: modelRoundTimeoutMs })
+				const result = await callOpenAI(endpoint, messages, {
+					returnMeta: true,
+					timeoutMs: modelRoundTimeoutMs,
+					stream: endpoint?.stream !== false,
+					onStream: createModelStreamProgressPublisher(session, options, round + 1, modelRoundTimeoutMs),
+				})
 				content = result.content
 				appendModelTrace(session, {
 					title: round ? `模型调用: 文本规划补充 #${round + 1}` : '模型调用: 文本规划',
@@ -183,7 +198,7 @@
 				notifyPlanningProgress(session, options, {
 					stage: 'compact_retry',
 					round: round + 1,
-					text: `第 ${session.step} 步：模型首轮超时，正在压缩上下文重试（最多等待 ${formatSeconds(modelRoundTimeoutMs)} 秒）...`,
+					text: buildCompactRetryProgressText(session, observation, observationText, compactObservationText, endpoint, modelRoundTimeoutMs, planningConfig),
 				})
 				const compactUser = buildPlannerUserMessage({
 					session,
@@ -195,12 +210,18 @@
 					planningContext,
 					workflowContextText,
 					round,
+					compact: true,
 				})
 				try {
 					const retryResult = await callOpenAI(endpoint, [
 						{ role: 'system', content: compactSystem },
 						{ role: 'user', content: compactUser },
-					], { returnMeta: true, timeoutMs: modelRoundTimeoutMs })
+					], {
+						returnMeta: true,
+						timeoutMs: modelRoundTimeoutMs,
+						stream: endpoint?.stream !== false,
+						onStream: createModelStreamProgressPublisher(session, options, round + 1, modelRoundTimeoutMs),
+					})
 					content = retryResult.content
 					useCompactObservation = true
 					appendModelTrace(session, {
@@ -421,6 +442,40 @@
 		return `任务理解：operation=${operation}${targets ? `，navigation=${targets}` : ''}`
 	}
 
+	function buildCompactProgressText(session, observation, fullText, compactText, endpoint, timeoutMs, fallbackReason, planningConfig) {
+		return `第 ${session.step} 步：观察内容较大，使用精简上下文请求模型规划动作（${buildCompactObservationSummary(observation, fullText, compactText, endpoint, timeoutMs, fallbackReason, planningConfig)}）...`
+	}
+
+	function buildCompactRetryProgressText(session, observation, fullText, compactText, endpoint, timeoutMs, planningConfig) {
+		return `第 ${session.step} 步：模型首轮超时，正在压缩上下文重试（${buildCompactObservationSummary(observation, fullText, compactText, endpoint, timeoutMs, '首轮完整上下文超时', planningConfig)}）...`
+	}
+
+	function buildCompactObservationSummary(observation, fullText, compactText, endpoint, timeoutMs, fallbackReason, planningConfig) {
+		const limits = getPlanningContextConfig({ planning: planningConfig })
+		const fullChars = String(fullText || '').length
+		const compactChars = String(compactText || '').length
+		const itemCount = countObservationItems(observation)
+		const rawCount = countRawCandidates(observation)
+		const triggers = []
+		if (
+			fullChars >= limits.fullObservationMaxChars ||
+			isObservationTextTruncatedAtLimit(fullText, limits.fullObservationMaxChars)
+		) {
+			triggers.push(`文本=${fullChars}/${limits.fullObservationMaxChars}`)
+		}
+		if (itemCount >= limits.compactElementThreshold) {
+			triggers.push(`元素=${itemCount}/${limits.compactElementThreshold}`)
+		}
+		if (rawCount >= limits.compactRawCandidateThreshold) {
+			triggers.push(`raw=${rawCount}/${limits.compactRawCandidateThreshold}`)
+		}
+		const reason = triggers.length
+			? `触发：${triggers.join('，')}`
+			: `原因：${fallbackReason || '压缩上下文'}`
+		const model = String(endpoint?.model || '未配置')
+		return `${reason}；完整≈${fullChars}字，精简≈${compactChars}字；元素=${itemCount}，raw=${rawCount}；模型=${model}；最多等待 ${formatSeconds(timeoutMs)} 秒`
+	}
+
 	function formatSeconds(ms) {
 		return Math.max(1, Math.round((Number(ms) || 0) / 1000))
 	}
@@ -434,8 +489,53 @@
 				stage: event?.stage || '',
 				round: Number(event?.round) || 0,
 				text: String(event?.text || '').trim(),
+				stream: event?.stream || undefined,
 			})
 		} catch (_) {}
+	}
+
+	function createModelStreamProgressPublisher(session, options, round, timeoutMs) {
+		let lastAt = 0
+		let lastChars = 0
+		return (event) => {
+			const content = String(event?.content || '')
+			const reasoning = String(event?.reasoning || '')
+			const receivedChars = content.length + reasoning.length
+			const now = Date.now()
+			if (!event?.done && now - lastAt < 300 && receivedChars - lastChars < 120) return
+			lastAt = now
+			lastChars = receivedChars
+			notifyPlanningProgress(session, options, {
+				stage: 'model_stream_delta',
+				round,
+				text: buildModelStreamProgressText(session, event, timeoutMs),
+				stream: {
+					contentChars: content.length,
+					reasoningChars: reasoning.length,
+					chunkCount: Number(event?.chunkCount || 0),
+					done: !!event?.done,
+				},
+			})
+		}
+	}
+
+	function buildModelStreamProgressText(session, event, timeoutMs) {
+		const content = String(event?.content || '')
+		const reasoning = String(event?.reasoning || '')
+		const preview = shortStreamPreview(reasoning || content)
+		const parts = [
+			`第 ${session.step} 步：模型正在流式响应`,
+			`正文 ${content.length} 字`,
+			reasoning ? `推理 ${reasoning.length} 字` : '',
+			`最多等待 ${formatSeconds(timeoutMs)} 秒`,
+		].filter(Boolean)
+		return `${parts.join('，')}...${preview ? `\n${preview}` : ''}`
+	}
+
+	function shortStreamPreview(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return ''
+		return text.length > 420 ? `${text.slice(0, 420)}...` : text
 	}
 
 	function isPlanningAction(action) {
@@ -464,11 +564,58 @@
 		return !!name && availableActionNames.has(name)
 	}
 
-	function shouldStartWithCompactObservation(observation, observationText) {
-		if (String(observationText || '').length >= LARGE_OBSERVATION_TEXT_THRESHOLD) return true
-		if (countObservationItems(observation) >= LARGE_OBSERVATION_ITEM_THRESHOLD) return true
-		if (countRawCandidates(observation) >= LARGE_RAW_CANDIDATE_THRESHOLD) return true
+	function shouldStartWithCompactObservation(observation, observationText, planningConfig) {
+		const limits = getPlanningContextConfig({ planning: planningConfig })
+		if (String(observationText || '').length >= limits.fullObservationMaxChars) return true
+		if (isObservationTextTruncatedAtLimit(observationText, limits.fullObservationMaxChars)) return true
+		if (countObservationItems(observation) >= limits.compactElementThreshold) return true
+		if (countRawCandidates(observation) >= limits.compactRawCandidateThreshold) return true
 		return false
+	}
+
+	function isObservationTextTruncatedAtLimit(observationText, limit) {
+		const safeLimit = Math.max(1, Math.floor(Number(limit) || 0))
+		return String(observationText || '').includes(`observation truncated at ${safeLimit} chars`)
+	}
+
+	function getPlanningContextConfig(config) {
+		const planning = config?.planning || {}
+		const full = clampInteger(
+			planning.fullObservationMaxChars,
+			DEFAULT_FULL_OBSERVATION_MAX_CHARS,
+			7600,
+			1048576
+		)
+		const compact = clampInteger(
+			planning.compactObservationMaxChars,
+			DEFAULT_COMPACT_OBSERVATION_MAX_CHARS,
+			1000,
+			Math.min(65536, full)
+		)
+		const elementThreshold = clampInteger(
+			planning.compactElementThreshold,
+			DEFAULT_COMPACT_ELEMENT_THRESHOLD,
+			20,
+			10000
+		)
+		const rawThreshold = clampInteger(
+			planning.compactRawCandidateThreshold,
+			DEFAULT_COMPACT_RAW_CANDIDATE_THRESHOLD,
+			20,
+			10000
+		)
+		return {
+			fullObservationMaxChars: full,
+			compactObservationMaxChars: compact,
+			compactElementThreshold: elementThreshold,
+			compactRawCandidateThreshold: rawThreshold,
+		}
+	}
+
+	function clampInteger(value, fallback, min, max) {
+		const number = Number(value)
+		const base = Number.isFinite(number) && number > 0 ? number : Number(fallback)
+		return Math.max(min, Math.min(max, Math.floor(base)))
 	}
 
 	function countObservationItems(observation) {
@@ -542,8 +689,11 @@
 		recordWorkflowOutcome: plannerWorkflows.recordWorkflowOutcome,
 		resolveDecisionWorkflowName: plannerWorkflows.resolveDecisionWorkflowName,
 		shouldStartWithCompactObservation,
+		isObservationTextTruncatedAtLimit,
+		buildModelStreamProgressText,
 		getDisplayModelThought,
 		getModelRoundTimeoutMs,
+		getPlanningContextConfig,
 		getTaskIntentTimeoutMs,
 		formatSeconds,
 	}
