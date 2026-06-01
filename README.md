@@ -26,6 +26,8 @@ It observes the active page through structured DOM extraction, sends the current
 
 This is **not** a stealth automation toolkit or a CAPTCHA bypass project. The goal is transparent, debuggable, user-controlled browser automation for real web workflows.
 
+Current extension version: `0.4.51`. The source of truth is `naturalclick-extension/manifest.json`.
+
 ## Install
 
 Clone the repository:
@@ -65,6 +67,29 @@ API Key:  your-api-key
 
 Settings are stored locally with `chrome.storage.local`.
 
+## Runtime And Planning Settings
+
+The side panel **Execution Parameters** section controls the task loop, model wait time, observation context size, and when NaturalClick switches to compact observation context.
+
+| Setting | Default | Range | Description |
+|---|---:|---:|---|
+| Max steps | `100` | `1-200` | Maximum Observe-Plan-Act steps for one task |
+| Text model round timeout (seconds) | `60` | `8-180` | Maximum wait time for each text-planning model round |
+| Full observation max chars | `262144` | `7600-1048576` | Maximum size of the full observation context |
+| Compact observation max chars | `4200` | `1000-65536` | Maximum size of the compact observation summary, never above the full limit |
+| Compact element threshold | `120` | `20-10000` | Switch to compact context when observed fields, actions, popups, and related items reach this count |
+| Compact raw-candidate threshold | `80` | `20-10000` | Switch to compact context when raw candidate count reaches this value |
+
+`Full observation max chars` is not the only compaction trigger. Even when the observation text is below that character limit, NaturalClick may start with compact context if the page has too many observed elements or raw candidates. This keeps large pages from drowning the planner in noisy candidates.
+
+When the side panel shows progress like this:
+
+```text
+Observation is large, using compact context for model planning (trigger: raw=140/80; full≈15587 chars, compact≈8409 chars; model=...; wait up to 60 seconds)...
+```
+
+the round was triggered by the raw-candidate threshold, not by the full character limit. Adjust the matching threshold in settings, or use **Restore planning defaults** to return to the recommended values.
+
 ## Quick Start
 
 After loading the extension, open a normal web page and ask for a task:
@@ -84,6 +109,8 @@ NaturalClick will:
 4. Verify selected results such as text input and scrolling.
 5. Use vision fallback when DOM execution fails.
 6. Save traces for debugging and replay-style inspection.
+
+While waiting for the text model, the side panel first updates a **Model streaming output** trace card with received content/reasoning counts and a short preview. After the model finishes, NaturalClick records the final model-call details, action, and verification result.
 
 ## What Is Included?
 
@@ -124,6 +151,11 @@ naturalclick-extension/
 ├── sidepanel.html                   # Side panel UI shell and styles
 ├── sidepanel.js                     # UI state, settings, history, traces
 └── assets/                          # Extension icons
+
+docs/
+├── runtime-configuration-and-diagnostics.md        # Runtime and troubleshooting guide
+├── runtime-configuration-and-diagnostics.zh-CN.md  # Chinese runtime and troubleshooting guide
+└── superpowers/specs/                              # Design notes and historical specs
 ```
 
 ## Automation Capabilities
@@ -137,8 +169,9 @@ naturalclick-extension/
 | Deterministic workflows | Target URL, login, task navigation, search/filter testing, and constrained form-fill timeout recovery |
 | Cross-tab actions | Open, switch, and close tabs |
 | Vision fallback | Screenshot-based coordinate selection with hit-test validation |
-| Trace inspection | Model IO, action inputs, outputs, verification failures, candidate diagnostics, exported session logs |
-| Verification | Structured outcomes, loop guard, input/dropdown/cascader checks, and dialog-disappearance detection |
+| Trace inspection | Model IO, streaming output, action inputs, outputs, verification failures, candidate diagnostics, exported session logs |
+| Verification | Structured outcomes, loop guard, input/dropdown/cascader checks, form feedback recognition, and dialog-disappearance detection |
+| Form feedback | Field validation, toast/alert/aria-live messages, submit success, duplicate, required, and format-error feedback |
 | Stop handling | First-class `stopped` status instead of treating user stop as an error |
 
 ## Supported Actions
@@ -171,15 +204,29 @@ naturalclick-extension/
 User task
   -> Side panel sends START_TASK
   -> Background prepares an automatable tab
-  -> Content observer returns structured page state
+  -> Content observer returns structured page state, field validation, and page feedback
   -> Deterministic workflows may handle URL, login, navigation, search, or safe form recovery
-  -> Planner calls the text model
+  -> Planner selects full or compact observation context and streams the text-model call
   -> Executor runs a browser or page action
-  -> Verifier checks selected outcomes
-  -> Timeout recovery may fill known form fields or submit only a satisfied active form
+  -> Verifier checks action outcomes, form feedback, and dialog state
+  -> Timeout recovery may fill known form fields, resolve duplicate conflicts, or submit only a satisfied active form
   -> Vision fallback retries failed click/input actions
   -> Session trace updates the side panel
 ```
+
+## Diagnostics And Troubleshooting
+
+Session traces and exported logs are the primary debugging surface.
+
+| Symptom | Meaning | What To Check |
+|---|---|---|
+| `Observation is large, using compact context...` | The current observation hit the text, element-count, or raw-candidate threshold | Check the progress details for `text=...`, `elements=...`, or `raw=...`, then adjust the matching setting |
+| `First model round timed out, retrying with compact context...` | The full-context model call exceeded the per-round timeout | Increase the text model timeout, or lower observation context size |
+| The streaming card shows counts but no final action | The model is still returning, or the final JSON has not completed | Wait for the round to finish; on timeout, inspect received content/reasoning counts |
+| A form stays open after submit | The verifier did not observe success feedback, dialog close, page change, or a clear error | Inspect field `error`, `feedback`, toast/alert messages, and exported logs |
+| Duplicate/already-exists feedback appears | Page feedback indicates a value conflict | NaturalClick tries to identify the conflicting field; if it cannot, it asks the user for a replacement value |
+
+See [Runtime Configuration And Diagnostics](./docs/runtime-configuration-and-diagnostics.md) for a more detailed operating guide.
 
 ## Development
 
@@ -225,6 +272,7 @@ NaturalClick includes heuristic confirmation for risky actions such as delete, p
 - CAPTCHA, SMS verification, banking, payment, and identity verification usually require manual intervention.
 - Complex custom components may still need site-specific or framework-specific heuristics.
 - Vision fallback depends on screenshot quality and model reliability.
+- Streaming model traces require an OpenAI-compatible endpoint that supports SSE streaming; unsupported providers fall back to normal JSON responses.
 - There is no packaged release workflow yet.
 - Runtime contract checks exist, but there is no full browser end-to-end regression suite yet.
 
@@ -237,7 +285,7 @@ NaturalClick includes heuristic confirmation for risky actions such as delete, p
 | Verification | Browser fixture coverage for before/after observation diffs and click outcomes |
 | Debugging | Trace replay, compact failure reports, and fixture-based reproductions |
 | Packaging | Release workflow for installable Chrome extension builds |
-| Privacy | Optional domain allowlist and clearer storage/history controls |
+| Privacy | Optional domain allowlist, clearer storage/history controls, and model-request redaction options |
 
 ## Contributing
 

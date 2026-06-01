@@ -1,6 +1,6 @@
 # Search Workflow And Timeout Recovery Design
 
-Status: implemented for the 0.4.x runtime, with the current source version tracked in `naturalclick-extension/manifest.json`.
+Status: implemented for the 0.4.x runtime. The current documented extension version is `0.4.51`, with the source version tracked in `naturalclick-extension/manifest.json`.
 
 ## Goal
 
@@ -13,7 +13,10 @@ NaturalClick 0.4.x moves repeatable browser automation steps out of model-only p
 - `background/search-workflow-state.js` owns persisted workflow state.
 - `background/search-workflow-history.js` owns history classification.
 - `background/planner.js` still handles model calls, ReAct context requests, validation, and compact retries.
+- `background/planner-model-client.js` owns OpenAI-compatible model calls, including streaming responses and timeout diagnostics.
+- `background/session-lifecycle.js` keeps model streaming progress in a single updatable trace card.
 - `background/verifier.js` rejects field actions that accidentally close an active dialog, even if the field value appears to have changed.
+- `content/observer.js` captures field-level validation and page-level feedback so submit verification can distinguish success, duplicate values, required fields, and format errors.
 - `content/action-select.js` owns dropdown, checkbox, and cascader execution, including dialog-safe popup dismissal.
 
 The pre-model order is target URL, login, task navigation, then search-field testing. Timeout recovery order is unresolved task navigation, then constrained form-fill recovery. Search testing only runs after named task navigation targets are reached or when the task has no named business target.
@@ -37,6 +40,8 @@ The workflow may:
 - Choose a visible dropdown option only when the option text is already present in the observed candidates.
 - Select a cascader path parsed from the task, with path text cleaned of trailing punctuation.
 - Click one current-form submit button only when recent form-fill recovery succeeded or all task-assigned fields are already satisfied in the active form.
+- React to duplicate or unique-constraint feedback by correcting the conflicting field when it is identifiable, asking the user when explicit user-provided values cannot be safely changed, or using a replacement value only when the task allows arbitrary/test data.
+- Replan from the latest visible validation feedback when the error changes, rather than continuing to apply a previous duplicate-value strategy.
 
 If multiple submit candidates are equivalent, such as duplicate `保存` buttons in the same dialog region, the workflow may choose one stable candidate. If no stable form submit candidate exists, recovery may use a constrained vision target for the active form footer, but it must not click create-entry, search, reset, cancel, or navigation buttons.
 
@@ -44,11 +49,24 @@ If multiple submit candidates are equivalent, such as duplicate `保存` buttons
 
 - Never invent dropdown options such as `WEB`, `全部`, or `默认`.
 - Never test a generic search area while a named business module is still unresolved.
+- Never add site-specific or CRM-specific fallback logic; recovery policies must remain generic browser-operation policies.
 - Model timeout recovery may stop with a clear failure, but it must not click business navigation, reopen a create entry as a submit action, or continue search tests on the wrong page.
 - Dialog-anchored selection controls must not use Escape or blank-page clicks to dismiss popups; they should blur the field instead so a successful cascader selection does not close the modal.
 - A field action that makes the dialog disappear unexpectedly must fail verification instead of being accepted as a successful value change.
 - Loop guard remains a protection layer only; it does not drive workflow progress.
 
+## Runtime Configuration
+
+Planning context limits are user-configurable in the side-panel settings:
+
+- Full observation max chars: default `262144`, range `7600-1048576`.
+- Compact observation max chars: default `4200`, range `1000-65536`.
+- Compact element threshold: default `120`, range `20-10000`.
+- Compact raw-candidate threshold: default `80`, range `20-10000`.
+- Text model round timeout: default `60` seconds, range `8-180`.
+
+Compact planning can be triggered by text size, structured element count, or raw candidate count. Progress messages must include the trigger details so exported logs explain why compaction happened.
+
 ## Verification
 
-Runtime contracts must cover deterministic search expansion, text-field fill, dropdown open/choose, submit/reset, completion, unresolved navigation suppression, form-fill timeout recovery, dialog-safe cascader dismissal, dialog-close rejection, duplicate submit candidates, and the active manifest version.
+Runtime contracts must cover deterministic search expansion, text-field fill, dropdown open/choose, submit/reset, completion, unresolved navigation suppression, form-fill timeout recovery, duplicate feedback replacement, changed validation feedback, dialog-safe cascader dismissal, dialog-close rejection, duplicate submit candidates, model streaming traces, configurable planning limits, and the active manifest version.
