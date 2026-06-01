@@ -387,7 +387,7 @@
 			addTrigger(field)
 			try {
 				for (const node of Array.from(field.querySelectorAll?.(
-					'.el-input__suffix,.el-select__caret,.el-input,[role="combobox"],input,.ant-select-selector,.arco-select-view,.n-base-selection-label'
+					'.el-input__suffix,.el-select__caret,.el-input,[role="combobox"],input,.ant-select-selector,.ant-tree-select,.arco-select-view,.n-base-selection-label,.van-dropdown-menu__bar,.van-field__control,.layui-select-title,.ivu-select-selection,.vxe-input,.q-field__control'
 				) || [])) {
 					addTrigger(node)
 				}
@@ -466,7 +466,7 @@
 
 		function hasVisibleSelectionPopup() {
 			return Array.from(document.querySelectorAll(
-				'.el-popper,.el-select__popper,.el-select-dropdown,.el-cascader-panel,.el-picker-panel,.ant-select-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-dropdown-menu,[role="listbox"]'
+				'.el-popper,.el-select__popper,.el-select-dropdown,.el-cascader-panel,.el-picker-panel,.ant-select-dropdown,.ant-tree-select-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-dropdown-menu,.van-popup,.van-picker,.layui-anim,.ivu-select-dropdown,.vxe-table--ignore-clear,[role="listbox"]'
 			)).some((node) => {
 				if (!(node instanceof HTMLElement)) return false
 				const style = window.getComputedStyle(node)
@@ -491,8 +491,8 @@
 				const y = Math.max(1, Math.min(window.innerHeight - 1, point.y))
 				const hit = document.elementFromPoint(x, y)
 				if (!(hit instanceof HTMLElement)) continue
-				if (hit.closest('.el-popper,.el-select__popper,.el-select-dropdown,.el-cascader-panel,.el-picker-panel,.ant-select-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-dropdown-menu,[role="listbox"]')) continue
-				if (hit.closest('button,a,input,textarea,select,[role="button"],[role="combobox"],[role="checkbox"],[role="radio"]')) continue
+				if (hit.closest('.el-popper,.el-select__popper,.el-select-dropdown,.el-cascader-panel,.el-picker-panel,.ant-select-dropdown,.ant-tree-select-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-dropdown-menu,.van-popup,.van-picker,.layui-anim,.ivu-select-dropdown,.vxe-table--ignore-clear,[role="listbox"]')) continue
+				if (hit.closest('button,a,input,textarea,select,[role="button"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"]')) continue
 				return { x, y }
 			}
 			return null
@@ -565,7 +565,7 @@
 
 		function hasEnabledSelectionTrigger(field, trigger) {
 			const composite = field?.closest?.(
-				'.el-select,.el-select-v2,.el-select__wrapper,.el-cascader,.el-date-editor,.el-input--suffix,.ant-select,.ant-cascader-picker,.ant-picker,.arco-select,.arco-cascader,.arco-picker,.n-base-selection,.n-date-picker,.avue-select,.avue-cascader,.avue-date,.avue-time,[class*="select-wrapper"],[class*="select__wrapper"],[class*="date-editor"],[class*="time-picker"],[class*="combobox"],[class*="picker"],[role="combobox"]'
+				'.el-select,.el-select-v2,.el-select__wrapper,.el-cascader,.el-date-editor,.el-input--suffix,.ant-select,.ant-select-selector,.ant-tree-select,.ant-cascader-picker,.ant-picker,.arco-select,.arco-cascader,.arco-picker,.n-base-selection,.n-tree-select,.n-date-picker,.van-dropdown-menu,.van-dropdown-item,.van-field,.van-picker,.layui-form-select,.layui-select-title,.ivu-select,.ivu-select-selection,.ivu-date-picker,.vxe-select,.vxe-input,.q-select,.q-field,.avue-select,.avue-cascader,.avue-date,.avue-time,[class*="select-wrapper"],[class*="select__wrapper"],[class*="tree-select"],[class*="date-editor"],[class*="time-picker"],[class*="combobox"],[class*="picker"],[role="combobox"]'
 			)
 			const disabledRoot = composite instanceof HTMLElement ? composite : field
 			const disabledText = String(disabledRoot?.className || '')

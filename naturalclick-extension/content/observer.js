@@ -178,20 +178,41 @@
 			'.el-radio',
 			'.el-tree-node__content',
 			'.ant-select',
+			'.ant-select-selector',
+			'.ant-tree-select',
 			'.ant-select-item-option',
 			'.ant-cascader-picker',
 			'.ant-cascader-menu-item',
 			'.ant-picker',
+			'.ant-switch',
 			'.ant-checkbox-wrapper',
 			'.ant-radio-wrapper',
 			'.arco-select',
 			'.arco-select-option',
 			'.arco-picker',
+			'.arco-switch',
 			'.arco-checkbox',
 			'.n-base-selection',
+			'.n-tree-select',
 			'.n-base-select-option',
 			'.n-date-picker',
 			'.n-checkbox',
+			'.n-switch',
+			'.van-dropdown-menu',
+			'.van-dropdown-item',
+			'.van-field',
+			'.van-picker',
+			'.van-switch',
+			'.layui-form-select',
+			'.layui-select-title',
+			'.ivu-select',
+			'.ivu-select-selection',
+			'.ivu-date-picker',
+			'.ivu-switch',
+			'.vxe-select',
+			'.vxe-input',
+			'.q-select',
+			'.q-field',
 			'.avue-select',
 			'.avue-cascader',
 			'.avue-date',
@@ -222,15 +243,15 @@
 			result.push(element)
 		}
 
-		const primary = Array.from(document.querySelectorAll(primarySelector))
+		const primary = querySelectorAllDeep(primarySelector)
 		for (const node of primary) addCandidate(node)
 
-		const extras = Array.from(document.querySelectorAll(extraSelector))
+		const extras = querySelectorAllDeep(extraSelector)
 		for (const node of extras) {
 			if (!(node instanceof HTMLElement)) continue
 			const cls = String(node.className || '')
 			const text = getElementText(node)
-			const maybeButtonLikeClass = /(btn|button|login|register|signup|signin|forgot|submit|dropdown|select|cascader|picker|date-editor|input--suffix|checkbox|radio)/i.test(cls)
+			const maybeButtonLikeClass = /(btn|button|login|register|signup|signin|forgot|submit|dropdown|select|tree-select|cascader|picker|date-editor|time-picker|input--suffix|checkbox|radio|switch)/i.test(cls)
 			if (
 				maybeButtonLikeClass ||
 				hasPointerCursor(node) ||
@@ -244,12 +265,51 @@
 		return compactInteractiveCandidates(result)
 	}
 
+	function querySelectorAllDeep(selector, root = document) {
+		const results = []
+		const roots = [root]
+		const seenRoots = new Set()
+		const seenElements = new Set()
+		while (roots.length) {
+			const current = roots.shift()
+			if (!current || seenRoots.has(current)) continue
+			seenRoots.add(current)
+			let nodes = []
+			try {
+				nodes = Array.from(current.querySelectorAll(selector))
+			} catch (_) {
+				nodes = []
+			}
+			for (const node of nodes) {
+				if (!(node instanceof HTMLElement) || seenElements.has(node)) continue
+				seenElements.add(node)
+				results.push(node)
+			}
+			for (const shadowRoot of listOpenShadowRoots(current)) {
+				if (!seenRoots.has(shadowRoot)) roots.push(shadowRoot)
+			}
+		}
+		return results
+	}
+
+	function listOpenShadowRoots(root) {
+		let all = []
+		try {
+			all = Array.from(root.querySelectorAll('*'))
+		} catch (_) {
+			all = []
+		}
+		return all
+			.map((node) => node?.shadowRoot)
+			.filter((node) => node instanceof ShadowRoot)
+	}
+
 	function normalizeInteractiveElement(element) {
 		if (!(element instanceof HTMLElement)) return null
 		const composite = getCompositeFieldContainer(element)
 		if (composite instanceof HTMLElement) return composite
 		const semantic = element.closest(
-			'button,a,input,textarea,select,summary,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[role="combobox"],[role="option"],[role="checkbox"],[role="radio"],[aria-selected],[aria-checked],[aria-expanded],[aria-haspopup],[onclick],[contenteditable="true"],.el-select,.el-select-v2,.el-select__wrapper,.el-select__tags,.el-select__input,.el-input,.el-input--suffix,.el-input__suffix,.el-input__prefix,.el-select-dropdown__item,.el-cascader,.el-date-editor,.el-cascader-node,.el-checkbox,.el-radio,.el-tree-node__content,.ant-select,.ant-select-item-option,.ant-cascader-picker,.ant-cascader-menu-item,.ant-picker,.ant-checkbox-wrapper,.ant-radio-wrapper,.arco-select,.arco-select-option,.arco-picker,.n-base-selection,.n-base-select-option,.n-date-picker,.avue-select,.avue-cascader,.avue-date,.avue-time'
+			'button,a,input,textarea,select,summary,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[role="combobox"],[role="option"],[role="checkbox"],[role="radio"],[role="switch"],[aria-selected],[aria-checked],[aria-expanded],[aria-haspopup],[onclick],[contenteditable="true"],.el-select,.el-select-v2,.el-select__wrapper,.el-select__tags,.el-select__input,.el-input,.el-input--suffix,.el-input__suffix,.el-input__prefix,.el-select-dropdown__item,.el-cascader,.el-date-editor,.el-cascader-node,.el-checkbox,.el-radio,.el-switch,.el-tree-node__content,.ant-select,.ant-select-selector,.ant-tree-select,.ant-select-item-option,.ant-cascader-picker,.ant-cascader-menu-item,.ant-picker,.ant-switch,.ant-checkbox-wrapper,.ant-radio-wrapper,.arco-select,.arco-select-option,.arco-picker,.arco-switch,.n-base-selection,.n-tree-select,.n-base-select-option,.n-date-picker,.n-switch,.van-dropdown-menu,.van-dropdown-item,.van-field,.van-picker,.van-switch,.layui-form-select,.layui-select-title,.ivu-select,.ivu-select-selection,.ivu-date-picker,.ivu-switch,.vxe-select,.vxe-input,.q-select,.q-field,.avue-select,.avue-cascader,.avue-date,.avue-time'
 		)
 		return semantic instanceof HTMLElement ? semantic : element
 	}
@@ -290,7 +350,7 @@
 		const area = Math.max(0, rect.width) * Math.max(0, rect.height)
 		const maxArea = window.innerWidth * window.innerHeight * 0.26
 		if (isCommonCrudActionText(text) && isLikelyTextActionContext(element) && area > 8 && area <= 16000 && element.childElementCount <= 4) return true
-		const optionLikeByClass = /(el-select-dropdown__item|el-option|el-cascader-node|el-checkbox|el-radio|el-tree-node__content|dropdown-item|select-option|cascader)/i.test(cls)
+		const optionLikeByClass = /(el-select-dropdown__item|el-option|el-cascader-node|el-checkbox|el-radio|el-tree-node__content|ant-tree-node|arco-tree-node|n-tree-node|van-picker-column__item|layui-select-tips|ivu-select-item|vxe-select-option|q-item|dropdown-item|select-option|tree-option|cascader)/i.test(cls)
 		if (optionLikeByClass && area > 8 && area <= maxArea) return true
 		const buttonLikeByClass = /(btn|button|login|register|signup|signin|forgot|submit)/i.test(cls)
 		if (buttonLikeByClass && text !== '(empty)' && area > 16 && area <= maxArea) return true
@@ -432,7 +492,7 @@
 		return (
 			role === 'combobox' ||
 			element instanceof HTMLSelectElement ||
-			/(select|cascader|dropdown|picker|base-selection)/i.test(cls) ||
+			/(select|tree-select|cascader|dropdown|picker|date|time|base-selection|layui-form-select|ivu-select|vxe-select|q-select)/i.test(cls) ||
 			element.hasAttribute('aria-haspopup')
 		)
 	}
@@ -444,7 +504,7 @@
 		return (
 			['option', 'menuitem', 'treeitem'].includes(role) ||
 			element.hasAttribute('aria-selected') ||
-			/(option|dropdown__item|cascader-node|menu-item|tree-node__content)/i.test(cls)
+			/(option|dropdown__item|cascader-node|menu-item|tree-node__content|tree-node|tree-option|van-picker-column__item|layui-select-tips|ivu-select-item|vxe-select-option|q-item)/i.test(cls)
 		)
 	}
 
@@ -601,7 +661,7 @@
 		if (['input', 'textarea', 'select'].includes(tag)) return true
 		if (isFieldLikeControl(element)) return true
 		return !!element.querySelector?.(
-			'input, textarea, select, [role="combobox"], .el-select, .el-select-v2, .el-select__wrapper, .el-cascader, .el-date-editor, .el-input--suffix, .ant-select, .ant-cascader-picker, .ant-picker, .arco-select, .arco-cascader, .arco-picker, .n-base-selection, .n-date-picker, .avue-select, .avue-cascader, .avue-date, .avue-time'
+			'input, textarea, select, [role="combobox"], .el-select, .el-select-v2, .el-select__wrapper, .el-cascader, .el-date-editor, .el-input--suffix, .ant-select, .ant-select-selector, .ant-tree-select, .ant-cascader-picker, .ant-picker, .arco-select, .arco-cascader, .arco-picker, .n-base-selection, .n-tree-select, .n-date-picker, .van-dropdown-menu, .van-dropdown-item, .van-field, .van-picker, .layui-form-select, .layui-select-title, .ivu-select, .ivu-select-selection, .ivu-date-picker, .vxe-select, .vxe-input, .q-select, .q-field, .avue-select, .avue-cascader, .avue-date, .avue-time'
 		)
 	}
 
@@ -615,7 +675,7 @@
 			return element
 		}
 		const nested = element.querySelector(
-			'input, textarea, select, [role="combobox"], .el-select, .el-select-v2, .el-select__wrapper, .el-cascader, .el-date-editor, .el-input--suffix, .ant-select, .ant-cascader-picker, .ant-picker, .arco-select, .arco-cascader, .arco-picker, .n-base-selection, .n-date-picker, .avue-select, .avue-cascader, .avue-date, .avue-time'
+			'input, textarea, select, [role="combobox"], .el-select, .el-select-v2, .el-select__wrapper, .el-cascader, .el-date-editor, .el-input--suffix, .ant-select, .ant-select-selector, .ant-tree-select, .ant-cascader-picker, .ant-picker, .arco-select, .arco-cascader, .arco-picker, .n-base-selection, .n-tree-select, .n-date-picker, .van-dropdown-menu, .van-dropdown-item, .van-field, .van-picker, .layui-form-select, .layui-select-title, .ivu-select, .ivu-select-selection, .ivu-date-picker, .vxe-select, .vxe-input, .q-select, .q-field, .avue-select, .avue-cascader, .avue-date, .avue-time'
 		)
 		return nested instanceof HTMLElement ? nested : null
 	}
@@ -714,7 +774,7 @@
 			element.parentElement
 		if (!(root instanceof HTMLElement)) return null
 		const targetRect = element.getBoundingClientRect()
-		const nodes = Array.from(root.querySelectorAll('label,span,div,p,strong')).slice(0, 120)
+		const nodes = querySelectorAllDeep('label,span,div,p,strong', root).slice(0, 120)
 		let best = null
 		for (const node of nodes) {
 			if (!(node instanceof HTMLElement)) continue
@@ -862,7 +922,7 @@
 			'[onclick]',
 			'[tabindex]',
 		].join(',')
-		for (const node of Array.from(document.querySelectorAll(selector)).slice(0, 900)) {
+		for (const node of querySelectorAllDeep(selector).slice(0, 900)) {
 			if (!(node instanceof HTMLElement)) continue
 			if (node.closest('#naturalclick-right-dock-host')) continue
 			if (node.hasAttribute('data-naturalclick-ignore')) continue
@@ -940,9 +1000,20 @@
 			if (p.x < 0 || p.y < 0 || p.x > window.innerWidth || p.y > window.innerHeight) continue
 			const hit = document.elementFromPoint(p.x, p.y)
 			if (!hit) continue
-			if (hit === element || element.contains(hit) || hit.contains(element)) return true
+			if (isComposedHitRelated(element, hit)) return true
 		}
 		return false
+	}
+
+	function isComposedHitRelated(element, hit) {
+		if (!(element instanceof HTMLElement) || !(hit instanceof Element)) return false
+		if (hit === element || element.contains(hit) || hit.contains(element)) return true
+		const root = element.getRootNode?.()
+		const host = root instanceof ShadowRoot ? root.host : null
+		if (host instanceof HTMLElement && (hit === host || host.contains(hit) || hit.contains(host))) return true
+		const hitRoot = hit.getRootNode?.()
+		const hitHost = hitRoot instanceof ShadowRoot ? hitRoot.host : null
+		return hitHost instanceof HTMLElement && (hitHost === element || element.contains(hitHost) || hitHost.contains(element))
 	}
 
 	function getActiveElementSummary() {
@@ -964,7 +1035,7 @@
 		}
 		if (
 			element.closest(
-				'.el-popper,.el-popover,.el-select-dropdown,.el-picker-panel,.el-cascader-panel,.el-dropdown-menu,.ant-select-dropdown,.ant-picker-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-popover,.n-dropdown-menu,[role="listbox"]'
+				'.el-popper,.el-popover,.el-select-dropdown,.el-picker-panel,.el-cascader-panel,.el-dropdown-menu,.ant-select-dropdown,.ant-tree-select-dropdown,.ant-picker-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-popover,.n-dropdown-menu,.van-popup,.van-picker,.layui-anim,.ivu-select-dropdown,.vxe-table--ignore-clear,[role="listbox"]'
 			)
 		) {
 			return 'popover'
@@ -1245,6 +1316,7 @@
 		if (item.selectionControl === 'cascader-leaf') return 'cascader-option'
 		if (item.selectionControl === 'checkbox') return 'checkbox'
 		if (item.selectionControl === 'radio') return 'radio'
+		if (item.selectionControl === 'switch') return 'switch'
 		if (item.actionIntent) return 'action'
 		return item.role || item.tag || 'node'
 	}
@@ -1295,7 +1367,7 @@
 	function isLikelyPopupItem(item) {
 		const path = String(item.domPath || '')
 		const text = `${path} ${item.role || ''} ${item.selectionControl || ''}`
-		return /popper|popover|select-dropdown|picker-panel|cascader-panel|dropdown|listbox|select-option|cascader-option/i.test(text)
+		return /popper|popover|select-dropdown|tree-select-dropdown|picker-panel|cascader-panel|dropdown|listbox|select-option|tree-option|cascader-option|van-picker|layui|ivu-select|vxe-select|q-menu/i.test(text)
 	}
 
 	function isLikelyScrollableItem(item) {
@@ -1394,7 +1466,7 @@
 		].join(',')
 		let nodes = []
 		try {
-			nodes = Array.from(document.querySelectorAll(panelSelector))
+			nodes = querySelectorAllDeep(panelSelector)
 		} catch (_) {
 			nodes = []
 		}
@@ -1427,8 +1499,9 @@
 		let controls = []
 		try {
 			controls = Array.from(
-				panel.querySelectorAll(
-					'input, textarea, select, [role="combobox"], .el-select, .el-select-v2, .el-select__wrapper, .el-cascader, .el-date-editor, .el-input--suffix, .ant-select, .ant-cascader-picker, .ant-picker, .arco-select, .arco-cascader, .arco-picker, .n-base-selection, .n-date-picker, .avue-select, .avue-cascader, .avue-date, .avue-time'
+				querySelectorAllDeep(
+					'input, textarea, select, [role="combobox"], .el-select, .el-select-v2, .el-select__wrapper, .el-cascader, .el-date-editor, .el-input--suffix, .ant-select, .ant-select-selector, .ant-tree-select, .ant-cascader-picker, .ant-picker, .arco-select, .arco-cascader, .arco-picker, .n-base-selection, .n-tree-select, .n-date-picker, .van-dropdown-menu, .van-dropdown-item, .van-field, .van-picker, .layui-form-select, .layui-select-title, .ivu-select, .ivu-select-selection, .ivu-date-picker, .vxe-select, .vxe-input, .q-select, .q-field, .avue-select, .avue-cascader, .avue-date, .avue-time',
+					panel
 				)
 			)
 		} catch (_) {
@@ -1639,10 +1712,11 @@
 		const cls = String(element.className || '')
 		if (/(el-cascader-node)/i.test(cls)) return 'option'
 		if (/(el-cascader|cascader)/i.test(cls) && !/(node|panel|menu|dropdown)/i.test(cls)) return 'combobox'
-		if (/(el-select|select-wrapper|combobox)/i.test(cls) && !/(dropdown__item|option)/i.test(cls)) return 'combobox'
-		if (/(el-select-dropdown__item|el-option|dropdown-item|select-option)/i.test(cls)) return 'option'
-		if (/(el-checkbox)/i.test(cls)) return 'checkbox'
-		if (/(el-radio)/i.test(cls)) return 'radio'
+		if (/(el-select|ant-select|tree-select|n-base-selection|n-tree-select|van-dropdown|van-field|layui-form-select|ivu-select|vxe-select|q-select|select-wrapper|combobox)/i.test(cls) && !/(dropdown__item|option|tree-node|select-item)/i.test(cls)) return 'combobox'
+		if (/(el-select-dropdown__item|el-option|dropdown-item|select-option|ant-select-item-option|ant-tree-node|arco-select-option|arco-tree-node|n-base-select-option|n-tree-node|van-picker-column__item|layui-select-tips|ivu-select-item|vxe-select-option|q-item)/i.test(cls)) return 'option'
+		if (/(el-checkbox|ant-checkbox|arco-checkbox|n-checkbox|van-checkbox)/i.test(cls)) return 'checkbox'
+		if (/(el-radio|ant-radio|arco-radio|n-radio|van-radio)/i.test(cls)) return 'radio'
+		if (/(el-switch|ant-switch|arco-switch|n-switch|van-switch|ivu-switch)/i.test(cls)) return 'switch'
 		if (/(el-tree-node__content|tree-node)/i.test(cls)) return 'option'
 		return ''
 	}
@@ -1712,7 +1786,7 @@
 		}
 		if (
 			element.closest?.(
-				'.el-select-dropdown,.el-select__popper,.el-cascader-panel,.el-picker-panel,.el-dropdown-menu,.ant-select-dropdown,.ant-cascader-menus,.ant-picker-dropdown,.arco-trigger-popup,.n-dropdown-menu,[role="listbox"]'
+					'.el-select-dropdown,.el-select__popper,.el-cascader-panel,.el-picker-panel,.el-dropdown-menu,.ant-select-dropdown,.ant-tree-select-dropdown,.ant-cascader-menus,.ant-picker-dropdown,.arco-trigger-popup,.n-dropdown-menu,.van-popup,.van-picker,.layui-anim,.ivu-select-dropdown,.vxe-table--ignore-clear,[role="listbox"]'
 			)
 		) {
 			return null
@@ -1725,13 +1799,29 @@
 			'.el-date-editor',
 			'.el-input--suffix',
 			'.ant-select',
+			'.ant-select-selector',
+			'.ant-tree-select',
 			'.ant-cascader-picker',
 			'.ant-picker',
 			'.arco-select',
 			'.arco-cascader',
 			'.arco-picker',
 			'.n-base-selection',
+			'.n-tree-select',
 			'.n-date-picker',
+			'.van-dropdown-menu',
+			'.van-dropdown-item',
+			'.van-field',
+			'.van-picker',
+			'.layui-form-select',
+			'.layui-select-title',
+			'.ivu-select',
+			'.ivu-select-selection',
+			'.ivu-date-picker',
+			'.vxe-select',
+			'.vxe-input',
+			'.q-select',
+			'.q-field',
 			'.avue-select',
 			'.avue-cascader',
 			'.avue-date',
@@ -1778,8 +1868,8 @@
 		const cls = String(element.className || '')
 		return (
 			role === 'combobox' ||
-			/(^|\s)(el-select|el-select-v2|el-cascader|el-date-editor|ant-select|ant-cascader-picker|ant-picker|arco-select|arco-cascader|arco-picker|n-base-selection|n-date-picker)(\s|$)/i.test(cls) ||
-			/(select-wrapper|select__wrapper|combobox|picker|date-editor|time-picker|avue-(select|cascader|date|time))/i.test(cls)
+			/(^|\s)(el-select|el-select-v2|el-cascader|el-date-editor|ant-select|ant-select-selector|ant-tree-select|ant-cascader-picker|ant-picker|arco-select|arco-cascader|arco-picker|n-base-selection|n-tree-select|n-date-picker|van-dropdown-menu|van-dropdown-item|van-field|van-picker|layui-form-select|layui-select-title|ivu-select|ivu-select-selection|ivu-date-picker|vxe-select|vxe-input|q-select|q-field)(\s|$)/i.test(cls) ||
+			/(select-wrapper|select__wrapper|tree-select|combobox|picker|date-editor|time-picker|avue-(select|cascader|date|time))/i.test(cls)
 		)
 	}
 
@@ -1924,7 +2014,8 @@
 		if (isDropdownLikeControl(element)) {
 			return /cascader/i.test(cls) ? 'cascader-parent' : 'dropdown'
 		}
-		if (role === 'checkbox' || role === 'switch') return 'checkbox'
+		if (role === 'switch') return 'switch'
+		if (role === 'checkbox') return 'checkbox'
 		if (role === 'radio') return 'radio'
 		if (element instanceof HTMLInputElement) {
 			const type = String(element.type || '').toLowerCase()
@@ -1932,6 +2023,7 @@
 		}
 		if (/(checkbox)/i.test(cls)) return 'checkbox'
 		if (/(radio)/i.test(cls)) return 'radio'
+		if (/(switch)/i.test(cls)) return 'switch'
 		const nested = findNestedSelectableControl(element)
 		if (!nested) return ''
 		if (nested === element) return ''
@@ -1982,19 +2074,27 @@
 			'input[type="radio"]',
 			'[role="checkbox"]',
 			'[role="radio"]',
+			'[role="switch"]',
 			'.el-checkbox__input',
 			'.el-checkbox__inner',
 			'.el-radio__input',
 			'.el-radio__inner',
+			'.el-switch',
+			'.el-switch__core',
 			'.ant-checkbox',
 			'.ant-checkbox-inner',
 			'.ant-radio',
 			'.ant-radio-inner',
+			'.ant-switch',
 			'.n-checkbox',
 			'.n-checkbox-box',
+			'.n-switch',
 			'.arco-checkbox',
 			'.arco-checkbox-mask',
+			'.arco-switch',
 			'.van-checkbox__icon',
+			'.van-switch',
+			'.ivu-switch',
 		].join(',')
 		if (element.matches?.(selectors) && isVisibleSelectableControl(element)) return element
 		const nested = Array.from(element.querySelectorAll(selectors)).find(
@@ -2133,7 +2233,7 @@
 	function getPopupContainerHints(element) {
 		if (!(element instanceof HTMLElement)) return ''
 		const popup = element.closest?.(
-			'.el-popper,.el-popover,.el-select-dropdown,.el-picker-panel,.el-cascader-panel,.el-dropdown-menu,.ant-select-dropdown,.ant-picker-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-popover,.n-dropdown-menu,[role="listbox"]'
+			'.el-popper,.el-popover,.el-select-dropdown,.el-picker-panel,.el-cascader-panel,.el-dropdown-menu,.ant-select-dropdown,.ant-tree-select-dropdown,.ant-picker-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-popover,.n-dropdown-menu,.van-popup,.van-picker,.layui-anim,.ivu-select-dropdown,.vxe-table--ignore-clear,[role="listbox"]'
 		)
 		if (!(popup instanceof HTMLElement) || popup === element && !isLikelyPopupNode(popup)) return ''
 		const parts = []
@@ -2148,7 +2248,7 @@
 	function isLikelyPopupNode(element) {
 		const cls = String(element?.className || '')
 		const role = String(element?.getAttribute?.('role') || '').toLowerCase()
-		return role === 'listbox' || /(popper|popover|select-dropdown|picker-panel|cascader-panel|dropdown-menu|trigger-popup)/i.test(cls)
+		return role === 'listbox' || /(popper|popover|select-dropdown|tree-select-dropdown|picker-panel|cascader-panel|dropdown-menu|trigger-popup|van-popup|van-picker|layui-anim|ivu-select-dropdown|vxe-table--ignore-clear)/i.test(cls)
 	}
 
 	function getStateHints(element) {

@@ -127,26 +127,34 @@
 				'input[type="radio"]:not([disabled])',
 				'[role="checkbox"]',
 				'[role="radio"]',
+				'[role="switch"]',
 				'.el-checkbox__input',
 				'.el-checkbox__inner',
 				'.el-radio__input',
 				'.el-radio__inner',
+				'.el-switch',
+				'.el-switch__core',
 				'.ant-checkbox',
 				'.ant-checkbox-inner',
 				'.ant-radio',
 				'.ant-radio-inner',
+				'.ant-switch',
 				'.n-checkbox',
 				'.n-checkbox-box',
+				'.n-switch',
 				'.arco-checkbox',
 				'.arco-checkbox-mask',
+				'.arco-switch',
 				'.van-checkbox__icon',
+				'.van-switch',
+				'.ivu-switch',
 			].join(',')
 		}
 
 		function findOptionRow(element) {
 			if (!(element instanceof HTMLElement)) return null
 			const row = element.closest?.(
-				'[role="option"],[role="menuitem"],[role="treeitem"],.el-select-dropdown__item,.el-cascader-node,.el-checkbox,.el-radio,.el-tree-node__content,.ant-select-item-option,.ant-cascader-menu-item,.ant-checkbox-wrapper,.ant-radio-wrapper,.arco-select-option,.n-base-select-option,li'
+				'[role="option"],[role="menuitem"],[role="treeitem"],[role="checkbox"],[role="radio"],[role="switch"],.el-select-dropdown__item,.el-cascader-node,.el-checkbox,.el-radio,.el-switch,.el-tree-node__content,.ant-select-item-option,.ant-tree-node,.ant-cascader-menu-item,.ant-checkbox-wrapper,.ant-radio-wrapper,.ant-switch,.arco-select-option,.arco-tree-node,.arco-switch,.n-base-select-option,.n-tree-node,.n-switch,.van-picker-column__item,.van-switch,.layui-select-tips,.ivu-select-item,.ivu-switch,.vxe-select-option,.q-item,li'
 			)
 			return row instanceof HTMLElement ? row : null
 		}
@@ -162,7 +170,7 @@
 		}
 
 		function getVisibleOptionCandidates(options = {}) {
-			return Array.from(document.querySelectorAll(getOptionCandidateSelector()))
+			return querySelectorAllDeep(getOptionCandidateSelector())
 				.filter((node) => node instanceof HTMLElement && isVisibleClickTarget(node) && (
 					isTopLayerClickable(node) || isVisiblePopupOptionCandidate(node)
 				))
@@ -184,6 +192,7 @@
 				'[role="menuitem"]',
 				'[role="checkbox"]',
 				'[role="radio"]',
+				'[role="switch"]',
 				'[aria-selected]',
 				'[aria-checked]',
 				'.el-select-dropdown__item',
@@ -195,16 +204,30 @@
 				'.el-radio__label',
 				'.el-tree-node__content',
 				'.ant-select-item-option',
+				'.ant-tree-node',
 				'.ant-cascader-menu-item',
 				'.ant-checkbox-wrapper',
 				'.ant-radio-wrapper',
+				'.ant-switch',
 				'.arco-select-option',
+				'.arco-tree-node',
 				'.arco-cascader-option',
 				'.arco-checkbox',
+				'.arco-switch',
 				'.n-base-select-option',
+				'.n-tree-node',
 				'.n-cascader-option',
 				'.n-checkbox',
+				'.n-switch',
+				'.van-picker-column__item',
+				'.van-switch',
+				'.layui-select-tips',
+				'.ivu-select-item',
+				'.ivu-switch',
+				'.vxe-select-option',
+				'.q-item',
 				'[class*="select-option"]',
+				'[class*="tree-option"]',
 				'[class*="dropdown-item"]',
 				'[class*="cascader"]',
 				'li',
@@ -215,9 +238,9 @@
 			if (!(node instanceof HTMLElement)) return false
 			const role = String(node.getAttribute('role') || '').toLowerCase()
 			const cls = String(node.className || '')
-			if (['option', 'treeitem', 'checkbox', 'radio'].includes(role)) return true
+			if (['option', 'treeitem', 'checkbox', 'radio', 'switch'].includes(role)) return true
 			if (
-				/(el-select-dropdown__item|el-option|el-cascader-node|ant-select-item-option|ant-cascader-menu-item|arco-select-option|arco-cascader-option|n-base-select-option|n-cascader-option|select-option|dropdown-item|cascader)/i.test(cls)
+				/(el-select-dropdown__item|el-option|el-cascader-node|el-tree-node__content|ant-select-item-option|ant-tree-node|ant-cascader-menu-item|arco-select-option|arco-tree-node|arco-cascader-option|n-base-select-option|n-tree-node|n-cascader-option|van-picker-column__item|layui-select-tips|ivu-select-item|vxe-select-option|q-item|select-option|tree-option|dropdown-item|cascader)/i.test(cls)
 			) {
 				return true
 			}
@@ -293,10 +316,16 @@
 				'.el-picker-panel',
 				'.el-dropdown-menu',
 				'.ant-select-dropdown',
+				'.ant-tree-select-dropdown',
 				'.ant-picker-dropdown',
 				'.ant-cascader-menus',
 				'.arco-trigger-popup',
 				'.n-dropdown-menu',
+				'.van-popup',
+				'.van-picker',
+				'.layui-anim',
+				'.ivu-select-dropdown',
+				'.vxe-table--ignore-clear',
 				'[role="listbox"]',
 				'[class*="select"][class*="popper"]',
 				'[class*="dropdown"][class*="popper"]',
@@ -415,7 +444,7 @@
 		function getVisibleOptionLabel(element) {
 			if (!(element instanceof HTMLElement)) return ''
 			const preferred = element.querySelector?.(
-				'.el-cascader-node__label,.el-select-dropdown__item span,.ant-select-item-option-content,.arco-select-option-content'
+				'.el-cascader-node__label,.el-select-dropdown__item span,.ant-select-item-option-content,.ant-tree-title,.arco-select-option-content,.arco-tree-node-title,.n-base-select-option__content,.n-tree-node-content__text,.van-ellipsis,.ivu-select-item,.vxe-select-option--label,.q-item__label'
 			)
 			if (preferred instanceof HTMLElement) return observer.getElementText(preferred)
 			return observer.getElementText(element)
@@ -436,18 +465,18 @@
 		function resolveDropdownTrigger(element) {
 			if (!(element instanceof HTMLElement)) return null
 			const composite = element.closest?.(
-				'.el-select,.el-select-v2,.el-select__wrapper,.el-cascader,.el-date-editor,.el-input--suffix,.ant-select,.ant-cascader-picker,.ant-picker,.arco-select,.arco-cascader,.arco-picker,.n-base-selection,.n-date-picker,.avue-select,.avue-cascader,.avue-date,.avue-time,[class*="select-wrapper"],[class*="select__wrapper"],[class*="date-editor"],[class*="time-picker"],[class*="combobox"],[class*="picker"],[role="combobox"]'
+				'.el-select,.el-select-v2,.el-select__wrapper,.el-cascader,.el-date-editor,.el-input--suffix,.ant-select,.ant-select-selector,.ant-tree-select,.ant-cascader-picker,.ant-picker,.arco-select,.arco-cascader,.arco-picker,.n-base-selection,.n-tree-select,.n-date-picker,.van-dropdown-menu,.van-dropdown-item,.van-field,.van-picker,.layui-form-select,.layui-select-title,.ivu-select,.ivu-select-selection,.ivu-date-picker,.vxe-select,.vxe-input,.q-select,.q-field,.avue-select,.avue-cascader,.avue-date,.avue-time,[class*="select-wrapper"],[class*="select__wrapper"],[class*="tree-select"],[class*="date-editor"],[class*="time-picker"],[class*="combobox"],[class*="picker"],[role="combobox"]'
 			)
 			const target = composite instanceof HTMLElement ? composite : element
 			if (
 				target.closest?.(
-					'.el-select-dropdown,.el-cascader-panel,.el-picker-panel,.ant-select-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-dropdown-menu,[role="listbox"]'
+					'.el-select-dropdown,.el-cascader-panel,.el-picker-panel,.ant-select-dropdown,.ant-tree-select-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-dropdown-menu,.van-popup,.van-picker,.layui-anim,.ivu-select-dropdown,.vxe-table--ignore-clear,[role="listbox"]'
 				)
 			) {
 				return element
 			}
 			const inner = target.querySelector?.(
-				'.el-select__caret,.el-input__suffix,.el-input,.ant-select-selector,.arco-select-view,.n-base-selection-label,input'
+				'.el-select__caret,.el-input__suffix,.el-input,.ant-select-selector,.ant-tree-select,.arco-select-view,.n-base-selection-label,.van-dropdown-menu__bar,.van-field__control,.layui-select-title,.ivu-select-selection,.vxe-input,.q-field__control,input'
 			)
 			return inner instanceof HTMLElement ? inner : target
 		}
@@ -468,6 +497,45 @@
 
 		function normalizeComparableText(value) {
 			return String(value || '').replace(/\s+/g, '').trim().toLowerCase()
+		}
+
+		function querySelectorAllDeep(selector, root = document) {
+			const results = []
+			const roots = [root]
+			const seenRoots = new Set()
+			const seenElements = new Set()
+			while (roots.length) {
+				const current = roots.shift()
+				if (!current || seenRoots.has(current)) continue
+				seenRoots.add(current)
+				let nodes = []
+				try {
+					nodes = Array.from(current.querySelectorAll(selector))
+				} catch (_) {
+					nodes = []
+				}
+				for (const node of nodes) {
+					if (!(node instanceof HTMLElement) || seenElements.has(node)) continue
+					seenElements.add(node)
+					results.push(node)
+				}
+				for (const shadowRoot of listOpenShadowRoots(current)) {
+					if (!seenRoots.has(shadowRoot)) roots.push(shadowRoot)
+				}
+			}
+			return results
+		}
+
+		function listOpenShadowRoots(root) {
+			let all = []
+			try {
+				all = Array.from(root.querySelectorAll('*'))
+			} catch (_) {
+				all = []
+			}
+			return all
+				.map((node) => node?.shadowRoot)
+				.filter((node) => node instanceof ShadowRoot)
 		}
 
 		return {

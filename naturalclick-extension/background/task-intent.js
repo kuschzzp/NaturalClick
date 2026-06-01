@@ -1,5 +1,5 @@
 ;(function (g) {
-	const TASK_INTENT_VERSION = 1
+	const TASK_INTENT_VERSION = 2
 	const READY_STATUSES = new Set(['ready', 'failed', 'invalid', 'skipped'])
 	const DEFAULT_CREATE_ENTRY_LABELS = ['新增', '新建', '创建', '添加', '新 增']
 	const DEFAULT_DETAIL_ENTRY_LABELS = ['详情', '查看', '明细', '预览']
@@ -66,7 +66,8 @@
 		const targets = []
 		const forbidden = []
 		for (const match of extractHeuristicTargetMatches(text, operation)) {
-			const canonical = cleanNavigationName(match.canonical)
+			const candidateText = normalizeHeuristicTargetCandidate(match.canonical)
+			const canonical = cleanNavigationName(candidateText)
 			if (isHeuristicNoiseTarget(canonical)) continue
 			if (!canonical) continue
 			const raw = cleanShortString(match.raw || match.canonical, 80) || canonical
@@ -262,15 +263,16 @@
 	function normalizeOperation(value, taskText = '') {
 		const raw = getIntentKey(value)
 		if (/^(create|add|new|新增|新建|创建|添加|增加)$/.test(raw)) return 'create'
-		if (/^(edit|modify|update|编辑|修改)$/.test(raw)) return 'edit'
+		if (/^(edit|modify|update|编辑|修改|更新)$/.test(raw)) return 'edit'
 		if (/^(viewfirstrecorddetail|view_first_record_detail|firstdetail|查看第一条详情|第一条详情)$/.test(raw)) return 'view_first_record_detail'
 		if (/^(viewdetail|view_detail|detail|details|查看详情|详情|明细|查看|预览)$/.test(raw)) return 'view_detail'
 		if (/^(search|query|filter|搜索|查询|筛选|过滤)$/.test(raw)) return 'search'
-		if (/^(fillform|fill_form|填写|填表)$/.test(raw)) return 'fill_form'
+		if (/^(fillform|fill_form|填写|填入|填表|录入|补全|设置字段)$/.test(raw)) return 'fill_form'
 		const text = String(taskText || '')
 		if (/(第一条|第一行|首条|首行|第\s*1\s*[条行]).{0,20}(详情|明细|查看|预览)/i.test(text)) return 'view_first_record_detail'
 		if (/(新增|新建|创建|添加|增加)/.test(text)) return 'create'
-		if (/(编辑|修改)/.test(text)) return 'edit'
+		if (/(编辑|修改|更新)/.test(text)) return 'edit'
+		if (/(填写|填入|填表|录入|补全|设置.{0,8}(字段|表单|内容|值))/.test(text)) return 'fill_form'
 		if (/(详情|明细|查看|预览)/.test(text)) return 'view_detail'
 		if (/(搜索|查询|筛选|过滤)/.test(text)) return 'search'
 		return 'unknown'
@@ -329,11 +331,11 @@
 			.trim()
 		text = stripLeadingNoise(text)
 		for (let i = 0; i < 4; i++) {
-			const next = stripNavigationContextSuffix(stripActionAffixes(text))
+			const next = stripNavigationContextSuffix(stripActionAffixes(stripLeadingNoise(text)))
 			if (next === text) break
 			text = next
 		}
-		text = text.replace(/(数据|资料|信息)$/g, '')
+		text = stripLeadingNoise(text).replace(/(数据|资料|信息)$/g, '')
 		if (!text || text.length < 2 || text.length > 24) return ''
 		if (isGenericNavigationName(text)) return ''
 		return text
@@ -346,23 +348,33 @@
 			.replace(/\s+/g, '')
 			.trim()
 		text = stripLeadingNoise(text)
-		text = stripNavigationContextSuffix(text)
+		for (let i = 0; i < 4; i++) {
+			const next = stripNavigationContextSuffix(stripLeadingNoise(text))
+			if (next === text) break
+			text = next
+		}
 		if (!text || text.length < 2 || text.length > 32) return ''
 		if (isGenericNavigationName(text)) return ''
 		return text
 	}
 
 	function stripLeadingNoise(value) {
-		return String(value || '')
-			.replace(/^(?:然后|接着|再|并且|同时|随后|帮我|请|麻烦|你|我|先|去|到|把|将|给我)+/g, '')
-			.replace(/^(?:找到|进入|打开|前往|切换到|定位到|在)\s*/g, '')
-			.trim()
+		let text = String(value || '').trim()
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^(?:然后|接着|再|并且|同时|随后|现在|当前|马上|立即|帮我|请|麻烦|你|我|先|去|到|把|将|给我|一条|一个|一笔|一份|1条|1个)+/g, '')
+				.replace(/^(?:找到|进入|打开|前往|切换到|定位到|在)\s*/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
 	}
 
 	function stripActionAffixes(value) {
 		return String(value || '')
-			.replace(/^(?:新增|新建|创建|添加|增加|编辑|修改|查看|预览)\s*/g, '')
-			.replace(/(?:新增|新建|创建|添加|增加|编辑|修改|详情|明细|查看|预览|搜索|查询|筛选|过滤)$/g, '')
+			.replace(/^(?:新增|新建|创建|添加|增加|编辑|修改|更新|填写|填入|填表|录入|查看|预览)\s*/g, '')
+			.replace(/(?:新增|新建|创建|添加|增加|编辑|修改|更新|填写|填入|填表|录入|详情|明细|查看|预览|搜索|查询|筛选|过滤)$/g, '')
 			.trim()
 	}
 
@@ -375,24 +387,41 @@
 	function looksLikeStructuredBusinessTask(taskText) {
 		const text = String(taskText || '')
 			.replace(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi, ' ')
-		return /(新增|新建|创建|添加|增加|编辑|修改|详情|明细|查看|预览|第一条|第一行|首条|首行|第\s*1\s*[条行])/.test(text)
+		return /(新增|新建|创建|添加|增加|编辑|修改|更新|详情|明细|查看|预览|填写|填入|填表|录入|补全|第一条|第一行|首条|首行|第\s*1\s*[条行])/.test(text)
 	}
 
 	function extractHeuristicTargetMatches(taskText, operation) {
 		const text = String(taskText || '')
 			.replace(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi, ' ')
 		const matches = []
+		collectNavigationClauseMatches(matches, text)
 		if (operation === 'create') {
-			collectTargetMatches(matches, text, /(?:打开|进入|前往|切换到|定位到|找到|在)?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,24}?)(新增|新建|创建|添加|增加)(?:页面|页|列表|模块)?/g)
-			collectTargetMatches(matches, text, /(?:新增|新建|创建|添加|增加)\s*(?:一条|一个|1条|1个)?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,24}?)(?:数据|信息|资料|记录)?/g)
+			collectCreateObjectMatches(matches, text)
+		} else if (operation === 'edit') {
+			collectEditObjectMatches(matches, text)
 		} else if (operation === 'view_first_record_detail' || operation === 'view_detail') {
-			collectTargetMatches(matches, text, /(?:打开|进入|前往|切换到|定位到|找到|在)?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,24}?)(?:管理|页面|列表|模块)?[^，。；;]{0,24}(?:详情|明细|查看|预览)/g)
-		} else {
-			collectTargetMatches(matches, text, /(?:打开|进入|前往|切换到|定位到|找到|在)\s*([\u4e00-\u9fa5A-Za-z0-9]{2,24}?)(?:页面|页|列表|模块|管理)?/g)
+			collectDetailObjectMatches(matches, text)
 		}
-		return matches.filter((match, index, list) =>
-			list.findIndex((item) => cleanNavigationName(item.canonical) === cleanNavigationName(match.canonical)) === index
-		).slice(0, 5)
+		return uniqueHeuristicMatches(matches).slice(0, 5)
+	}
+
+	function collectNavigationClauseMatches(out, text) {
+		const targetCore = '([\\u4e00-\\u9fa5A-Za-z0-9]{2,24}(?:管理|中心|模块|页面|页|列表|报表|审批|设置|配置)?)'
+		collectTargetMatches(out, text, new RegExp(`(?:找到|进入|打开|前往|切换到|定位到|在)\\s*${targetCore}`, 'g'))
+	}
+
+	function collectCreateObjectMatches(out, text) {
+		collectTargetMatches(out, text, /(?:新增|新建|创建|添加|增加)\s*(?:一条|一个|一笔|一份|1条|1个)?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,24})(?:数据|信息|资料|记录)?(?=$|[，。；;、\s])/g)
+		collectTargetMatches(out, text, /([\u4e00-\u9fa5A-Za-z0-9]{2,24})(?:新增|新建|创建|添加|增加)(?:页面|页|列表|模块)?/g)
+	}
+
+	function collectEditObjectMatches(out, text) {
+		collectTargetMatches(out, text, /(?:编辑|修改|更新)\s*(?:一条|一个|一笔|一份|1条|1个)?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,24})(?:数据|信息|资料|记录)?(?=$|[，。；;、\s])/g)
+		collectTargetMatches(out, text, /([\u4e00-\u9fa5A-Za-z0-9]{2,24})(?:编辑|修改|更新)(?:页面|页|列表|模块)?/g)
+	}
+
+	function collectDetailObjectMatches(out, text) {
+		collectTargetMatches(out, text, /(?:查看|预览|打开|进入)?\s*(?:列表)?(?:第一条|第一行|首条|首行|第\s*1\s*[条行])?\s*([\u4e00-\u9fa5A-Za-z0-9]{2,24}?)(?:详情|明细)/g)
 	}
 
 	function collectTargetMatches(out, text, pattern) {
@@ -402,6 +431,27 @@
 			if (!canonical) continue
 			out.push({ raw, canonical })
 		}
+	}
+
+	function uniqueHeuristicMatches(matches) {
+		const output = []
+		for (const match of Array.isArray(matches) ? matches : []) {
+			const canonical = cleanNavigationName(normalizeHeuristicTargetCandidate(match?.canonical))
+			if (!canonical) continue
+			if (output.some((item) =>
+				cleanNavigationName(normalizeHeuristicTargetCandidate(item.canonical)) === canonical
+			)) continue
+			output.push(match)
+		}
+		return output
+	}
+
+	function normalizeHeuristicTargetCandidate(value) {
+		return String(value || '')
+			.replace(/^(?:一条|一个|一笔|一份|1条|1个)/g, '')
+			.replace(/^(?:现在|当前|马上|立即)(?:帮我|给我|请|麻烦)?/g, '')
+			.replace(/^(?:帮我|给我|请|麻烦)/g, '')
+			.trim()
 	}
 
 	function buildForbiddenNavigationNames(raw, canonical, operation) {
@@ -418,6 +468,12 @@
 			addUnique(names, '新增页面')
 			addUnique(names, '新建页面')
 		}
+		if (operation === 'edit') {
+			for (const suffix of ['编辑', '修改', '更新']) {
+				addUnique(names, `${base}${suffix}`)
+				addUnique(names, `${base}${suffix}页面`)
+			}
+		}
 		if (operation === 'view_detail' || operation === 'view_first_record_detail') {
 			for (const suffix of ['详情', '明细', '查看', '预览']) {
 				addUnique(names, `${base}${suffix}`)
@@ -430,6 +486,7 @@
 	function isHeuristicNoiseTarget(value) {
 		const text = String(value || '').trim()
 		if (!text) return true
+		if (/^(?:现在帮我|帮我|给我|请|麻烦|一条|一个|一笔|一份|1条|1个)/.test(text)) return true
 		if (/^(按|按照|根据|依照|基于|以).+/.test(text)) return true
 		return /^(业务规则|要求|需求|规则|数据|信息|资料|记录|一条记录|一个记录|1条记录|1个记录)$/.test(text)
 	}

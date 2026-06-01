@@ -111,7 +111,7 @@
 			const name = action?.name
 			const input = action?.input || {}
 			const inputMode = getInputMode(action)
-			if (!name) return { success: false, message: '动作名为空。' }
+			if (!name) return buildActionFailureResult('动作名为空。', 'missing_action_name')
 
 			if (name === 'click_element_by_index' || name === 'click') {
 				const index = Number(input.index)
@@ -168,7 +168,7 @@
 				return scrollActions.scrollHorizontalAction(input)
 			}
 
-			return { success: false, message: `不支持的动作: ${name}` }
+			return buildActionFailureResult(`不支持的动作: ${name}`, 'unsupported_action')
 		}
 
 		async function executeCoordinateAction(action) {
@@ -186,19 +186,19 @@
 				return inputActions.inputByPoint(x, y, String(input.text || ''), inputMode)
 			}
 
-			return { success: false, message: `坐标动作不支持: ${name}` }
+			return buildActionFailureResult(`坐标动作不支持: ${name}`, 'unsupported_coordinate_action')
 		}
 
 		async function clickByIndex(index, inputMode) {
 			const element = observer.getElementByIndex(index)
 			if (!element) {
-				return { success: false, message: `索引 ${index} 不存在。` }
+				return buildActionFailureResult(`索引 ${index} 不存在。`, 'missing_index', { index })
 			}
 			if (observer.isIgnoredElement(element)) {
-				return { success: false, message: `索引 ${index} 命中插件忽略区域。` }
+				return buildActionFailureResult(`索引 ${index} 命中插件忽略区域。`, 'ignored_extension_region', { index })
 			}
 			if (isDisabledElement(element)) {
-				return { success: false, message: `索引 ${index} 对应元素已禁用。` }
+				return buildActionFailureResult(`索引 ${index} 对应元素已禁用。`, 'disabled_target', { index })
 			}
 			const before = getElementInteractionState(element)
 			await humanLikeClick(element, null, inputMode)
@@ -213,13 +213,17 @@
 		async function clickByPoint(x, y, inputMode) {
 			const target = observer.findElementAtPoint(x, y)
 			if (!target) {
-				return { success: false, message: `坐标(${Math.round(x)}, ${Math.round(y)})未命中可用元素。` }
+				return buildActionFailureResult(
+					`坐标(${Math.round(x)}, ${Math.round(y)})未命中可用元素。`,
+					'missing_coordinate_target',
+					{ point: { x, y } }
+				)
 			}
 			if (observer.isIgnoredElement(target)) {
-				return { success: false, message: '命中了插件面板区域，坐标无效。' }
+				return buildActionFailureResult('命中了插件面板区域，坐标无效。', 'ignored_extension_region', { point: { x, y } })
 			}
 			if (isDisabledElement(target)) {
-				return { success: false, message: '坐标命中元素已禁用。' }
+				return buildActionFailureResult('坐标命中元素已禁用。', 'disabled_target', { point: { x, y } })
 			}
 			const before = getElementInteractionState(target)
 			await humanLikeClick(target, { x, y }, inputMode)
@@ -233,8 +237,8 @@
 
 		async function hoverByIndex(index, inputMode) {
 			const element = observer.getElementByIndex(index)
-			if (!element) return { success: false, message: `索引 ${index} 不存在。` }
-			if (isDisabledElement(element)) return { success: false, message: `索引 ${index} 对应元素已禁用。` }
+			if (!element) return buildActionFailureResult(`索引 ${index} 不存在。`, 'missing_index', { index })
+			if (isDisabledElement(element)) return buildActionFailureResult(`索引 ${index} 对应元素已禁用。`, 'disabled_target', { index })
 			const before = getElementInteractionState(element)
 			await hoverElement(element, inputMode)
 			const after = getElementInteractionState(element)
@@ -248,6 +252,22 @@
 		function getInputMode(action) {
 			const inputMode = String(action?.meta?.inputMode || '').trim()
 			return inputMode === 'standard' || inputMode === 'direct' ? inputMode : 'realistic'
+		}
+
+		function buildActionFailureResult(message, reason, details) {
+			const cleanReason = String(reason || message || 'action_failed')
+			const metaDetails = details && typeof details === 'object' ? details : {}
+			return {
+				success: false,
+				message,
+				meta: {
+					...metaDetails,
+					outcome: createOutcome(OUTCOME_KIND.FAILED, {
+						reason: cleanReason,
+						...metaDetails,
+					}),
+				},
+			}
 		}
 
 		async function humanLikeClick(element, point, inputMode) {
@@ -453,8 +473,28 @@
 			if (element instanceof HTMLInputElement || element instanceof HTMLButtonElement || element instanceof HTMLSelectElement) {
 				return !!element.disabled
 			}
+			if (hasDisabledClassSignal(element)) return true
 			const disabledParent = element.closest?.('[disabled],[aria-disabled="true"]')
-			return disabledParent instanceof HTMLElement && disabledParent !== document.body
+			if (disabledParent instanceof HTMLElement && disabledParent !== document.body) return true
+			let cursor = element.parentElement
+			while (cursor instanceof HTMLElement && cursor !== document.body) {
+				if (hasDisabledClassSignal(cursor)) return true
+				cursor = cursor.parentElement
+			}
+			return false
+		}
+
+		function hasDisabledClassSignal(element) {
+			if (!(element instanceof HTMLElement) || typeof element.className !== 'string') return false
+			return element.className
+				.split(/\s+/)
+				.map((item) => item.trim())
+				.filter(Boolean)
+				.some((token) =>
+					/^(is-disabled|disabled)$/i.test(token) ||
+					/(^|[-_])(disabled)$/i.test(token) ||
+					/(--|__|-|_)disabled$/i.test(token)
+				)
 		}
 
 		function isReadonlyElement(element) {

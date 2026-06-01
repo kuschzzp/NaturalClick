@@ -8,8 +8,14 @@
 		'.ant-select-dropdown',
 		'.ant-cascader-menus',
 		'.ant-picker-dropdown',
+		'.ant-tree-select-dropdown',
 		'.arco-trigger-popup',
 		'.n-dropdown-menu',
+		'.van-popup',
+		'.van-picker',
+		'.layui-anim',
+		'.ivu-select-dropdown',
+		'.vxe-table--ignore-clear',
 		'[role="listbox"]',
 	].join(',')
 
@@ -21,13 +27,29 @@
 		'.el-date-editor',
 		'.el-input--suffix',
 		'.ant-select',
+		'.ant-select-selector',
+		'.ant-tree-select',
 		'.ant-cascader-picker',
 		'.ant-picker',
 		'.arco-select',
 		'.arco-cascader',
 		'.arco-picker',
 		'.n-base-selection',
+		'.n-tree-select',
 		'.n-date-picker',
+		'.van-dropdown-menu',
+		'.van-dropdown-item',
+		'.van-field',
+		'.van-picker',
+		'.layui-form-select',
+		'.layui-select-title',
+		'.ivu-select',
+		'.ivu-select-selection',
+		'.ivu-date-picker',
+		'.vxe-select',
+		'.vxe-input',
+		'.q-select',
+		'.q-field',
 		'.avue-select',
 		'.avue-cascader',
 		'.avue-date',
@@ -46,19 +68,27 @@
 		'input[type="radio"]',
 		'[role="checkbox"]',
 		'[role="radio"]',
+		'[role="switch"]',
 		'.el-checkbox__input',
 		'.el-checkbox__inner',
 		'.el-radio__input',
 		'.el-radio__inner',
+		'.el-switch',
+		'.el-switch__core',
 		'.ant-checkbox',
 		'.ant-checkbox-inner',
 		'.ant-radio',
 		'.ant-radio-inner',
+		'.ant-switch',
 		'.n-checkbox',
 		'.n-checkbox-box',
+		'.n-switch',
 		'.arco-checkbox',
 		'.arco-checkbox-mask',
+		'.arco-switch',
 		'.van-checkbox__icon',
+		'.van-switch',
+		'.ivu-switch',
 	].join(',')
 
 	function isNativeFormControl(element) {
@@ -93,7 +123,7 @@
 		const cls = String(element.className || '')
 		return (
 			['option', 'menuitem', 'treeitem'].includes(role) ||
-			/(el-select-dropdown__item|el-option|el-cascader-node|ant-select-item-option|ant-cascader-menu-item|arco-select-option|arco-cascader-option|n-base-select-option|n-cascader-option|select-option|dropdown-item|cascader)/i.test(cls)
+			/(el-select-dropdown__item|el-option|el-cascader-node|el-tree-node__content|ant-select-item-option|ant-cascader-menu-item|ant-tree-node|arco-select-option|arco-cascader-option|arco-tree-node|n-base-select-option|n-cascader-option|n-tree-node|van-picker-column__item|layui-form-select|layui-select-tips|ivu-select-item|vxe-select-option|q-item|select-option|dropdown-item|tree-option|cascader)/i.test(cls)
 		)
 	}
 
@@ -138,7 +168,7 @@
 			'[class*="suffix"],[class*="arrow"],[class*="caret"],[class*="calendar"],[class*="date"],[class*="time"],svg'
 		)
 		const cls = String(element.className || '')
-		if (/(select|cascader|picker|date-editor|time-picker|dropdown|combobox)/i.test(cls)) return true
+		if (/(select|tree-select|cascader|picker|date-editor|time-picker|dropdown|combobox|van-field|layui-form-select|ivu-select|vxe-select|q-select)/i.test(cls)) return true
 		return /(请选择|请先选择|选择|select|choose|pick)/i.test(text) && suffix instanceof Element
 	}
 
@@ -148,8 +178,8 @@
 		const cls = String(element.className || '')
 		return (
 			role === 'combobox' ||
-			/(^|\s)(el-select|el-select-v2|el-cascader|el-date-editor|ant-select|ant-cascader-picker|ant-picker|arco-select|arco-cascader|arco-picker|n-base-selection|n-date-picker)(\s|$)/i.test(cls) ||
-			/(select-wrapper|select__wrapper|combobox|picker|date-editor|time-picker|avue-(select|cascader|date|time))/i.test(cls) ||
+			/(^|\s)(el-select|el-select-v2|el-cascader|el-date-editor|ant-select|ant-select-selector|ant-tree-select|ant-cascader-picker|ant-picker|arco-select|arco-cascader|arco-picker|n-base-selection|n-tree-select|n-date-picker|van-dropdown-menu|van-dropdown-item|van-field|van-picker|layui-form-select|layui-select-title|ivu-select|ivu-select-selection|ivu-date-picker|vxe-select|vxe-input|q-select|q-field)(\s|$)/i.test(cls) ||
+			/(select-wrapper|select__wrapper|tree-select|combobox|picker|date-editor|time-picker|dropdown-menu|dropdown-item|avue-(select|cascader|date|time))/i.test(cls) ||
 			hasReadonlyPickerDescendant(element)
 		)
 	}
@@ -175,7 +205,7 @@
 			element.getAttribute('data-role') || '',
 		].join(' ')
 		if (role === 'combobox' || ariaPopup && ariaPopup !== 'false') return true
-		if (/(select|cascader|picker|dropdown|combobox)/i.test(`${cls} ${parentClass} ${rel}`)) return true
+		if (/(select|tree-select|cascader|picker|dropdown|combobox|date|time)/i.test(`${cls} ${parentClass} ${rel}`)) return true
 		if (/(请选择|请先选择|选择|select|choose|pick)/i.test(placeholder)) {
 			const suffix = element.parentElement?.querySelector?.(
 				'[class*="suffix"],[class*="arrow"],[class*="caret"],[class*="icon"],svg'
@@ -273,12 +303,14 @@
 			return hasCascaderChildren(node) ? 'cascader-parent' : 'cascader-leaf'
 		}
 		if (isDropdownLikeControl(element)) return /cascader/i.test(cls) ? 'cascader-parent' : 'dropdown'
-		if (role === 'checkbox' || role === 'switch') return 'checkbox'
+		if (role === 'switch') return 'switch'
+		if (role === 'checkbox') return 'checkbox'
 		if (role === 'radio') return 'radio'
 		if (element instanceof HTMLInputElement) {
 			const type = String(element.type || '').toLowerCase()
 			if (type === 'checkbox' || type === 'radio') return type
 		}
+		if (/(switch)/i.test(cls)) return 'switch'
 		if (/(checkbox)/i.test(cls)) return 'checkbox'
 		if (/(radio)/i.test(cls)) return 'radio'
 		const nested = findNestedSelectableControl(element)

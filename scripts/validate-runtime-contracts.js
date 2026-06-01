@@ -145,6 +145,7 @@ async function main() {
 	assertLoopGuardExtractedFromSessionEngine()
 	assertSessionRecordsExtractedFromSessionEngine()
 	assertSessionRecoveryExtractedFromSessionEngine()
+	assertSessionRecoveryRecognizesStructuredSemanticFailures()
 	assertSessionTimingExtractedFromSessionEngine()
 	assertSessionLifecycleExtractedFromSessionEngine()
 	assertPlannerContextExtractedFromPlanner()
@@ -158,11 +159,14 @@ async function main() {
 	assertSearchWorkflowBehavior()
 	assertPlannerWorkflowRegistryBehavior()
 	assertObserverUsesCentralSemantics()
+	assertObserverSupportsShadowDomAndBroaderControls()
 	assertObserverOptionSnapshotsExposePopupOwner()
 	assertActionStateExtractedFromActions()
 	assertActionInputExtractedFromActions()
+	assertActionFailuresUseStructuredOutcomes()
 	assertActionScrollExtractedFromActions()
 	assertActionOptionsExtractedFromActions()
+	assertActionOptionsSupportBroaderControls()
 	assertActionCascaderExtractedFromActions()
 	assertActionSelectExtractedFromActions()
 	assertActionsReturnStructuredOutcomes()
@@ -767,6 +771,32 @@ function assertTaskIntentBehavior() {
 	) {
 		throw new Error(`task-intent heuristic should split create-page wording, got ${JSON.stringify(heuristic)}`)
 	}
+	const salesCreate = taskIntent.deriveHeuristicTaskIntent('打开销售订单页面，创建一个销售订单')
+	const salesCreateSession = { task: '打开销售订单页面，创建一个销售订单', latestTask: '打开销售订单页面，创建一个销售订单', workflowState: {} }
+	taskIntent.storeTaskIntent(salesCreateSession, salesCreate, { model: 'local-heuristic' })
+	const salesCreateKeys = taskIntent.getNavigationTargetKeys(salesCreateSession)
+	if (
+		salesCreate?.operation !== 'create' ||
+		!salesCreateKeys.includes('销售订单') ||
+		salesCreateKeys.includes('销售') ||
+		salesCreateKeys.includes('一个销售') ||
+		salesCreateKeys.includes('销售管理')
+	) {
+		throw new Error(`task-intent heuristic should keep the full order module and ignore count-word fragments, got intent=${JSON.stringify(salesCreate)} keys=${JSON.stringify(salesCreateKeys)}`)
+	}
+	const customerCreateTask = '打开 http://example.test/ 找到客户管理。你现在帮我新建一条客户数据，客户名称是张三。'
+	const customerCreate = taskIntent.deriveHeuristicTaskIntent(customerCreateTask)
+	const customerCreateSession = { task: customerCreateTask, latestTask: customerCreateTask, workflowState: {} }
+	taskIntent.storeTaskIntent(customerCreateSession, customerCreate, { model: 'local-heuristic' })
+	const customerCreateKeys = taskIntent.getNavigationTargetKeys(customerCreateSession)
+	if (
+		customerCreate?.operation !== 'create' ||
+		!customerCreateKeys.includes('客户管理') ||
+		!customerCreateKeys.includes('客户') ||
+		customerCreateKeys.some((key) => /现在帮我|一条客户/.test(key))
+	) {
+		throw new Error(`task-intent heuristic should ignore helper/count phrases in customer create tasks, got intent=${JSON.stringify(customerCreate)} keys=${JSON.stringify(customerCreateKeys)}`)
+	}
 	const genericCreate = taskIntent.deriveHeuristicTaskIntent('打开 http://example.test/app，帮我新增一条数据')
 	if (genericCreate?.navigationTargets?.length) {
 		throw new Error(`task-intent heuristic should not invent a module for generic create-data tasks, got ${JSON.stringify(genericCreate)}`)
@@ -789,6 +819,23 @@ function assertTaskIntentBehavior() {
 	}, '进入客户管理页面，查看第一条客户详情')
 	if (firstDetail.operation !== 'view_first_record_detail' || firstDetail.recordSelector.position !== 'first') {
 		throw new Error(`task-intent should normalize first-record detail tasks, got ${JSON.stringify(firstDetail)}`)
+	}
+	const editTask = '进入客户管理，编辑客户资料'
+	const editIntent = taskIntent.deriveHeuristicTaskIntent(editTask)
+	const editSession = { task: editTask, latestTask: editTask, workflowState: {} }
+	taskIntent.storeTaskIntent(editSession, editIntent, { model: 'local-heuristic' })
+	const editKeys = taskIntent.getNavigationTargetKeys(editSession)
+	const editForbidden = taskIntent.getForbiddenNavigationTargetKeys(editSession)
+	if (editIntent?.operation !== 'edit' || !editKeys.includes('客户管理') || !editKeys.includes('客户') || !editForbidden.includes('客户编辑')) {
+		throw new Error(`task-intent heuristic should split edit tasks into navigation target and operation, got intent=${JSON.stringify(editIntent)} keys=${JSON.stringify(editKeys)} forbidden=${JSON.stringify(editForbidden)}`)
+	}
+	const fillTask = '进入客户管理，填写客户名称为张三'
+	const fillIntent = taskIntent.deriveHeuristicTaskIntent(fillTask)
+	const fillSession = { task: fillTask, latestTask: fillTask, workflowState: {} }
+	taskIntent.storeTaskIntent(fillSession, fillIntent, { model: 'local-heuristic' })
+	const fillKeys = taskIntent.getNavigationTargetKeys(fillSession)
+	if (fillIntent?.operation !== 'fill_form' || !fillKeys.includes('客户管理') || !fillKeys.includes('客户')) {
+		throw new Error(`task-intent heuristic should recognize fill-form tasks without treating fields as navigation targets, got intent=${JSON.stringify(fillIntent)} keys=${JSON.stringify(fillKeys)}`)
 	}
 }
 
@@ -5589,6 +5636,24 @@ function assertSessionRecoveryExtractedFromSessionEngine() {
 	}
 }
 
+function assertSessionRecoveryRecognizesStructuredSemanticFailures() {
+	const sessionRecovery = read('naturalclick-extension/background/session-recovery.js')
+	const semanticFn = extractFunctionSource(sessionRecovery, 'isSemanticActionFailure')
+	for (const expected of [
+		'readonly_or_disabled',
+		'disabled_target',
+		'not_editable',
+		'missing_coordinate_target',
+		'candidate_mismatch',
+		'options_not_visible',
+		'field_scoped',
+	]) {
+		if (!semanticFn.includes(expected)) {
+			throw new Error(`session recovery should treat structured semantic failure ${expected} as non-vision recoverable`)
+		}
+	}
+}
+
 function assertSessionTimingExtractedFromSessionEngine() {
 	const sessionEngine = read('naturalclick-extension/background/session-engine.js')
 	const sessionTiming = read('naturalclick-extension/background/session-timing.js')
@@ -6555,7 +6620,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		workflowState: {
 			taskIntent: {
 				status: 'ready',
-				version: 1,
+				version: 2,
 				taskText: '打开销售订单新增页面，帮我新增一条数据',
 				intent: {
 					navigationTargets: [
@@ -8036,6 +8101,42 @@ function assertObserverUsesCentralSemantics() {
 	}
 }
 
+function assertObserverSupportsShadowDomAndBroaderControls() {
+	const observer = read('naturalclick-extension/content/observer.js')
+	const collectFn = extractFunctionSource(observer, 'collectInteractiveCandidates')
+	const deepQueryFn = extractFunctionSource(observer, 'querySelectorAllDeep')
+	const topLayerFn = extractFunctionSource(observer, 'isLikelyRenderedOnTop')
+	const composedHitFn = extractFunctionSource(observer, 'isComposedHitRelated')
+	const tagNameFn = extractFunctionSource(observer, 'getSemanticTagName')
+	const panelFn = extractFunctionSource(observer, 'buildPanelCandidates')
+	const selectionFn = extractFunctionSource(observer, 'getSelectionControlType')
+	const popupFn = extractFunctionSource(observer, 'getPopupContainerHints')
+	const optionFn = extractFunctionSource(observer, 'isOptionLike')
+	if (!collectFn.includes('querySelectorAllDeep(primarySelector)') || !collectFn.includes('querySelectorAllDeep(extraSelector)')) {
+		throw new Error('observer candidate collection should scan open shadow roots as well as document DOM')
+	}
+	if (!deepQueryFn.includes('listOpenShadowRoots') || !observer.includes('function listOpenShadowRoots')) {
+		throw new Error('observer should provide a reusable open Shadow DOM query helper')
+	}
+	if (!topLayerFn.includes('isComposedHitRelated(element, hit)') || !composedHitFn.includes('ShadowRoot')) {
+		throw new Error('observer visibility hit testing should account for open Shadow DOM hosts')
+	}
+	for (const expected of ['.ant-tree-select', '.van-picker', '.layui-form-select', '.ivu-select', '.vxe-select', '.q-select', '.ant-switch']) {
+		if (!observer.includes(expected)) {
+			throw new Error(`observer should recognize broader framework control ${expected}`)
+		}
+	}
+	if (!tagNameFn.includes("item.selectionControl === 'switch'") || !selectionFn.includes("return 'switch'")) {
+		throw new Error('observer should expose switch controls distinctly from checkboxes')
+	}
+	if (!panelFn.includes('querySelectorAllDeep(panelSelector)')) {
+		throw new Error('observer should detect filter/search panels inside open shadow roots')
+	}
+	if (!popupFn.includes('.ant-tree-select-dropdown') || !popupFn.includes('.van-popup') || !optionFn.includes('vxe-select-option')) {
+		throw new Error('observer popup/option attribution should cover common non-Element UI libraries')
+	}
+}
+
 function assertObserverOptionSnapshotsExposePopupOwner() {
 	const observer = read('naturalclick-extension/content/observer.js')
 	const snapshotFn = extractFunctionSource(observer, 'buildElementSnapshot')
@@ -8122,6 +8223,28 @@ function assertActionInputExtractedFromActions() {
 	}
 }
 
+function assertActionFailuresUseStructuredOutcomes() {
+	const actions = read('naturalclick-extension/content/actions.js')
+	const actionInput = read('naturalclick-extension/content/action-input.js')
+	const actionFailureFn = extractFunctionSource(actions, 'buildActionFailureResult')
+	const inputFailureFn = extractFunctionSource(actionInput, 'buildInputFailureResult')
+	const disabledFn = extractFunctionSource(actions, 'isDisabledElement')
+	const disabledClassFn = extractFunctionSource(actions, 'hasDisabledClassSignal')
+	for (const [name, fn] of [['actions', actionFailureFn], ['action-input', inputFailureFn]]) {
+		if (!fn.includes('OUTCOME_KIND.FAILED') || !fn.includes('createOutcome') || !fn.includes('reason')) {
+			throw new Error(`${name} failure results should include structured failed outcomes with reason metadata`)
+		}
+	}
+	for (const reason of ['missing_index', 'not_editable', 'readonly_or_disabled', 'missing_coordinate_target']) {
+		if (!actionInput.includes(reason)) {
+			throw new Error(`input failures should expose reason code ${reason}`)
+		}
+	}
+	if (!disabledFn.includes('hasDisabledClassSignal') || !disabledClassFn.includes('is-disabled') || !disabledClassFn.includes('disabled')) {
+		throw new Error('click/input guards should recognize framework disabled class signals')
+	}
+}
+
 function assertActionScrollExtractedFromActions() {
 	const actions = read('naturalclick-extension/content/actions.js')
 	const actionScroll = read('naturalclick-extension/content/action-scroll.js')
@@ -8186,6 +8309,40 @@ function assertActionOptionsExtractedFromActions() {
 		const actionsFnDefinition = new RegExp(`function\\s+${fn}\\s*\\(`)
 		if (actionsFnDefinition.test(actions)) {
 			throw new Error(`actions should not define ${fn}; keep option discovery in content/action-options.js`)
+		}
+	}
+}
+
+function assertActionOptionsSupportBroaderControls() {
+	const actionOptions = read('naturalclick-extension/content/action-options.js')
+	const actionSelect = read('naturalclick-extension/content/action-select.js')
+	const candidateSelectorFn = extractFunctionSource(actionOptions, 'getOptionCandidateSelector')
+	const popupSelectorFn = extractFunctionSource(actionOptions, 'getOptionPopupSelector')
+	const selectableSelectorFn = extractFunctionSource(actionOptions, 'getSelectableControlSelectors')
+	const triggerFn = extractFunctionSource(actionOptions, 'resolveDropdownTrigger')
+	const deepQueryFn = extractFunctionSource(actionOptions, 'querySelectorAllDeep')
+	const enabledTriggerFn = extractFunctionSource(actionSelect, 'hasEnabledSelectionTrigger')
+	if (!actionOptions.includes('querySelectorAllDeep(getOptionCandidateSelector())') || !deepQueryFn.includes('listOpenShadowRoots')) {
+		throw new Error('option discovery should scan open Shadow DOM roots')
+	}
+	for (const expected of ['.ant-tree-node', '.van-picker-column__item', '.layui-select-tips', '.ivu-select-item', '.vxe-select-option', '.q-item']) {
+		if (!candidateSelectorFn.includes(expected)) {
+			throw new Error(`option candidate selector should include ${expected}`)
+		}
+	}
+	for (const expected of ['[role="switch"]', '.ant-switch', '.n-switch', '.van-switch', '.ivu-switch']) {
+		if (!selectableSelectorFn.includes(expected)) {
+			throw new Error(`selectable control selector should include ${expected}`)
+		}
+	}
+	for (const expected of ['.ant-tree-select-dropdown', '.van-popup', '.layui-anim', '.ivu-select-dropdown', '.vxe-table--ignore-clear']) {
+		if (!popupSelectorFn.includes(expected) || !actionSelect.includes(expected)) {
+			throw new Error(`selection popup handling should include ${expected}`)
+		}
+	}
+	for (const expected of ['.ant-tree-select', '.layui-select-title', '.ivu-select-selection', '.vxe-input', '.q-field__control']) {
+		if (!triggerFn.includes(expected) && !enabledTriggerFn.includes(expected)) {
+			throw new Error(`dropdown trigger resolution should include ${expected}`)
 		}
 	}
 }

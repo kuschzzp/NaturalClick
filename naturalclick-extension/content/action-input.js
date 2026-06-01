@@ -17,14 +17,14 @@
 		async function inputByIndex(index, text, inputMode) {
 			const element = observer.getElementByIndex(index)
 			if (!element) {
-				return { success: false, message: `索引 ${index} 不存在。` }
+				return buildInputFailureResult(`索引 ${index} 不存在。`, 'missing_index', { index })
 			}
 			const editable = observer.resolveEditableTarget(element)
 			if (!editable) {
-				return { success: false, message: `索引 ${index} 对应元素不可输入。` }
+				return buildInputFailureResult(`索引 ${index} 对应元素不可输入。`, 'not_editable', { index })
 			}
 			if (isDisabledElement(editable) || isReadonlyElement(editable)) {
-				return { success: false, message: `索引 ${index} 对应输入目标不可编辑。` }
+				return buildInputFailureResult(`索引 ${index} 对应输入目标不可编辑。`, 'readonly_or_disabled', { index })
 			}
 			if (inputMode === 'direct') {
 				focusDirectInputTarget(editable)
@@ -37,18 +37,22 @@
 		async function inputByPoint(x, y, text, inputMode) {
 			const target = observer.findElementAtPoint(x, y)
 			if (!target) {
-				return { success: false, message: `坐标(${Math.round(x)}, ${Math.round(y)})未命中元素。` }
+				return buildInputFailureResult(
+					`坐标(${Math.round(x)}, ${Math.round(y)})未命中元素。`,
+					'missing_coordinate_target',
+					{ point: { x, y } }
+				)
 			}
 			if (observer.isIgnoredElement(target)) {
-				return { success: false, message: '命中了插件面板区域，坐标无效。' }
+				return buildInputFailureResult('命中了插件面板区域，坐标无效。', 'ignored_extension_region', { point: { x, y } })
 			}
 
 			const editable = observer.resolveEditableTarget(target)
 			if (!editable) {
-				return { success: false, message: '坐标命中元素不可输入。' }
+				return buildInputFailureResult('坐标命中元素不可输入。', 'not_editable', { point: { x, y } })
 			}
 			if (isDisabledElement(editable) || isReadonlyElement(editable)) {
-				return { success: false, message: '坐标命中输入目标不可编辑。' }
+				return buildInputFailureResult('坐标命中输入目标不可编辑。', 'readonly_or_disabled', { point: { x, y } })
 			}
 
 			if (inputMode === 'direct') {
@@ -73,6 +77,22 @@
 				try {
 					element.focus()
 				} catch (_) {}
+			}
+		}
+
+		function buildInputFailureResult(message, reason, details) {
+			const cleanReason = String(reason || message || 'input_failed')
+			const metaDetails = details && typeof details === 'object' ? details : {}
+			return {
+				success: false,
+				message,
+				meta: {
+					...metaDetails,
+					outcome: createOutcome(OUTCOME_KIND.FAILED, {
+						reason: cleanReason,
+						...metaDetails,
+					}),
+				},
 			}
 		}
 
@@ -281,7 +301,7 @@
 				}
 			}
 
-			return { success: false, message: '输入失败：目标元素类型不支持。' }
+			return buildInputFailureResult('输入失败：目标元素类型不支持。', 'unsupported_input_target')
 		}
 
 		async function typeTextRealisticInFormControl(element, text) {
