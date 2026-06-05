@@ -41,6 +41,7 @@
 		if (!optionHelpers) throw new Error('NC_CONTENT_ACTION_OPTIONS 未加载。')
 		const {
 			compareOptionCandidate,
+			findDropdownOptionByScrolling,
 			findNestedSelectableControl,
 			getVisibleOptionLabel,
 			isCascaderParentOption,
@@ -66,6 +67,7 @@
 		const {
 			bringCascaderOptionIntoView,
 			findCascaderOptionByScrolling,
+			getCascaderLevelSignature,
 			isDomVisibleInActivePopup,
 			summarizeCascaderLevel,
 			waitForCascaderMenuLevel,
@@ -84,6 +86,7 @@
 			inferInteractionOutcome,
 			OUTCOME_KIND,
 			waitForVisibleOption,
+			findDropdownOptionByScrolling,
 			listVisibleOptionLabels,
 			getVisibleOptionLabel,
 			resolveDropdownTrigger,
@@ -93,6 +96,7 @@
 			resolveSelectableClickTarget,
 			findCascaderOptionByScrolling,
 			bringCascaderOptionIntoView,
+			getCascaderLevelSignature,
 			waitForCascaderMenuLevel,
 			summarizeCascaderLevel,
 		})
@@ -132,6 +136,8 @@
 				const key = String(input.key || 'Enter')
 				return inputActions.keypressAction({
 					key,
+					target_label: input.target_label || input.label || input.target_description || input.description || '',
+					reason: input.reason || input.purpose || '',
 					ctrlKey: !!input.ctrlKey,
 					altKey: !!input.altKey,
 					shiftKey: !!input.shiftKey,
@@ -202,6 +208,13 @@
 			}
 			const before = getElementInteractionState(element)
 			const clickInfo = await humanLikeClick(element, null, inputMode, input)
+			if (clickInfo?.blocked) {
+				return buildActionFailureResult(
+					clickInfo.message || `索引 ${index} 的点击点被其他元素遮挡。`,
+					clickInfo.reason || 'occluded_click_target',
+					{ index, clickTarget: clickInfo.clickTarget, hitTarget: clickInfo.hitTarget, point: clickInfo.point }
+				)
+			}
 			const after = getElementInteractionState(element)
 			const clickTargetMessage = formatClickTargetMessage(clickInfo)
 			return {
@@ -234,12 +247,27 @@
 				return buildActionFailureResult('坐标命中元素已禁用。', 'disabled_target', { point: { x, y } })
 			}
 			const before = getElementInteractionState(target)
-			await humanLikeClick(target, { x, y }, inputMode)
+			const clickInfo = await humanLikeClick(target, { x, y }, inputMode)
+			if (clickInfo?.blocked) {
+				return buildActionFailureResult(
+					clickInfo.message || `坐标(${Math.round(x)}, ${Math.round(y)})的点击点被其他元素遮挡。`,
+					clickInfo.reason || 'occluded_click_target',
+					{ clickTarget: clickInfo.clickTarget, hitTarget: clickInfo.hitTarget, point: clickInfo.point || { x, y } }
+				)
+			}
 			const after = getElementInteractionState(target)
+			const clickTargetMessage = formatClickTargetMessage(clickInfo)
 			return {
 				success: true,
-				message: appendStateChange(`已点击坐标(${Math.round(x)}, ${Math.round(y)}).`, before, after),
-				meta: { before, after, point: { x, y }, outcome: inferInteractionOutcome(before, after) },
+				message: appendStateChange(`已点击坐标(${Math.round(x)}, ${Math.round(y)})${clickTargetMessage}。`, before, after),
+				meta: {
+					before,
+					after,
+					clickTarget: clickInfo?.clickTarget || null,
+					hitTarget: clickInfo?.hitTarget || null,
+					point: clickInfo?.point || { x, y },
+					outcome: inferInteractionOutcome(before, after),
+				},
 			}
 		}
 
@@ -305,40 +333,51 @@
 				inputMode === 'realistic'
 					? clampNumber(targetY + randomBetween(-1.6, 1.6), 1, window.innerHeight - 1, targetY)
 					: targetY
+			const visiblePoint = resolveVisibleClickPoint(clickElement, x, y)
+			if (visiblePoint.blocked) {
+				return {
+					...buildClickInfo(clickElement, visiblePoint.hitTarget, visiblePoint.hitTarget, x, y),
+					blocked: true,
+					reason: 'occluded_click_target',
+					message: `目标元素当前点击点被遮挡，无法找到可真实命中的内部点击点。遮挡元素=${formatOccludingElement(visiblePoint.hitTarget)}。`,
+				}
+			}
+			const finalX = visiblePoint.x
+			const finalY = visiblePoint.y
 			await blurLastClickedElement(clickElement)
 			lastClickedElement = clickElement
 			try {
 				visual?.markActionTarget?.(clickElement)
 				if (inputMode === 'realistic') {
-					await movePointerRealistic(x, y)
-					await visual?.movePointerTo?.(x, y, { waitMs: 0 })
+					await movePointerRealistic(finalX, finalY)
+					await visual?.movePointerTo?.(finalX, finalY, { waitMs: 0 })
 					await visual?.clickPointer?.({ waitMs: randomBetween(35, 70) })
 				} else {
-					await visual?.movePointerTo?.(x, y, { waitMs: 0 })
+					await visual?.movePointerTo?.(finalX, finalY, { waitMs: 0 })
 					await visual?.clickPointer?.({ waitMs: 45 })
-					lastPointer = { x, y }
+					lastPointer = { x: finalX, y: finalY }
 				}
 			} catch (_) {}
 
 			// 点击前做命中测试，尽量模拟真实点击目标（最深层元素）
 			const doc = clickElement.ownerDocument || document
-			const hitTarget = doc.elementFromPoint(x, y)
+			const hitTarget = doc.elementFromPoint(finalX, finalY)
 			const target =
 				hitTarget instanceof HTMLElement && clickElement.contains(hitTarget) ? hitTarget : clickElement
-			const clickInfo = buildClickInfo(clickElement, hitTarget, target, x, y)
+			const clickInfo = buildClickInfo(clickElement, hitTarget, target, finalX, finalY)
 
 			const pointerOpts = {
 				bubbles: true,
 				cancelable: true,
-				clientX: x,
-				clientY: y,
+				clientX: finalX,
+				clientY: finalY,
 				pointerType: 'mouse',
 			}
 			const mouseOpts = {
 				bubbles: true,
 				cancelable: true,
-				clientX: x,
-				clientY: y,
+				clientX: finalX,
+				clientY: finalY,
 				button: 0,
 			}
 
@@ -349,9 +388,9 @@
 			target.dispatchEvent(new PointerEvent('pointermove', pointerOpts))
 			target.dispatchEvent(new MouseEvent('mousemove', mouseOpts))
 			if (isCascaderParentOption(clickElement)) {
-				if (target !== clickElement) dispatchHoverSequence(clickElement, x, y)
-				startSustainedHover(clickElement, x, y)
-				lastPointer = { x, y }
+				if (target !== clickElement) dispatchHoverSequence(clickElement, finalX, finalY)
+				startSustainedHover(clickElement, finalX, finalY)
+				lastPointer = { x: finalX, y: finalY }
 				await sleep(inputMode === 'realistic' ? randomBetween(120, 200) : 120)
 				return clickInfo
 			}
@@ -367,6 +406,52 @@
 			target.click()
 			await sleep(inputMode === 'realistic' ? randomBetween(45, 95) : 70)
 			return clickInfo
+		}
+
+		function resolveVisibleClickPoint(element, x, y) {
+			if (!(element instanceof HTMLElement)) {
+				return { x, y, blocked: false, hitTarget: null }
+			}
+			const hit = document.elementFromPoint(x, y)
+			if (isHitWithinClickElement(hit, element)) return { x, y, blocked: false, hitTarget: hit }
+			const alternate = findVisibleInternalClickPoint(element)
+			if (alternate) return alternate
+			return { x, y, blocked: true, hitTarget: hit }
+		}
+
+		function findVisibleInternalClickPoint(element) {
+			const rect = element.getBoundingClientRect()
+			if (rect.width < 2 || rect.height < 2) return null
+			const candidates = [
+				{ x: 0.5, y: 0.5 },
+				{ x: 0.25, y: 0.5 },
+				{ x: 0.75, y: 0.5 },
+				{ x: 0.5, y: 0.28 },
+				{ x: 0.5, y: 0.72 },
+				{ x: 0.18, y: 0.28 },
+				{ x: 0.82, y: 0.28 },
+				{ x: 0.18, y: 0.72 },
+				{ x: 0.82, y: 0.72 },
+			]
+			for (const candidate of candidates) {
+				const x = clampNumber(rect.left + rect.width * candidate.x, 1, window.innerWidth - 1, rect.left + rect.width / 2)
+				const y = clampNumber(rect.top + rect.height * candidate.y, 1, window.innerHeight - 1, rect.top + rect.height / 2)
+				const hit = document.elementFromPoint(x, y)
+				if (isHitWithinClickElement(hit, element)) return { x, y, blocked: false, hitTarget: hit }
+			}
+			return null
+		}
+
+		function isHitWithinClickElement(hit, element) {
+			return hit instanceof Element && (hit === element || element.contains(hit))
+		}
+
+		function formatOccludingElement(element) {
+			const summary = summarizeClickElement(element)
+			if (!summary) return 'unknown'
+			const text = summary.text ? ` "${summary.text}"` : ''
+			const role = summary.role ? ` role=${summary.role}` : ''
+			return `${summary.tag || 'element'}${role}${text}`
 		}
 
 		async function hoverElement(element, inputMode) {

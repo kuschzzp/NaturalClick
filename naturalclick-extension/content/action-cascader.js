@@ -286,6 +286,11 @@
 				.join('|')
 		}
 
+		function getCascaderLevelSignature(levelIndex) {
+			const menu = getVisibleCascaderMenu(levelIndex)
+			return menu ? getVisibleMenuSignature(menu) : ''
+		}
+
 		function getElementClassPath(element) {
 			const parts = []
 			let cursor = element
@@ -313,6 +318,7 @@
 			bringCascaderOptionIntoView,
 			findCascaderOptionByScrolling,
 			findVerticalScrollable,
+			getCascaderLevelSignature,
 			isDomVisibleInActivePopup,
 			summarizeCascaderLevel,
 			waitForCascaderMenuLevel,

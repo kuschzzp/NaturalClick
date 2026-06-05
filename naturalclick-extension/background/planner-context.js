@@ -11,6 +11,7 @@
 		const optionItems = Array.isArray(observation?.options) ? observation.options : []
 		const popups = Array.isArray(observation?.popups) ? observation.popups : []
 		const panels = Array.isArray(observation?.panels) ? observation.panels : []
+		const tables = Array.isArray(observation?.tables) ? observation.tables : []
 		const candidateDiagnostics = observation?.candidateDiagnostics && typeof observation.candidateDiagnostics === 'object'
 			? observation.candidateDiagnostics
 			: null
@@ -45,6 +46,14 @@
 				parts.push(formatPanelLine(panel))
 			}
 			parts.push('</panels>')
+		}
+
+		if (tables.length) {
+			parts.push('<tables>')
+			for (const table of tables.slice(0, compact ? 2 : 4)) {
+				parts.push(formatTableLine(table, compact ? 3 : 6))
+			}
+			parts.push('</tables>')
 		}
 
 		if (candidateDiagnostics && Number(candidateDiagnostics.textActionProbeCount || 0) > 0) {
@@ -218,16 +227,45 @@
 
 	function buildDuplicatePlanningContext(action, seq, count) {
 		const name = String(action?.name || '').trim()
+		const guidance = buildDuplicatePlanningGuidance(action)
 		return {
 			name,
 			input: action?.input || {},
 			text: [
-				`<context_response seq="${seq + 1}" request="${name}" duplicate_request="true" count="${count}">`,
+				`<context_response seq="${seq + 1}" request="${name}" duplicate_request="true" count="${count}" guidance="${escapeAttr(guidance)}">`,
 				`重复的 planning_tool 请求已被拦截：${planningRequestSignature(action)}`,
-				'上一轮已经提供过相同上下文；下一轮必须更换上下文请求、输出真实页面动作，或在无法继续时 done。',
+				`下一步建议：${guidance}`,
 				'</context_response>',
 			].join('\n'),
 		}
+	}
+
+	function buildDuplicatePlanningGuidance(action) {
+		const name = String(action?.name || '').trim()
+		const input = action?.input && typeof action.input === 'object' ? action.input : {}
+		if (name === 'request_context') {
+			const source = normalizeContextSource(input.source || input.target || 'simplified_dom')
+			if (source === 'tables') {
+				return '不要重复请求相同表格上下文；改用 inspect_region content、request_context source=raw_candidates region=content，或在缺少样本时 done(false) 说明原因。'
+			}
+			if (source === 'actions') {
+				return '不要重复请求相同动作上下文；更换 query/region，改用 inspect_region content，或选择当前已确认的真实按钮。'
+			}
+			if (source === 'forms') {
+				return '不要重复请求相同表单上下文；更换 query/region，inspect_region content/dialog，或对已确认字段执行合适工具。'
+			}
+			return '不要重复请求相同页面上下文；更换 source、region、query、cursor，或输出真实页面动作/明确失败 done(false)。'
+		}
+		if (name === 'inspect_index') {
+			return '不要重复 inspect 同一 index；根据已返回的 index_detail 选择真实动作，或改用 inspect_region 查看附近/当前弹层区域。'
+		}
+		if (name === 'inspect_region') {
+			return '不要重复 inspect 同一区域；更换 source/query/region，或根据已返回的区域元素选择真实页面动作。'
+		}
+		if (name === 'request_options_for') {
+			return '不要重复请求同一字段候选；若已看到 candidates 就选择真实候选，若仍为空则重新 open_dropdown、inspect_region popover/content，或说明缺少候选。'
+		}
+		return '不要重复相同 planning_tool；更换请求参数、输出真实页面动作，或 done(false) 说明无法继续。'
 	}
 
 	function buildInvalidActionContext(action, seq, availableActionNames) {
@@ -247,16 +285,79 @@
 
 	function buildInvalidActionInputContext(action, seq, reason) {
 		const name = String(action?.name || '').trim() || '(empty)'
+		const classified = classifyInvalidActionInput(reason)
 		return {
 			name: 'invalid_action_input',
 			input: action?.input || {},
 			text: [
-				`<context_response seq="${seq + 1}" invalid_action_input="true">`,
+				`<context_response seq="${seq + 1}" invalid_action_input="true" failure_kind="${classified.kind}">`,
 				`工具 ${name} 的参数无法执行：${reason}`,
 				`原始 input: ${shortText(stableJson(action?.input || {}), 500)}`,
-				'下一轮必须修正参数、请求更多上下文，或选择其他 available_tools 中的动作。',
+				`下一步建议：${classified.guidance}`,
 				'</context_response>',
 			].join('\n'),
+		}
+	}
+
+	function classifyInvalidActionInput(reason) {
+		const text = String(reason || '')
+		if (/当前被遮挡|hit=covered|points=0\//i.test(text)) {
+			return {
+				kind: 'covered_target',
+				guidance: '不要直接操作被遮挡 index；先处理当前 dialog/popover/下拉/日历候选，或 wait 后 inspect_index/inspect_region/request_context 重新定位可命中目标。',
+			}
+		}
+		if (/(诊断候选|diagnostic_(?:options|popups)|未归属|没有稳定归属|字段外可见|字段外候选|global_popup_diagnostic|global_selectable_popup_diagnostic|候选未能.*目标字段.*归属|unscoped|field[-_\s]?external)/i.test(text)) {
+			return {
+				kind: 'unowned_selection_candidate',
+				guidance: '不要重复同一个选择动作，也不要直接点击候选；该候选还没有稳定归属到目标字段。先对目标字段 open_dropdown(index)，再 request_options_for(index) 或 inspect_region popover/content；只有看到 scoped="field" 或 scoped="explicit" 的 visible_options/visible_popups 后，才用目标字段 index 和真实 text 选择。',
+			}
+		}
+		if (/(历史显示.*同一选择动作已经失败|禁止重复同一个 requested|不要重复只展开同一字段|下拉候选已经可见|重复.*(?:requested|选择动作|展开|open_dropdown)|same\s+requested|repeated\s+(?:selection|dropdown|open))/i.test(text)) {
+			return {
+				kind: 'repeat_selection_attempt',
+				guidance: '不要重复同一失败选择或只展开同一字段；先读取历史/outcome 中的 candidates 并选择其中真实候选。若 candidates 不足或已过期，使用 request_options_for(index)、重新 open_dropdown(index) 或 inspect_region popover/content 获取新证据；仍无法确认时 done(false) 说明候选证据不足。',
+			}
+		}
+		if (/(缺少\s+(?:target_label|label|target_description|workflow_field_label|target_url|target_title|reason|purpose)|目标说明|字段目标说明|悬浮目标说明|滚动容器目标说明|按键目标或目的说明|标签页目标说明|只给\s+(?:index|URL|tab_id)|盲按键|正在等待什么|用户介入|语义视觉定位|semantic target|declared target|missing\s+(?:target|reason|purpose|description))/i.test(text)) {
+			return {
+				kind: 'missing_action_context',
+				guidance: '不要只换 index 或盲目重试；先补齐动作的语义上下文。点击/输入/悬浮/滚动要从当前观察的 label/text/placeholder/region 中填写 target_label，视觉定位要填写 target_description，wait/ask_user/close_tab/keypress 要填写 reason 或 purpose；如果无法确认目标，先 inspect_index、inspect_region 或 request_context 后再行动。',
+			}
+		}
+		if (/(声明\s+(?:target_label|label|target_description|workflow_field_label|target_url|target_title)=["'][^"']+["'].*(?:但\s+(?:index|tab_id)=|当前观察到的是|当前 URL 是|当前标题是)|target[-_\s]?(?:label|url|title).*(?:mismatch|does not match)|declared.*(?:target|label|url|title).*observed)/i.test(text)) {
+			return {
+				kind: 'declared_target_mismatch',
+				guidance: '不要为了通过校验而把 target_label/target_url 改成当前错误目标；这是声明目标和实际 index/tab_id 指向对象冲突。应重新选择与声明目标匹配的 index/tab_id，或先 inspect_index、inspect_region、request_context/tabsSummary 复核目标；只有确认当前对象才是真实目标时，才同步更新目标说明。',
+			}
+		}
+		if (/(缺少\s*(?:非空\s*)?(?:text|key|path|有效\s+http\(s\)\s+url|有效\s+tab_id|待选择的\s+text\/label|目标字段\s+index)|动作索引无效|inspect_index 缺少有效 index|missing\s+(?:required\s+)?(?:parameter|field|text|key|path|url|tab_id|index))/i.test(text)) {
+			return {
+				kind: 'missing_required_parameter',
+				guidance: '不要换成无关工具或随机目标；补齐当前工具的必填参数。输入动作要给非空 text，选择动作要给目标字段 index、target_label 和真实 text/path，级联选择要给 path 数组，标签页/导航动作要给有效 url 或 tab_id；缺少 index 时先 inspect_region/request_context 找到当前观察中的可用 index。',
+			}
+		}
+		if (/(不能用(?:普通点击|视觉定位)绕过字段归属校验|命中了当前可见的选择候选|弹层\/下拉中的选择候选|choose_dropdown_option\/select_checkbox_option\/select_cascader_path|select_cascader_path|cascader-leaf|selection candidate|selection option|bypass.*(?:field|owner|ownership|selection))/i.test(text)) {
+			return {
+				kind: 'selection_bypass_attempt',
+				guidance: '不要用普通点击或视觉定位直接点候选来绕过字段归属；必须保留目标字段范围。先确认目标字段 index，再用 open_dropdown(index)、request_options_for(index) 或 inspect_region popover/content 获取可归属候选；随后用 choose_dropdown_option、select_checkbox_option 或 select_cascader_path，并带上目标字段 target_label。',
+			}
+		}
+		if (/选择控件|普通可编辑输入框|真实下拉|combobox|候选|open_dropdown|choose_dropdown_option/.test(text)) {
+			return {
+				kind: 'control_mismatch',
+				guidance: '改用与控件类型匹配的工具；选择器先 open_dropdown/request_options_for，再 choose_dropdown_option/select_checkbox_option 选择真实候选。',
+			}
+		}
+		if (/动作索引|不在当前观察|index/i.test(text)) {
+			return {
+				kind: 'bad_index',
+				guidance: '重新观察当前页面，或使用 inspect_region/request_context 找到当前观察中存在的 index。',
+			}
+		}
+		return {
+			kind: 'invalid_input',
+			guidance: '修正参数、请求更多上下文，或选择其他 available_tools 中的动作。',
 		}
 	}
 
@@ -339,9 +440,32 @@
 		const nextCursor = cursorInRange && cursor + slice.length < rows.length ? cursor + slice.length : -1
 		return [
 			`<context_chunk source="${source}" cursor="${cursor}" limit="${limit}" nextCursor="${nextCursor}" total="${rows.length}" region="${region || '-'}" query="${shortText(input.query || '', 40)}">`,
-			...(slice.length ? slice : ['(empty)']),
+			...(slice.length ? slice : buildEmptyContextChunkRows(source, allRows, queryText)),
 			'</context_chunk>',
 		].join('\n')
+	}
+
+	function buildEmptyContextChunkRows(source, allRows, queryText) {
+		const rows = ['(empty)']
+		const query = String(queryText || '').trim()
+		const reason = Array.isArray(allRows) && allRows.length
+			? 'query_no_match'
+			: `no_observed_${source}`
+		const guidance = buildEmptyContextGuidance(source, query, reason)
+		rows.push(`empty_context reason="${escapeAttr(reason)}" guidance="${escapeAttr(guidance)}"`)
+		return rows
+	}
+
+	function buildEmptyContextGuidance(source, query, reason) {
+		if (source === 'tables') {
+			return reason === 'query_no_match'
+				? `当前表格摘要中没有匹配 "${query}" 的行；可放宽 query 或 inspect_region content 查看列表区域。`
+				: '当前观察没有表格摘要；可 inspect_region content 或 request_context source=raw_candidates 查看列表区域，缺样本时不要填写泛化搜索词。'
+		}
+		if (source === 'forms') return '当前观察没有匹配的表单字段；可 inspect_region content 或放宽 query。'
+		if (source === 'actions') return '当前观察没有匹配的动作按钮；可 inspect_region content 或放宽 query。'
+		if (source === 'raw_candidates' || source === 'simplified_dom') return '当前观察没有匹配的原始候选；可 inspect_region content 或更换 query。'
+		return '当前观察没有匹配上下文；可更换 source、region、query 或 inspect_region content。'
 	}
 
 	function splitContextQueryTerms(value) {
@@ -416,8 +540,7 @@
 	function buildOptionsInspection(observation, input) {
 		const index = Number(input.index)
 		const matches = Number.isFinite(index) ? findObservedIndexMatches(observation, index) : []
-		const matchWithOptions = matches.find((match) => Array.isArray(match.item?.optionLabels) && match.item.optionLabels.length)
-		const item = (matchWithOptions || matches[0])?.item || null
+		const item = chooseOptionTargetItem(matches)
 		const rows = []
 		rows.push(`<options_for index="${Number.isFinite(index) ? index : '-'}">`)
 		if (matches.length) {
@@ -434,20 +557,53 @@
 		const popups = buildScopedOptionRows(observation, 'popups', item, 'popup', 60)
 		const options = buildScopedOptionRows(observation, 'options', item, 'option', 80)
 		if (popups.rows.length) {
-			rows.push(`<visible_popups scoped="${popups.scope}" total="${popups.total}">`)
+			const tag = isScopedOptionContextUsable(popups.scope) ? 'visible_popups' : 'diagnostic_popups'
+			rows.push(`<${tag} scoped="${popups.scope}" total="${popups.total}"${formatDiagnosticOptionGuidance(popups.scope)}>`)
 			rows.push(...popups.rows)
-			rows.push('</visible_popups>')
+			rows.push(`</${tag}>`)
 		}
 		if (options.rows.length) {
-			rows.push(`<visible_options scoped="${options.scope}" total="${options.total}">`)
+			const tag = isScopedOptionContextUsable(options.scope) ? 'visible_options' : 'diagnostic_options'
+			rows.push(`<${tag} scoped="${options.scope}" total="${options.total}"${formatDiagnosticOptionGuidance(options.scope)}>`)
 			rows.push(...options.rows)
-			rows.push('</visible_options>')
+			rows.push(`</${tag}>`)
 		}
 		if (!nativeOptions.length && !popups.rows.length && !options.rows.length) {
 			rows.push('当前观察没有可见下拉候选。通常需要先对该字段执行 open_dropdown 后重新观察；旧 select_dropdown_option 仅作兼容。')
 		}
 		rows.push('</options_for>')
 		return rows.join('\n')
+	}
+
+	function chooseOptionTargetItem(matches) {
+		const list = Array.isArray(matches) ? matches.filter((match) => match?.item) : []
+		if (!list.length) return null
+		return list
+			.map((match, order) => ({
+				match,
+				order,
+				score: scoreOptionTargetMatch(match),
+			}))
+			.sort((a, b) => b.score - a.score || a.order - b.order)[0]?.match?.item || null
+	}
+
+	function scoreOptionTargetMatch(match) {
+		const item = match?.item || {}
+		const source = String(match?.source || '').trim()
+		const sourceRoot = source.split(':')[0]
+		let score = 0
+		if (source.startsWith('forms:')) score += 120
+		else if (sourceRoot === 'elements') score += 20
+		else if (sourceRoot === 'actions') score -= 20
+		else if (sourceRoot === 'options' || sourceRoot === 'popups') score -= 120
+		if (Array.isArray(item.optionLabels) && item.optionLabels.length) score += 90
+		if (controlSemantics?.isObservedDropdownLike?.(item)) score += 80
+		if (item.fieldType) score += 70
+		if (item.selectionControl) score += 40
+		if (item.label || item.placeholder || item.text) score += 25
+		if (item.semanticContainer) score += 10
+		if (item.relationHints || item.popupHints) score += 10
+		return score
 	}
 
 	function buildScopedOptionRows(observation, source, targetItem, kind, limit) {
@@ -489,6 +645,15 @@
 		return { scope: 'global_fallback', items: list }
 	}
 
+	function isScopedOptionContextUsable(scope) {
+		return ['explicit', 'field'].includes(String(scope || '').trim())
+	}
+
+	function formatDiagnosticOptionGuidance(scope) {
+		if (isScopedOptionContextUsable(scope)) return ''
+		return ' guidance="候选未能与目标字段建立稳定归属，仅供定位/排查；不要直接选择这些候选，先重新 open_dropdown 或 inspect_region popover/content。分配候选时必须依赖显式 owner、当前活动弹层或几何关联。"'
+	}
+
 	function buildSectionRows(observation, source, filters = {}) {
 		const normalized = normalizeContextSource(source)
 		const region = String(filters.region || '').trim()
@@ -503,6 +668,13 @@
 				rows.push(formatPanelLine(panel))
 			}
 			if (normalized === 'panels') return rows
+		}
+		if (normalized === 'all' || normalized === 'tables') {
+			for (const table of (Array.isArray(observation?.tables) ? observation.tables : [])) {
+				rows.push(formatTableLine(table, 8))
+			}
+			if (!rows.length) rows.push(...collectFallbackTableContextRows(observation, region))
+			if (normalized === 'tables') return rows
 		}
 		if (normalized === 'all' || normalized === 'forms') {
 			for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
@@ -553,6 +725,38 @@
 				.filter((line) => !region || line.includes(`region="${region}"`))
 		}
 		return rows
+	}
+
+	function collectFallbackTableContextRows(observation, region = '') {
+		const rows = []
+		const seen = new Set()
+		const sources = [
+			...(Array.isArray(observation?.simplifiedDom) ? observation.simplifiedDom : []),
+			...(Array.isArray(observation?.rawCandidates) ? observation.rawCandidates : []),
+			...(Array.isArray(observation?.treeCandidates)
+				? observation.treeCandidates.map((row) => row?.line || row)
+				: []),
+		]
+		for (const row of sources) {
+			const line = String(row || '').trim()
+			if (!isFallbackTableContextLine(line, region)) continue
+			const key = line.replace(/\s+/g, ' ').slice(0, 240)
+			if (seen.has(key)) continue
+			seen.add(key)
+			rows.push(line)
+			if (rows.length >= 40) break
+		}
+		return rows
+	}
+
+	function isFallbackTableContextLine(line, region = '') {
+		const text = String(line || '').trim()
+		if (!text) return false
+		if (region && !text.includes(`region="${region}"`) && !text.includes(`region=${region}`)) return false
+		if (/^(field|action|option|popup|panel)\s+index=/i.test(text)) return false
+		if (/<(field|action|option|popup|panel)\b/i.test(text)) return false
+		if (/(请输入|请选择|清空|重置|新增|导入|导出)/.test(text.replace(/\s+/g, ''))) return false
+		return /(table|row|cell|td|tr|grid|列表|数据|tbody|el-table|ant-table|vxe-table|record-list|data-list)/i.test(text)
 	}
 
 	function selectObservationItems(items, limit, taskText) {
@@ -622,21 +826,40 @@
 			item.label,
 			item.text,
 			item.placeholder,
+			Array.isArray(item.aliases) ? item.aliases.join(' ') : '',
+			item.semanticContainer,
 			item.actionIntent,
 			item.navigationTarget,
 			item.target,
 		].filter(Boolean).join(' '))
 		if (item.newSinceLastObservation) score -= 3
 		const region = String(item.region || '')
-		if (['content', 'dialog', 'popover'].includes(region)) score -= 2
+		if (region === 'popover') score -= 6
+		else if (region === 'dialog') score -= 5
+		else if (region === 'content') score -= 2
 		if (region === 'pagination') score += 4
 		if (region === 'header' || region === 'sidebar') score += 2
+		score += scoreHitStateForRanking(item)
 		if (item.selectionControl || item.fieldType || item.actionIntent) score -= 1
 		if (item.actionIntent === 'open_filter' || item.actionIntent === 'search') score -= 1
 		if (item.actionIntent === 'create') score -= 10
 		if (/(新增|新建|创建|添加|增加|add|create|new|plus)/i.test(actionText)) score -= 8
 		const rect = item.rect || {}
 		return score * 1000000 + (Number(rect.top) || 0) * 1000 + (Number(rect.left) || 0)
+	}
+
+	function scoreHitStateForRanking(item) {
+		if (!item || typeof item !== 'object') return 0
+		const state = String(item.hitState || '').trim().toLowerCase()
+		if (state === 'covered') return 30
+		if (state === 'partial') return 3
+		if (state === 'hittable') return -1
+		const points = String(item.hitPoints || '').trim()
+		const match = points.match(/^(\d+)\s*\/\s*(\d+)$/)
+		if (match && Number(match[1]) <= 0 && Number(match[2]) > 0) return 30
+		const ratio = Number(item.hitRatio)
+		if (Number.isFinite(ratio) && ratio <= 0 && points) return 30
+		return 0
 	}
 
 	function formatObservedIndexMatchLine(match) {
@@ -666,7 +889,7 @@
 		const validation = item.invalid || item.validationMessage
 			? ` invalid=${item.invalid ? 'true' : 'false'} error="${shortText(item.validationMessage || '', 96)}"`
 			: ''
-		return `element index=${item.index} region=${item.region || '-'} role=${item.role || '-'} fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} label="${shortText(item.label || item.placeholder || item.text || '', 48)}" value=${item.valueState || '-'}${validation}${options} rect=${formatRect(item.rect)}`
+		return `element index=${item.index} region=${item.region || '-'} role=${item.role || '-'} fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} label="${shortText(item.label || item.placeholder || item.text || '', 48)}" value=${item.valueState || '-'}${validation}${options} rect=${formatRect(item.rect)} hit=${formatHitState(item)}`
 	}
 
 	function formatElementDetailLine(item) {
@@ -684,6 +907,8 @@
 			`field index=${field.index}`,
 			field.stableId ? `sid=${field.stableId}` : '',
 			field.region ? `region=${field.region}` : '',
+			field.rect ? `rect=${formatRect(field.rect)}` : '',
+			`hit=${formatHitState(field)}`,
 			`fieldType=${field.fieldType || 'unknown'}`,
 			field.controlKind ? `kind=${field.controlKind}` : '',
 			`label="${shortText(field.label || field.placeholder || field.text || '', 48)}"`,
@@ -699,17 +924,32 @@
 			`control=${field.selectionControl || '-'}`,
 			field.stateHints ? `state="${shortText(field.stateHints, 96)}"` : '',
 			field.relationHints ? `rel="${shortText(field.relationHints, 96)}"` : '',
+			field.popupHints ? `popup="${shortText(field.popupHints, 96)}"` : '',
 			Array.isArray(field.optionLabels) && field.optionLabels.length
 				? `options="${shortText(field.optionLabels.join('|'), 160)}"`
 				: '',
 			`expanded=${field.expandedState || '-'}`,
 			`required=${field.required ? 'true' : 'false'}`,
 			`invalid=${field.invalid ? 'true' : 'false'}`,
-			field.validationMessage ? `error="${shortText(field.validationMessage, 120)}"` : '',
-			field.validationSource ? `errorSource=${field.validationSource}` : '',
-			`conf=${field.confidence || '-'}`,
-		].filter(Boolean).join(' ')
-	}
+				field.validationMessage ? `error="${shortText(field.validationMessage, 120)}"` : '',
+				field.validationSource ? `errorSource=${field.validationSource}` : '',
+				formatFieldConstraintHints(field),
+				`conf=${field.confidence || '-'}`,
+			].filter(Boolean).join(' ')
+		}
+
+		function formatFieldConstraintHints(field) {
+			const parts = []
+			if (Number(field?.maxLength) > 0) parts.push(`maxLength=${Number(field.maxLength)}`)
+			if (Number(field?.minLength) > 0) parts.push(`minLength=${Number(field.minLength)}`)
+			if (field?.min !== undefined && String(field.min || '').trim()) parts.push(`min=${shortText(field.min, 32)}`)
+			if (field?.max !== undefined && String(field.max || '').trim()) parts.push(`max=${shortText(field.max, 32)}`)
+			if (field?.step !== undefined && String(field.step || '').trim()) parts.push(`step=${shortText(field.step, 32)}`)
+			if (field?.inputMode) parts.push(`inputMode=${shortText(field.inputMode, 32)}`)
+			if (field?.autocomplete) parts.push(`autocomplete=${shortText(field.autocomplete, 48)}`)
+			if (field?.pattern) parts.push(`pattern="${shortText(field.pattern, 96)}"`)
+			return parts.length ? `constraints="${parts.join(' ')}"` : ''
+		}
 
 	function formatActionLine(action) {
 		return [
@@ -717,14 +957,22 @@
 			action.stableId ? `sid=${action.stableId}` : '',
 			action.region ? `region=${action.region}` : '',
 			action.rect ? `rect=${formatRect(action.rect)}` : '',
+			`hit=${formatHitState(action)}`,
 			`intent=${action.actionIntent || 'unknown'}`,
 			action.controlKind ? `kind=${action.controlKind}` : '',
 			`label="${shortText(action.label || action.text || '', 48)}"`,
+			action.labelSource ? `source=${action.labelSource}` : '',
+			action.labelConfidence ? `labelConf=${action.labelConfidence}` : '',
+			Array.isArray(action.aliases) && action.aliases.length
+				? `aliases="${shortText(action.aliases.join('|'), 96)}"`
+				: '',
+			action.semanticContainer ? `container="${shortText(action.semanticContainer, 48)}"` : '',
 			`role=${action.role || '-'}`,
 			`value=${action.valueState || 'unknown'}`,
 			`control=${action.selectionControl || '-'}`,
 			action.stateHints ? `state="${shortText(action.stateHints, 96)}"` : '',
 			action.relationHints ? `rel="${shortText(action.relationHints, 96)}"` : '',
+			action.popupHints ? `popup="${shortText(action.popupHints, 96)}"` : '',
 			action.navigationTarget ? `target="${shortText(action.navigationTarget, 96)}"` : '',
 			`expanded=${action.expandedState || '-'}`,
 			`conf=${action.confidence || '-'}`,
@@ -736,6 +984,8 @@
 			`${kind} index=${option.index}`,
 			option.stableId ? `sid=${option.stableId}` : '',
 			option.region ? `region=${option.region}` : '',
+			option.rect ? `rect=${formatRect(option.rect)}` : '',
+			`hit=${formatHitState(option)}`,
 			`label="${shortText(option.label || option.text || '', 48)}"`,
 			`role=${option.role || '-'}`,
 			`value=${option.valueState || 'unknown'}`,
@@ -766,9 +1016,38 @@
 		].filter(Boolean).join(' ')
 	}
 
+	function formatTableLine(table, rowLimit = 6) {
+		const headers = Array.isArray(table?.headers) ? table.headers : []
+		const lines = [
+			`table region=${table?.region || '-'} rect=${formatRect(table?.rect)} headers="${shortText(headers.join('|'), 160)}"`,
+		]
+		const rows = Array.isArray(table?.rows) ? table.rows : []
+		for (let rowIndex = 0; rowIndex < rows.length && rowIndex < rowLimit; rowIndex += 1) {
+			const cells = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : []
+			const pairs = cells.map((cell, cellIndex) => {
+				const header = headers[cellIndex] || `col${cellIndex + 1}`
+				return `${header}=${cell}`
+			})
+			lines.push(`  row ${rowIndex + 1}: ${shortText(pairs.join(' | '), 240)}`)
+		}
+		return lines.join('\n')
+	}
+
 	function formatRect(rect) {
 		if (!rect || typeof rect !== 'object') return '-'
 		return `${rect.left || 0},${rect.top || 0},${rect.width || 0}x${rect.height || 0}`
+	}
+
+	function formatHitState(item) {
+		const state = String(item?.hitState || '').trim() || 'unknown'
+		const points = String(item?.hitPoints || '').trim()
+		const ratio = Number(item?.hitRatio)
+		const ratioText = Number.isFinite(ratio) ? `:${ratio}` : ''
+		const pointText = points ? `(${points})` : ''
+		const blocker = item?.hitBlocker
+			? ` blocker=${shortText(String(item.hitBlocker || '').replace(/["'<>]/g, '').replace(/\s+/g, '_'), 48)}`
+			: ''
+		return `${state}${ratioText}${pointText}${blocker}`
 	}
 
 	function rectDistance(a, b) {
@@ -798,6 +1077,8 @@
 			popup: 'popups',
 			option: 'options',
 			element: 'elements',
+			table: 'tables',
+			tables: 'tables',
 		}
 		return aliases[raw] || raw || 'simplified_dom'
 	}
@@ -805,22 +1086,103 @@
 	function extractTaskTargetLabels(taskText) {
 		const text = String(taskText || '')
 		const labels = []
-		const targetCore = '[\\u4e00-\\u9fa5A-Za-z0-9]{2,16}?(?:管理|审批|报表|区域|模块|页面|列表|中心|设置|配置)'
-		const targetContextSuffix = '(?:部分|模块|页面|区域|列表|中|里|内|下)'
+		const chineseTargetContext = '(?:部分|模块|页面|网页|页|区域|列表|面板|菜单|标签页|中|里|内|下)'
 		const patterns = [
-			new RegExp(`(?:找到|进入|打开|前往|切换到|定位到|在)\\s*(${targetCore})(?:${targetContextSuffix})?`, 'g'),
-			new RegExp(`(${targetCore})${targetContextSuffix}`, 'g'),
+			/(?:找到|进入|打开|前往|切换到|定位到|访问|查看)\s*[“"']([^”"']{1,48})[”"']/g,
+			new RegExp(`(?:找到|进入|打开|前往|切换到|定位到|访问|查看|在)\\s*([^，。；;,\\n\\r]{1,56}?)${chineseTargetContext}`, 'g'),
+			/在\s*([^，。；;,\n\r]{2,40}?)(?=(?:新增|新建|创建|添加|增加|编辑|修改|更新|查看|预览|测试|验证|检查|排查|搜索|查询|筛选|过滤|填写|填入|填表|录入))/g,
+			/(?:找到|进入|前往|切换到|定位到|访问)\s*([^，。；;,\n\r]{2,40})(?=[，。；;,\n\r]|$)/g,
+			new RegExp(`([^，。；;,\\n\\r]{2,48}?)${chineseTargetContext}(?=[，。；;,\\n\\r]|$)`, 'g'),
+			/(?:open|go\s+to|goto|navigate\s+to|visit|switch\s+to|find|enter)\s+["']?([^"',.;\n\r]{2,56}?)["']?\s+(?:page|screen|view|section|area|panel|menu|module|tab)\b/gi,
+			/["']([^"']{2,56})["']\s+(?:page|screen|view|section|area|panel|menu|module|tab)\b/gi,
+			/(?:go\s+to|goto|navigate\s+to|switch\s+to|find|enter)\s+(?!https?:\/\/|www\.)([A-Za-z][A-Za-z0-9 _/-]{1,40})(?=$|[，。；;,.\n\r])/gi,
 		]
 		for (const pattern of patterns) {
 			for (const match of text.matchAll(pattern)) {
-				const label = String(match?.[1] || '')
-					.replace(/^(找到|进入|打开|前往|切换到|定位到|在)/g, '')
-					.replace(/(部分|模块|页面|区域|列表|中|里|内|下)$/g, '')
-					.trim()
-				if (!isGenericTaskTargetLabel(label) && !isAssignmentLikeTaskTargetLabel(label)) labels.push(label)
+				const label = normalizeTaskTargetLabel(match?.[1])
+				if (label) labels.push(label)
 			}
 		}
 		return [...new Set(labels.map((item) => item.trim()).filter((item) => item.length >= 2))]
+	}
+
+	function normalizeTaskTargetLabel(value) {
+		const raw = trimToLastTaskNavigationVerb(String(value || ''))
+			.replace(/[“”"']/g, '')
+			.replace(/\s+/g, ' ')
+			.trim()
+		if (containsUrlLikeTaskTarget(raw)) return ''
+		const withoutVerb = stripTaskTargetActionNoise(stripTaskTargetLeadingNoise(raw))
+		if (isGenericTaskTargetLabel(withoutVerb)) return ''
+		if (isAssignmentLikeTaskTargetLabel(withoutVerb)) return ''
+		const label = stripTaskTargetActionNoise(stripTaskTargetContextSuffix(withoutVerb))
+			.replace(/^(?:the|a|an)\s+/i, '')
+			.trim()
+		const compact = label.replace(/\s+/g, '')
+		if (!label || compact.length < 2 || compact.length > 40) return ''
+		if (containsUrlLikeTaskTarget(label)) return ''
+		if (containsCredentialLikeTaskTarget(label)) return ''
+		if (isRecordSelectorLikeTaskTarget(label)) return ''
+		if (isGenericTaskTargetLabel(label)) return ''
+		if (isAssignmentLikeTaskTargetLabel(label)) return ''
+		if (/^(搜索|查询|筛选|过滤)(区域|条件|页面|列表)?$/.test(label)) return ''
+		return label
+	}
+
+	function stripTaskTargetContextSuffix(value) {
+		return String(value || '')
+			.replace(/(?:部分|模块|页面|网页|页|区域|列表|面板|菜单|标签页|中|里|内|下)$/gi, '')
+			.replace(/\s+(?:page|screen|view|section|area|panel|menu|module|tab)$/i, '')
+			.trim()
+	}
+
+	function trimToLastTaskNavigationVerb(value) {
+		const text = String(value || '')
+		const matches = [...text.matchAll(/(?:找到|进入|打开|前往|切换到|定位到|访问|查看)\s*/g)]
+		const last = matches[matches.length - 1]
+		if (!last || Number(last.index) <= 0) return text
+		return text.slice(Number(last.index) + last[0].length)
+	}
+
+	function containsUrlLikeTaskTarget(value) {
+		return /(https?:\/\/|www\.|[a-z0-9.-]+\.[a-z]{2,}(?:\/|\b)|\S+@\S+\.\S+)/i.test(String(value || ''))
+	}
+
+	function containsCredentialLikeTaskTarget(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		return /(?:账号|账户|用户名|登录账号|密码|口令|验证码|手机号|手机|电话)\s*[:：= ]/i.test(text) ||
+			/\b(?:account|username|user|password|passcode|otp|phone|mobile)\s*[:= ]/i.test(text)
+	}
+
+	function isRecordSelectorLikeTaskTarget(value) {
+		return /(?:列表)?(?:第一条|第一行|首条|首行|第\s*1\s*[条行])/.test(String(value || ''))
+	}
+
+	function stripTaskTargetLeadingNoise(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^(?:然后|接着|再|并且|同时|随后|帮我|请|麻烦|你|我|先|去|到|把|将|给我)+/g, '')
+				.replace(/^(?:找到|找出|进入|打开|前往|切换到|定位到|在|查看)\s*/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
+	}
+
+	function stripTaskTargetActionNoise(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^(?:新增|新建|创建|添加|增加|编辑|修改|查看|预览|测试|检查|验证|核验|确认)\s*/g, '')
+				.replace(/(?:新增|新建|创建|添加|增加|编辑|修改|查看|预览|测试|检查|验证|核验|确认|填写|填入|搜索|查询|筛选|过滤).+$/g, '')
+				.replace(/(?:新增|新建|创建|添加|增加|编辑|修改|详情|明细|查看|预览|搜索|查询|筛选|过滤)$/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
 	}
 
 	function isGenericTaskTargetLabel(value) {
@@ -878,6 +1240,14 @@
 		return `${text.slice(0, maxLen)} ...[truncated ${text.length - maxLen}]`
 	}
 
+	function escapeAttr(value) {
+		return String(value || '')
+			.replace(/&/g, '&amp;')
+			.replace(/"/g, '&quot;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+	}
+
 	g.NC_BG_PLANNER_CONTEXT = {
 		buildDuplicatePlanningContext,
 		buildInvalidActionContext,
@@ -885,6 +1255,7 @@
 		buildInvalidModelOutputContext,
 		buildObservationText,
 		buildSectionRows,
+		extractTaskTargetLabels,
 		findObservedIndexMatches,
 		planningRequestSignature,
 		resolvePlanningContextRequest,

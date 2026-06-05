@@ -119,12 +119,53 @@
 
 	function isOptionLike(element) {
 		if (!(element instanceof HTMLElement)) return false
+		if (isDatePickerOption(element)) return true
 		const role = String(element.getAttribute('role') || '').toLowerCase()
 		const cls = String(element.className || '')
 		return (
 			['option', 'menuitem', 'treeitem'].includes(role) ||
-			/(el-select-dropdown__item|el-option|el-cascader-node|el-tree-node__content|ant-select-item-option|ant-cascader-menu-item|ant-tree-node|arco-select-option|arco-cascader-option|arco-tree-node|n-base-select-option|n-cascader-option|n-tree-node|van-picker-column__item|layui-form-select|layui-select-tips|ivu-select-item|vxe-select-option|q-item|select-option|dropdown-item|tree-option|cascader)/i.test(cls)
+			/(el-select-dropdown__item|el-option|el-cascader-node|el-tree-node__content|el-date-table|el-month-table|el-year-table|ant-picker-cell|ant-select-item-option|ant-cascader-menu-item|ant-tree-node|arco-picker-cell|arco-select-option|arco-cascader-option|arco-tree-node|n-date-panel|n-base-select-option|n-cascader-option|n-tree-node|van-picker-column__item|van-calendar__day|layui-form-select|layui-select-tips|layui-laydate|ivu-select-item|ivu-date-picker-cells-cell|vxe-select-option|vxe-date-picker|q-item|select-option|dropdown-item|tree-option|cascader)/i.test(cls)
 		)
+	}
+
+	function getDatePickerCellCandidate(element) {
+		if (!(element instanceof HTMLElement)) return null
+		const selector = [
+			'.el-date-table td.available',
+			'.el-month-table td:not(.disabled)',
+			'.el-year-table td:not(.disabled)',
+			'.ant-picker-cell:not(.ant-picker-cell-disabled)',
+			'.arco-picker-cell:not(.arco-picker-cell-disabled)',
+			'.n-date-panel-date',
+			'.n-date-panel-month',
+			'.van-calendar__day:not(.van-calendar__day--disabled)',
+			'.layui-laydate-content td:not(.laydate-disabled)',
+			'.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled)',
+			'.vxe-date-picker--date td:not(.is--disabled)',
+			'[role="gridcell"]:not([aria-disabled="true"])',
+		].join(',')
+		const cell = element.closest?.(selector)
+		return cell instanceof HTMLElement && !isDatePickerDisabled(cell) && isInsideDatePickerPopup(cell) ? cell : null
+	}
+
+	function isDatePickerOption(element) {
+		const cell = getDatePickerCellCandidate(element)
+		return cell instanceof HTMLElement && cell === element
+	}
+
+	function isInsideDatePickerPopup(element) {
+		if (!(element instanceof HTMLElement)) return false
+		return !!element.closest?.(
+			'.el-picker-panel,.ant-picker-dropdown,.arco-picker-container,.arco-trigger-popup,.n-date-panel,.van-calendar,.layui-laydate,.ivu-date-picker,.ivu-date-picker-transfer,.vxe-date-picker--panel,[class*="date-picker"],[class*="calendar"],[class*="picker-panel"]'
+		)
+	}
+
+	function isDatePickerDisabled(element) {
+		if (!(element instanceof HTMLElement)) return true
+		if (String(element.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return true
+		if (element.hasAttribute('disabled')) return true
+		const cls = String(element.className || '')
+		return /(^|\s|--|__|-)(disabled|is-disabled|unavailable|not-allowed)(\s|$)/i.test(cls)
 	}
 
 	function getCompositeFieldContainer(element) {
@@ -298,6 +339,7 @@
 		const role = String(element.getAttribute('role') || '').toLowerCase()
 		const cascaderNode = element.closest?.('.el-cascader-node,[class*="cascader-node"]')
 		const cls = String(element.className || '')
+		if (isDatePickerOption(element)) return 'date-option'
 		if (cascaderNode instanceof HTMLElement || /(el-cascader-node)/i.test(cls)) {
 			const node = cascaderNode instanceof HTMLElement ? cascaderNode : element
 			return hasCascaderChildren(node) ? 'cascader-parent' : 'cascader-leaf'
@@ -352,6 +394,8 @@
 		isNativeTextInput,
 		isSelectableControl,
 		isOptionLike,
+		isDatePickerOption,
+		getDatePickerCellCandidate,
 		isComboboxLike,
 		isReadonlyPickerInput,
 		getCompositeFieldContainer,

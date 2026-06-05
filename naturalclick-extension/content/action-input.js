@@ -29,7 +29,14 @@
 			if (inputMode === 'direct') {
 				focusDirectInputTarget(editable)
 			} else {
-				await humanLikeClick(editable, null, inputMode)
+				const clickInfo = await humanLikeClick(editable, null, inputMode)
+				if (clickInfo?.blocked) {
+					return buildInputFailureResult(
+						clickInfo.message || `索引 ${index} 对应输入目标被遮挡，无法真实聚焦。`,
+						'occluded_input_target',
+						{ index, clickTarget: clickInfo.clickTarget, hitTarget: clickInfo.hitTarget, point: clickInfo.point }
+					)
+				}
 			}
 			return inputToEditableTarget(editable, text, inputMode, `已在索引 ${index} 输入文本。`)
 		}
@@ -58,7 +65,14 @@
 			if (inputMode === 'direct') {
 				focusDirectInputTarget(editable)
 			} else {
-				await humanLikeClick(editable, { x, y }, inputMode)
+				const clickInfo = await humanLikeClick(editable, { x, y }, inputMode)
+				if (clickInfo?.blocked) {
+					return buildInputFailureResult(
+						clickInfo.message || '坐标命中的输入目标被遮挡，无法真实聚焦。',
+						'occluded_input_target',
+						{ point: { x, y }, clickTarget: clickInfo.clickTarget, hitTarget: clickInfo.hitTarget }
+					)
+				}
 			}
 			return inputToEditableTarget(
 				editable,
@@ -105,14 +119,14 @@
 			if (withCommand && normalizedKey === 'a') {
 				const selected = selectAllText(target)
 				if (selected) {
-					return { success: true, message: '已执行全选。' }
+					return buildKeypressSuccessResult('已执行全选。', opts)
 				}
 			}
 
 			if (withCommand && (normalizedKey === 'c' || normalizedKey === 'x')) {
 				const copied = await copySelectionToClipboard(target, normalizedKey === 'x')
 				if (copied.ok) {
-					return { success: true, message: normalizedKey === 'x' ? '已剪切选中文本。' : '已复制选中文本。' }
+					return buildKeypressSuccessResult(normalizedKey === 'x' ? '已剪切选中文本。' : '已复制选中文本。', opts)
 				}
 				return { success: false, message: copied.error || '复制失败。' }
 			}
@@ -120,7 +134,7 @@
 			if (withCommand && normalizedKey === 'v') {
 				const pasted = await pasteClipboardText(target)
 				if (pasted.ok) {
-					return { success: true, message: '已粘贴剪贴板内容。' }
+					return buildKeypressSuccessResult('已粘贴剪贴板内容。', opts)
 				}
 				return { success: false, message: pasted.error || '粘贴失败。' }
 			}
@@ -137,7 +151,51 @@
 			}
 			target.dispatchEvent(new KeyboardEvent('keydown', eventInit))
 			target.dispatchEvent(new KeyboardEvent('keyup', eventInit))
-			return { success: true, message: `已发送按键 ${opts.key}。` }
+			return buildKeypressSuccessResult(`已发送按键 ${formatKeypressCombo(opts)}。`, opts)
+		}
+
+		function buildKeypressSuccessResult(message, opts) {
+			const targetLabel = getKeypressTargetLabel(opts)
+			const reason = getKeypressReason(opts)
+			const details = []
+			if (targetLabel) details.push(`目标: ${targetLabel}`)
+			if (reason) details.push(`目的: ${reason}`)
+			const suffix = details.length ? `（${details.join('；')}）` : ''
+			return {
+				success: true,
+				message: `${String(message || '已发送按键。').replace(/[。.]$/, '')}${suffix}。`,
+				meta: {
+					key: formatKeypressCombo(opts),
+					...(targetLabel ? { targetLabel } : {}),
+					...(reason ? { reason } : {}),
+					outcome: createOutcome(OUTCOME_KIND.NONE),
+				},
+			}
+		}
+
+		function getKeypressTargetLabel(opts) {
+			return String(
+				opts?.target_label ||
+					opts?.targetLabel ||
+					opts?.target_description ||
+					opts?.targetDescription ||
+					opts?.label ||
+					''
+			).trim()
+		}
+
+		function getKeypressReason(opts) {
+			return String(opts?.reason || opts?.purpose || '').trim()
+		}
+
+		function formatKeypressCombo(opts) {
+			const parts = []
+			if (opts?.ctrlKey) parts.push('Ctrl')
+			if (opts?.metaKey) parts.push('Meta')
+			if (opts?.altKey) parts.push('Alt')
+			if (opts?.shiftKey) parts.push('Shift')
+			parts.push(String(opts?.key || '').trim() || 'Enter')
+			return parts.join('+')
 		}
 
 		function selectAllText(target) {

@@ -28,6 +28,7 @@ importScripts(
 	'background/session-records.js',
 	'background/session-recovery.js',
 	'background/session-timing.js',
+	'background/result-summary.js',
 	'background/session-lifecycle.js',
 	'background/session-engine.js'
 )
@@ -205,7 +206,7 @@ async function prepareControllerTab(tabId, windowId, taskText = '') {
 	if (!initialTarget?.url) {
 		return {
 			ok: false,
-			error: `当前页面不支持自动化（${formatShortUrl(originalUrl)}），且任务中没有可直接打开的网址。请在任务里补充业务系统网址，或先切换到目标网站后重试。`,
+			error: `当前页面不支持自动化（${formatShortUrl(originalUrl)}），且任务中没有可直接打开的网址。请在任务里补充目标网站网址，或先切换到目标网站后重试。`,
 		}
 	}
 

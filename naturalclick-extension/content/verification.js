@@ -51,7 +51,7 @@
 			const value = readElementValue(editable || element)
 			return {
 				success: true,
-				matched: normalizeForMatch(value).includes(normalizeForMatch(expectedText)),
+				matched: matchesExpectedInputValue(value, expectedText),
 				message: 'ok',
 				value: observer.shortText(value, 120),
 			}
@@ -72,7 +72,7 @@
 			const value = readElementValue(editable)
 			return {
 				success: true,
-				matched: normalizeForMatch(value).includes(normalizeForMatch(expectedText)),
+				matched: matchesExpectedInputValue(value, expectedText),
 				message: 'ok',
 				value: observer.shortText(value, 120),
 			}
@@ -101,6 +101,13 @@
 
 	function normalizeForMatch(text) {
 		return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase()
+	}
+
+	function matchesExpectedInputValue(value, expectedText) {
+		const normalizedExpected = normalizeForMatch(expectedText)
+		const normalizedValue = normalizeForMatch(value)
+		if (!normalizedExpected) return !normalizedValue
+		return normalizedValue.includes(normalizedExpected)
 	}
 
 	function isProbablyClickable(element) {

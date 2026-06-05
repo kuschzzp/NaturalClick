@@ -12,6 +12,9 @@
 			'#0ea5e9',
 			'#14b8a6',
 		]
+		const MAX_INDEX_HIGHLIGHTS = 160
+		const FOCUS_LAYER_EXTRA_HIGHLIGHTS = 16
+		const MIN_FOCUS_LAYER_HIGHLIGHTS = 48
 
 		/** @type {HTMLDivElement | null} */
 		let host = null
@@ -64,6 +67,23 @@
 					background: var(--nc-color);
 					opacity:.88;
 					box-shadow:0 1px 4px color-mix(in srgb, var(--nc-color) 24%, transparent);
+				}
+				#${HOST_ID} .nc-index-box.nc-hit-covered{
+					border-style:dashed;
+					opacity:.38;
+					background:rgba(100,116,139,.04);
+					box-shadow:none;
+				}
+				#${HOST_ID} .nc-index-label.nc-hit-covered{
+					background:#64748b;
+					opacity:.58;
+				}
+				#${HOST_ID} .nc-index-box.nc-hit-partial{
+					border-style:dashed;
+					opacity:.72;
+				}
+				#${HOST_ID} .nc-index-label.nc-hit-partial{
+					opacity:.78;
 				}
 				#${HOST_ID} .nc-action-box{
 					position:fixed;
@@ -129,20 +149,20 @@
 				return
 			}
 
-			const limit = Math.min(90, indexedElements.length)
-			for (let i = 0; i < limit; i++) {
-				const row = indexedElements[i]
+			const highlightRows = selectHighlightRows(indexedElements)
+			for (const row of highlightRows) {
 				const element = row?.element
 				const index = Number(row?.index)
 				if (!(element instanceof HTMLElement) || !Number.isFinite(index)) continue
 
 				const color = COLORS[index % COLORS.length]
+				const hitClass = getHitClass(row)
 				const boxes = []
 				const rects = Array.from(element.getClientRects())
 				for (const rect of rects) {
 					if (rect.width < 2 || rect.height < 2) continue
 					const box = document.createElement('div')
-					box.className = 'nc-index-box'
+					box.className = hitClass ? `nc-index-box ${hitClass}` : 'nc-index-box'
 					box.style.setProperty('--nc-color', color)
 					placeBox(box, rect)
 					host.appendChild(box)
@@ -151,7 +171,7 @@
 				if (!boxes.length) continue
 
 				const label = document.createElement('div')
-				label.className = 'nc-index-label'
+				label.className = hitClass ? `nc-index-label ${hitClass}` : 'nc-index-label'
 				label.style.setProperty('--nc-color', color)
 				label.textContent = String(index)
 				host.appendChild(label)
@@ -161,6 +181,107 @@
 
 			updateOverlayPositions()
 			bindListeners()
+		}
+
+		function selectHighlightRows(indexedElements) {
+			const rows = (Array.isArray(indexedElements) ? indexedElements : [])
+				.map((row, order) => ({ row, order, score: scoreHighlightRow(row, order, indexedElements) }))
+				.filter((item) => item.row?.element instanceof HTMLElement && Number.isFinite(Number(item.row?.index)))
+			const limit = getHighlightLimit(rows)
+			if (!shouldRankHighlightRows(rows, limit)) return rows.map((item) => item.row)
+			return rows
+				.sort((a, b) => b.score - a.score || a.order - b.order)
+				.slice(0, limit)
+				.sort((a, b) => Number(a.row?.index) - Number(b.row?.index))
+				.map((item) => item.row)
+		}
+
+		function shouldRankHighlightRows(rows, limit) {
+			if (!Array.isArray(rows) || rows.length <= 0) return false
+			if (rows.length > limit) return true
+			return rows.some((item) => hasActiveVisualLayer(item.row)) &&
+				rows.some((item) => getRowHitState(item.row) === 'covered')
+		}
+
+		function getHighlightLimit(rows) {
+			const count = Array.isArray(rows) ? rows.length : 0
+			if (count <= 0) return MAX_INDEX_HIGHLIGHTS
+			const activeLayerCount = rows.filter((item) => hasActiveVisualLayer(item.row)).length
+			if (activeLayerCount > 0) {
+				return Math.min(
+					MAX_INDEX_HIGHLIGHTS,
+					Math.max(MIN_FOCUS_LAYER_HIGHLIGHTS, activeLayerCount + FOCUS_LAYER_EXTRA_HIGHLIGHTS)
+				)
+			}
+			if (rows.some((item) => getRowHitState(item.row) === 'covered')) return Math.min(MAX_INDEX_HIGHLIGHTS, 120)
+			return MAX_INDEX_HIGHLIGHTS
+		}
+
+		function hasActiveVisualLayer(row) {
+			const snapshot = row?.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}
+			const region = String(snapshot.region || '').trim().toLowerCase()
+			return region === 'popover' || region === 'dialog'
+		}
+
+		function getRowHitState(row) {
+			const snapshot = row?.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}
+			return String(row?.hitState || snapshot.hitState || '').trim().toLowerCase()
+		}
+
+		function scoreHighlightRow(row, order, allRows) {
+			const element = row?.element
+			if (!(element instanceof HTMLElement)) return -10000
+			const snapshot = row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}
+			const region = String(snapshot.region || '').trim().toLowerCase()
+			const hasPopover = (Array.isArray(allRows) ? allRows : []).some((item) => {
+				const current = item?.snapshot && typeof item.snapshot === 'object' ? item.snapshot : {}
+				return String(current.region || '').trim().toLowerCase() === 'popover'
+			})
+			let score = 100
+			if (region === 'popover') score += hasPopover ? 420 : 160
+			else if (region === 'dialog') score += 150
+			else if (region === 'content') score += hasPopover ? 35 : 90
+			else if (region === 'sidebar') score += hasPopover ? -30 : 55
+			else if (region === 'header') score += hasPopover ? -40 : 35
+			else if (region === 'pagination') score += hasPopover ? -60 : 10
+
+			const hit = getRowHitState(row)
+			if (hit === 'hittable') score += 70
+			else if (hit === 'partial') score += 35
+			else if (hit === 'covered') score -= 180
+
+			if (snapshot.newSinceLastObservation) score += 40
+			if (snapshot.editable || snapshot.fieldType) score += 35
+			if (snapshot.actionIntent) score += 30
+			if (snapshot.selectionControl || snapshot.controlKind) score += 25
+			const role = String(snapshot.role || element.getAttribute?.('role') || '').trim().toLowerCase()
+			if (['option', 'menuitem', 'treeitem', 'checkbox', 'radio', 'switch'].includes(role)) score += 35
+			if (snapshot.label || snapshot.text || element.getAttribute?.('aria-label')) score += 8
+
+			const rect = getPrimaryRect(element)
+			if (rect) {
+				const viewportArea = Math.max(1, window.innerWidth * window.innerHeight)
+				const area = Math.max(0, rect.width) * Math.max(0, rect.height)
+				if (area > 0 && area <= viewportArea * 0.08) score += 24
+				if (area > viewportArea * 0.28) score -= 65
+				const viewportCenterY = window.innerHeight / 2
+				score -= Math.min(40, Math.abs((rect.top + rect.bottom) / 2 - viewportCenterY) / 60)
+			}
+			return score - order * 0.01
+		}
+
+		function getPrimaryRect(element) {
+			if (!(element instanceof HTMLElement)) return null
+			const rects = Array.from(element.getClientRects())
+				.filter((rect) => rect.width >= 2 && rect.height >= 2)
+			return rects[0] || null
+		}
+
+		function getHitClass(row) {
+			const state = String(row?.hitState || row?.snapshot?.hitState || '').trim().toLowerCase()
+			if (state === 'covered') return 'nc-hit-covered'
+			if (state === 'partial') return 'nc-hit-partial'
+			return ''
 		}
 
 		function clearIndexHighlights() {

@@ -155,24 +155,35 @@
 		return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)))
 	}
 
+	function formatBrowserActionContext(input) {
+		const parts = []
+		const target = String(input?.target_label || input?.targetLabel || input?.target_title || input?.targetTitle || '').trim()
+		const targetUrl = String(input?.target_url || input?.targetUrl || '').trim()
+		const reason = String(input?.reason || input?.purpose || '').trim()
+		if (target) parts.push(`目标: ${target}`)
+		if (targetUrl && targetUrl !== target) parts.push(`URL: ${targetUrl}`)
+		if (reason) parts.push(`原因: ${reason}`)
+		return parts.length ? `（${parts.join('；')}）` : ''
+	}
+
 	registerTool({
 		name: 'open_new_tab',
 		description: '打开一个新的浏览器标签页并切换到该标签页。',
-		inputSchema: { url: 'string|required' },
+		inputSchema: { url: 'string|required', target_label: 'string|required', reason: 'string|optional' },
 		execute: async (session, input) => {
 			const url = String(input.url || '').trim()
 			if (!url) return { success: false, message: 'open_new_tab 缺少 url 参数。' }
 			const created = await createTabAndWaitLoaded(session.windowId, normalizeUrl(url))
 			session.currentTabId = created.id
 			await waitForPageBridgeSoft(created.id)
-			return { success: true, message: `已打开新标签页: ${created.id}` }
+			return { success: true, message: `已打开新标签页: ${created.id}${formatBrowserActionContext(input)}` }
 		},
 	})
 
 	registerTool({
 		name: 'switch_to_tab',
 		description: '切换到指定标签页。',
-		inputSchema: { tab_id: 'number|required' },
+		inputSchema: { tab_id: 'number|required', target_label: 'string|required', target_url: 'string|optional', reason: 'string|optional' },
 		execute: async (session, input) => {
 			const tabId = Number(input.tab_id)
 			if (!Number.isFinite(tabId)) return { success: false, message: 'switch_to_tab 参数无效。' }
@@ -180,7 +191,7 @@
 				await chrome.tabs.update(tabId, { active: true })
 				session.currentTabId = tabId
 				await waitForPageBridgeSoft(tabId)
-				return { success: true, message: `已切换到标签页 ${tabId}` }
+				return { success: true, message: `已切换到标签页 ${tabId}${formatBrowserActionContext(input)}` }
 			} catch (error) {
 				return { success: false, message: `切换标签页失败: ${String(error)}` }
 			}
@@ -190,7 +201,7 @@
 	registerTool({
 		name: 'close_tab',
 		description: '关闭指定标签页。',
-		inputSchema: { tab_id: 'number|required' },
+		inputSchema: { tab_id: 'number|required', target_label: 'string|required', target_url: 'string|optional', reason: 'string|required' },
 		execute: async (session, input) => {
 			const tabId = Number(input.tab_id)
 			if (!Number.isFinite(tabId)) return { success: false, message: 'close_tab 参数无效。' }
@@ -200,7 +211,7 @@
 					const tabs = await chrome.tabs.query({ windowId: session.windowId, active: true })
 					session.currentTabId = tabs[0]?.id || session.controllerTabId
 				}
-				return { success: true, message: `已关闭标签页 ${tabId}` }
+				return { success: true, message: `已关闭标签页 ${tabId}${formatBrowserActionContext(input)}` }
 			} catch (error) {
 				return { success: false, message: `关闭标签页失败: ${String(error)}` }
 			}
@@ -210,7 +221,7 @@
 	registerTool({
 		name: 'wait',
 		description: '等待页面、弹层、下拉结果或异步内容稳定；不要用它替代明确动作。',
-		inputSchema: { ms: 'number|optional', reason: 'string|optional' },
+		inputSchema: { ms: 'number|optional', reason: 'string|required' },
 		execute: async (_session, input) => {
 			const ms = Math.max(200, Math.min(10000, Number(input.ms || input.timeout_ms || 1000)))
 			await sleep(ms)
@@ -221,10 +232,12 @@
 	registerTool({
 		name: 'ask_user',
 		description: '当缺少验证码、账号、确认信息或出现无法判断的选项时，向用户提问并等待回答。',
-		inputSchema: { question: 'string|required', placeholder: 'string|optional', timeout_ms: 'number|optional' },
+		inputSchema: { question: 'string|required', reason: 'string|required', placeholder: 'string|optional', timeout_ms: 'number|optional' },
 		execute: async (session, input) => {
 			const question = String(input.question || input.text || '').trim()
 			if (!question) return { success: false, message: 'ask_user 缺少 question 参数。' }
+			const reason = String(input.reason || input.purpose || '').trim()
+			if (!reason) return { success: false, message: 'ask_user 缺少 reason 参数。' }
 			try {
 				const response = await withTimeout(
 					sendRuntimeMessage({
@@ -233,6 +246,7 @@
 							sessionId: session.id,
 							title: 'Agent 需要你确认',
 							question,
+							reason,
 							placeholder: String(input.placeholder || ''),
 						},
 					}),
@@ -244,8 +258,8 @@
 				}
 				return {
 					success: true,
-					message: `用户回答: ${String(response.answer || '').trim() || '(empty)'}`,
-					meta: { answer: String(response.answer || '') },
+					message: `用户回答: ${String(response.answer || '').trim() || '(empty)'}（原因: ${reason}）`,
+					meta: { answer: String(response.answer || ''), reason },
 				}
 			} catch (error) {
 				return { success: false, message: `询问用户失败: ${String(error)}` }
@@ -255,25 +269,32 @@
 
 	pageActionTool('click_element_by_index', '点击当前观察结果中的指定元素索引。', {
 		index: 'number|required',
+		target_label: 'string|required',
 	})
 	pageActionTool('click', 'click_element_by_index 的兼容别名，点击当前观察结果中的指定元素索引。', {
 		index: 'number|required',
+		target_label: 'string|required',
 	})
 	pageActionTool('input_text', '向当前观察结果中的可编辑元素输入文本。', {
 		index: 'number|required',
 		text: 'string|required',
+		target_label: 'string|required',
 	})
 	pageActionTool('type', 'input_text 的兼容别名，向当前观察结果中的可编辑元素输入文本。', {
 		index: 'number|required',
 		text: 'string|required',
+		target_label: 'string|required',
 	})
 	pageActionTool('scroll', '纵向滚动页面或可滚动容器。', {
 		down: 'boolean|optional',
 		pixels: 'number|optional',
 		index: 'number|optional',
+		target_label: 'string|optional',
 	})
 	pageActionTool('keypress', '向当前焦点元素发送键盘事件。', {
 		key: 'string|required',
+		target_label: 'string|required',
+		reason: 'string|optional',
 		ctrlKey: 'boolean|optional',
 		metaKey: 'boolean|optional',
 		shiftKey: 'boolean|optional',
@@ -281,34 +302,40 @@
 	})
 	pageActionTool('hover_element_by_index', '悬浮指定元素索引，用于展开级联选择器、菜单或 tooltip。', {
 		index: 'number|required',
+		target_label: 'string|required',
 	})
 	pageActionTool('open_dropdown', '展开指定 index 的下拉框并返回真实可见候选；不负责选择选项。', {
 		index: 'number|required',
+		target_label: 'string|required',
 	})
 	pageActionTool('choose_dropdown_option', '在指定字段的已知候选中按真实可见文本选择下拉选项；必须提供 index，禁止只按文本全局选择。', {
 		index: 'number|required',
 		text: 'string|required',
+		target_label: 'string|required',
 		label: 'string|optional',
 	})
-	pageActionTool('select_dropdown_option', '兼容旧动作：有 text/label 时选择下拉选项；只有 index 时仅展开下拉框。新规划优先使用 open_dropdown/choose_dropdown_option。', {
+	pageActionTool('select_dropdown_option', '兼容旧动作：有 text/label 时必须带 index 并只选择该字段候选；只有 index 时仅展开下拉框。新规划优先使用 open_dropdown/choose_dropdown_option。', {
 		index: 'number|optional',
 		text: 'string|optional',
 		label: 'string|optional',
 	}, {
 		plannerVisible: false,
 	})
-	pageActionTool('select_checkbox_option', '按文本选择多选下拉或列表中的复选项，优先点击左侧复选框。', {
+	pageActionTool('select_checkbox_option', '在指定字段或复选候选 index 范围内按真实文本选择复选/多选项；必须提供 index，禁止只按文本全局选择。', {
 		text: 'string|required',
-		index: 'number|optional',
+		index: 'number|required',
+		target_label: 'string|required',
 	})
-	pageActionTool('select_cascader_path', '按路径逐级选择级联选项；父级持续悬浮展开下一列，禁止滚动上一级菜单查找下一级。', {
+	pageActionTool('select_cascader_path', '在指定级联字段 index 内按路径逐级选择选项；必须提供 index，父级持续悬浮展开下一列，禁止滚动上一级菜单查找下一级。', {
 		path: 'string[]|required',
-		index: 'number|optional',
+		index: 'number|required',
+		target_label: 'string|required',
 	})
 	pageActionTool('scroll_horizontally', '横向滚动页面或指定可滚动容器。', {
 		right: 'boolean|optional',
 		pixels: 'number|optional',
 		index: 'number|optional',
+		target_label: 'string|optional',
 	})
 	registerTool({
 		name: 'locate_by_vision',

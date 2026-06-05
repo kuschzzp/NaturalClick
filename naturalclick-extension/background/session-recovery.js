@@ -6,7 +6,7 @@
 			execution &&
 			execution.success === false &&
 			g.NC_BG_VISION?.canUseVisionFallback?.(action) &&
-			shouldAttemptVisionFallbackForFailure(execution.message)
+			shouldAttemptVisionFallbackForFailure(buildExecutionFailureSignal(execution))
 		)
 	}
 
@@ -34,7 +34,7 @@
 		return {
 			success: false,
 			message: `${execution.message} | 视觉回退失败: ${visionFallback.message}`,
-			meta: execution.meta,
+			meta: mergeRecoveryFailureMeta(execution.meta, visionFallback.meta),
 		}
 	}
 
@@ -60,6 +60,7 @@
 			return {
 				success: false,
 				message: `视觉恢复失败: ${visionFallback.message || '未找到可用坐标。'}`,
+				meta: visionFallback.meta || null,
 			}
 		}
 		return {
@@ -77,6 +78,9 @@
 		const input = action?.input || {}
 		if (isFormSubmitRecoveryAction(action)) {
 			return '表单提交动作校验失败后不做视觉恢复，避免提交成功后误点列表页新增/提交按钮；交给重新观察规划。'
+		}
+		if (String(input.workflow_step || '') === 'submit_search') {
+			return '搜索提交动作校验失败后不做视觉恢复，避免重复点击同一搜索按钮；交给重新观察规划。'
 		}
 		if (String(input.workflow_step || '') !== 'reveal_navigation_options') return ''
 		const text = String(reason || '')
@@ -105,6 +109,36 @@
 			text.includes('message port closed') ||
 			text.includes('未连接扩展执行脚本')
 		)
+	}
+
+	function buildExecutionFailureSignal(execution) {
+		const parts = [execution?.message]
+		const meta = execution?.meta && typeof execution.meta === 'object' ? execution.meta : {}
+		const outcome = meta.outcome && typeof meta.outcome === 'object' ? meta.outcome : {}
+		for (const value of [
+			meta.reason,
+			meta.failureReason,
+			meta.error,
+			outcome.kind,
+			outcome.reason,
+			outcome.requestedText,
+		]) {
+			const text = String(value || '').trim()
+			if (text) parts.push(text)
+		}
+		return parts.map((item) => String(item || '').trim()).filter(Boolean).join(' | ')
+	}
+
+	function mergeRecoveryFailureMeta(executionMeta, visionMeta) {
+		const base = executionMeta && typeof executionMeta === 'object' ? executionMeta : {}
+		const vision = visionMeta && typeof visionMeta === 'object' ? visionMeta : {}
+		if (!Object.keys(base).length && !Object.keys(vision).length) return null
+		return {
+			...base,
+			visionFallback: Object.keys(vision).length ? vision : null,
+			visionCoordinateOutcome: vision.coordinateOutcome || null,
+			visionCoordinateAttempts: Array.isArray(vision.coordinateAttempts) ? vision.coordinateAttempts : [],
+		}
 	}
 
 	function isSemanticActionFailure(text) {
@@ -158,6 +192,8 @@
 		buildExecutionVisionFallbackActivityText,
 		shouldAttemptExecutionVisionFallback,
 		shouldAttemptVisionFallbackForFailure,
+		buildExecutionFailureSignal,
+		mergeRecoveryFailureMeta,
 		getVerificationVisionRecoverySkipReason,
 		shouldSkipVerificationVisionRecovery,
 	}

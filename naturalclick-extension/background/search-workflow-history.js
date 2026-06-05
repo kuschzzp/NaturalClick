@@ -11,19 +11,92 @@
 			return String(action || '').replace(/\.(verify|loop_guard|vision_recovery)$/i, '')
 		}
 
+		function getWorkflowStep(item) {
+			return String(item?.input?.workflow_step || '').trim()
+		}
+
+		function isWorkflowStep(item, expected) {
+			return getWorkflowStep(item) === expected
+		}
+
+		function hasSearchWorkflowMarker(item) {
+			const input = item?.input || {}
+			if (String(input.workflow || '').trim() === 'search-fields') return true
+			if (/^(expand_search_panel|fill_field|open_dropdown|select_option|submit_search|reset_filters|clear_field|skip_field|finish_search_fields)$/i.test(getWorkflowStep(item))) return true
+			return hasWorkflowFieldMetadata(input)
+		}
+
+		function hasWorkflowFieldMetadata(input) {
+			return [
+				input?.workflow_field_key,
+				input?.workflow_field_index,
+				input?.workflow_field_label,
+				input?.workflow_field_type,
+				input?.workflow_test_value,
+			].some((value) => String(value ?? '').trim())
+		}
+
+		function getPrimaryActionText(item) {
+			const input = item?.input || {}
+			return normalizeText([
+				input.target_label,
+				input.label,
+				input.text,
+				input.name,
+			].filter(Boolean).join(' '))
+		}
+
+		function getSearchHistoryText(item, options = {}) {
+			const input = item?.input || {}
+			const includeFailureContext = options.includeFailureContext === true
+			return normalizeText([
+				input.target_label,
+				input.label,
+				input.text,
+				input.name,
+				item?.nextGoal,
+				item?.output,
+				includeFailureContext ? item?.evaluationPreviousGoal : '',
+			].filter(Boolean).join(' '))
+		}
+
+		function hasSearchContextCue(text) {
+			return /(搜索|查询|筛选|过滤|搜索项|筛选项|搜索字段|筛选字段|搜索条件|筛选条件|查询条件|filter|search|query|criteria)/i.test(String(text || ''))
+		}
+
+		function hasSearchSubmitCue(item, options = {}) {
+			if (isWorkflowStep(item, 'submit_search')) return true
+			const primary = getPrimaryActionText(item)
+			const text = getSearchHistoryText(item, options)
+			if (/(搜索|查询|筛选|过滤|filter|search|query)/i.test(primary)) return true
+			if (!hasSearchWorkflowMarker(item) && !hasSearchContextCue(text)) return false
+			return /(搜索|查询|筛选|过滤|提交|应用|确定|确认|filter|search|query|submit|apply|go)/i.test(text)
+		}
+
+		function hasSearchResetCue(item, options = {}) {
+			if (isWorkflowStep(item, 'reset_filters')) return true
+			const primary = getPrimaryActionText(item)
+			const text = getSearchHistoryText(item, options)
+			const hasResetCue = /(重置|清空|清除|reset|clear)/i.test(primary) || /(重置|清空|清除|reset|clear)/i.test(text)
+			if (!hasResetCue) return false
+			if (hasSearchContextCue(primary)) return true
+			if (hasSearchWorkflowMarker(item)) return true
+			return hasSearchContextCue(text)
+		}
+
 		function isSearchWorkflowHistory(item) {
 			const input = item?.input || {}
 			const workflow = String(input.workflow || '').trim()
 			const step = String(input.workflow_step || '').trim()
 			return workflow === 'search-fields' ||
-				/^(expand_search_panel|fill_field|open_dropdown|select_option|submit_search|reset_filters)$/i.test(step)
+				/^(expand_search_panel|fill_field|open_dropdown|select_option|submit_search|reset_filters|clear_field|skip_field)$/i.test(step)
 		}
 
 		function isSearchPanelExpandHistory(item) {
 			const action = normalizeActionName(item?.action)
 			if (action !== 'click_element_by_index' && action !== 'click') return false
 			const input = item?.input || {}
-			if (String(input.workflow_step || '').trim() === 'expand_search_panel') return true
+			if (isWorkflowStep(item, 'expand_search_panel')) return true
 			const text = normalizeText([
 				input.target_label,
 				input.label,
@@ -72,14 +145,7 @@
 			if (action !== 'click_element_by_index' && action !== 'click') return false
 			if (isSearchPanelExpandHistory(item)) return false
 			if (isResetHistory(item)) return false
-			const text = normalizeText([
-				item?.input?.target_label,
-				item?.input?.label,
-				item?.input?.text,
-				item?.nextGoal,
-				item?.output,
-			].filter(Boolean).join(' '))
-			return /(搜索|查询|search|submit)/i.test(text)
+			return hasSearchSubmitCue(item)
 		}
 
 		function isSearchSubmitFailureHistory(item) {
@@ -87,29 +153,22 @@
 			const action = normalizeActionName(item?.action)
 			if (action !== 'click_element_by_index' && action !== 'click') return false
 			if (isSearchPanelExpandHistory(item)) return false
-			const text = normalizeText([
-				item?.input?.target_label,
-				item?.input?.label,
-				item?.input?.text,
-				item?.nextGoal,
-				item?.output,
-				item?.evaluationPreviousGoal,
-			].filter(Boolean).join(' '))
-			return /(搜索|查询|search|submit)/i.test(text)
+			if (isResetFailureHistory(item)) return false
+			return hasSearchSubmitCue(item, { includeFailureContext: true })
+		}
+
+		function isResetFailureHistory(item) {
+			if (!item || item.success !== false) return false
+			const action = normalizeActionName(item?.action)
+			if (action !== 'click_element_by_index' && action !== 'click') return false
+			return hasSearchResetCue(item, { includeFailureContext: true })
 		}
 
 		function isResetHistory(item) {
 			if (!item?.success) return false
 			const action = normalizeActionName(item?.action)
 			if (action !== 'click_element_by_index' && action !== 'click') return false
-			const text = normalizeText([
-				item?.input?.target_label,
-				item?.input?.label,
-				item?.input?.text,
-				item?.nextGoal,
-				item?.output,
-			].filter(Boolean).join(' '))
-			return /(重置|清空|reset|clear)/i.test(text)
+			return hasSearchResetCue(item)
 		}
 
 		function getHistoryOutcome(item) {
@@ -137,6 +196,7 @@
 				? g.NC_ACTION_CONTRACT.normalizeOutcome(outcome)
 				: { ...outcome, kind: String(outcome.kind || '').trim().toLowerCase() }
 			if (!normalized?.kind || normalized.kind === 'none') return null
+			if (!normalized.source && outcome.source) normalized.source = String(outcome.source || '').trim()
 			return normalized
 		}
 
@@ -151,6 +211,7 @@
 			isDropdownChoiceHistory,
 			isSearchSubmitHistory,
 			isSearchSubmitFailureHistory,
+			isResetFailureHistory,
 			isResetHistory,
 			getHistoryOutcome,
 			getHistoryFailureReason,

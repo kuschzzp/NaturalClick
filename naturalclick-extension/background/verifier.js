@@ -99,7 +99,8 @@
 
 		if (name === 'input_text' || name === 'type') {
 			const expected = getActionInputText(action)
-			if (!expected) return { ok: true, reason: '输入文本为空，跳过校验' }
+			const shouldVerifyEmpty = isSearchWorkflowStep(action, 'clear_field')
+			if (!expected && !shouldVerifyEmpty) return { ok: true, reason: '输入文本为空，跳过校验' }
 
 			const index = Number(input.index)
 			if (Number.isFinite(index)) {
@@ -152,6 +153,9 @@
 				if (hasObservedIndexedTargetValueSatisfied(postObs, input.index, action)) {
 					return { ok: true, reason: '下拉/级联选择后字段值已满足目标值' }
 				}
+				if (isDateSelectionCommitAction(action, preObservation) && hasDateSelectionProgress(preObservation, postObs, action)) {
+					return { ok: true, reason: '日期/时间选择后观察到日期候选或字段状态变化' }
+				}
 				const finalOutcomeVerdict = evaluateStructuredOutcome(execution, { finalNoEffect: true })
 				if (finalOutcomeVerdict) return finalOutcomeVerdict
 				return { ok: false, reason: '下拉选择后未观察到字段值或选项状态变化' }
@@ -160,16 +164,26 @@
 			if (outcomeVerdict) return outcomeVerdict
 			if (hasExecutionStateChange(execution)) return { ok: true, reason: '执行返回状态已变化' }
 			if (isSearchWorkflowStep(action, 'submit_search')) {
-				if (urlChanged) return { ok: true, reason: 'URL 已变化' }
-				if (domChanged) return { ok: true, reason: 'DOM 摘要已变化' }
-				return { ok: true, reason: '搜索提交动作已触发' }
+				return evaluateSearchSubmitAction(action, preObservation, postObs, execution, urlChanged, domChanged)
 			}
 			if (isSearchWorkflowStep(action, 'reset_filters')) {
-				if (hasSearchWorkflowFieldCleared(preObservation, postObs, input)) {
-					return { ok: true, reason: '搜索重置后字段已清空' }
+				const clearState = getSearchWorkflowClearState(preObservation, postObs, input)
+				if (clearState.ok) {
+					return {
+						ok: true,
+						reason: clearState.alreadyEmpty
+							? '搜索重置后目标字段已处于空状态'
+							: '搜索重置后字段已清空',
+					}
 				}
-				if (!Number.isFinite(Number(input.workflow_field_index))) {
-					return { ok: true, reason: '搜索重置动作已触发' }
+				if (hasSearchWorkflowTrackedResetFields(input)) {
+					return {
+						ok: false,
+						reason: 'search_reset_field_not_cleared: 搜索重置后已知筛选字段仍未清空',
+						outcome: createVerifierOutcome(OUTCOME_KIND.NO_EFFECT, {
+							reason: 'search_reset_field_not_cleared',
+						}),
+					}
 				}
 			}
 			if (urlChanged) return { ok: true, reason: 'URL 已变化' }
@@ -233,18 +247,23 @@
 			const index = Number(action?.input?.index)
 			if (Number.isFinite(index)) {
 				return hasObservedIndexedTargetValueChanged(preObservation, postObservation, index) ||
-					hasObservedIndexedTargetValueSatisfied(postObservation, index, action)
+					hasObservedIndexedTargetValueSatisfied(postObservation, index, action) ||
+					(isDateSelectionCommitAction(action, preObservation) && hasDateSelectionProgress(preObservation, postObservation, action))
 			}
 		}
 		if (isFormSubmitAction(action, preObservation)) {
 			return hasFormSubmitProgress(preObservation, postObservation)
 		}
 		if (isSearchWorkflowStep(action, 'submit_search')) {
-			return hasPostObservationProgress(preObservation, postObservation)
+			return hasSearchSubmitProgress(preObservation, postObservation)
 		}
 		if (isSearchWorkflowStep(action, 'reset_filters')) {
-			return hasSearchWorkflowFieldCleared(preObservation, postObservation, action?.input || {}) ||
-				hasPostObservationProgress(preObservation, postObservation)
+			const input = action?.input || {}
+			if (hasSearchWorkflowTrackedResetFields(input)) {
+				return getSearchWorkflowClearState(preObservation, postObservation, input).ok
+			}
+			return hasPostObservationProgress(preObservation, postObservation) ||
+				buildTableSummarySignature(preObservation) !== buildTableSummarySignature(postObservation)
 		}
 		if (isCreateEntryClickAction(action, preObservation)) {
 			return hasCreateEntryClickReachedExpectedState(preObservation, postObservation)
@@ -257,6 +276,54 @@
 		if (String(postObservation.url || '') !== String(preObservation?.url || '')) return true
 		if (String(postObservation.content || '') !== String(preObservation?.content || '')) return true
 		return false
+	}
+
+	function hasSearchSubmitProgress(preObservation, postObservation) {
+		if (hasPostObservationProgress(preObservation, postObservation)) return true
+		if (buildTableSummarySignature(preObservation) !== buildTableSummarySignature(postObservation)) return true
+		const feedback = getSearchSubmitFeedback(preObservation, postObservation)
+		return !!(feedback.success || feedback.empty || feedback.error)
+	}
+
+	function evaluateSearchSubmitAction(action, preObservation, postObservation, execution, urlChanged, domChanged) {
+		const feedback = getSearchSubmitFeedback(preObservation, postObservation)
+		const tableChanged = buildTableSummarySignature(preObservation) !== buildTableSummarySignature(postObservation)
+		const evidence = summarizeSearchSubmitEvidence(preObservation, postObservation, urlChanged, domChanged, tableChanged, feedback)
+		if (urlChanged) return { ok: true, reason: `搜索提交后 URL 已变化（${evidence}）` }
+		if (domChanged) return { ok: true, reason: `搜索提交后 DOM 摘要已变化（${evidence}）` }
+		if (tableChanged) return { ok: true, reason: `搜索提交后表格/列表摘要已变化（${evidence}）` }
+		if (feedback.success) return { ok: true, reason: `搜索提交后观察到结果反馈: ${feedback.success}（${evidence}）` }
+		if (feedback.empty) return { ok: true, reason: `搜索提交后观察到空结果反馈: ${feedback.empty}（${evidence}）` }
+		if (feedback.error) {
+			return {
+				ok: false,
+				reason: `search_submit_failed: 搜索提交后观察到失败/错误反馈: ${feedback.error}（${evidence}）`,
+				outcome: createVerifierOutcome(OUTCOME_KIND.NO_EFFECT, {
+					reason: feedback.error,
+				}),
+			}
+		}
+		const finalOutcomeVerdict = evaluateStructuredOutcome(execution, { finalNoEffect: true })
+		if (finalOutcomeVerdict) return finalOutcomeVerdict
+		return {
+			ok: false,
+			reason: `search_submit_no_feedback: 搜索提交后未观察到 URL、DOM、表格/列表摘要或结果反馈变化（${evidence}）`,
+			outcome: createVerifierOutcome(OUTCOME_KIND.NO_EFFECT, {
+				reason: 'search_submit_no_feedback',
+			}),
+		}
+	}
+
+	function summarizeSearchSubmitEvidence(preObservation, postObservation, urlChanged, domChanged, tableChanged, feedback) {
+		return [
+			`urlChanged=${urlChanged ? 'true' : 'false'}`,
+			`domChanged=${domChanged ? 'true' : 'false'}`,
+			`tableChanged=${tableChanged ? 'true' : 'false'}`,
+			`tables=${countObservedTables(preObservation)}->${countObservedTables(postObservation)}`,
+			feedback?.success ? `success="${feedback.success}"` : '',
+			feedback?.empty ? `empty="${feedback.empty}"` : '',
+			feedback?.error ? `error="${feedback.error}"` : '',
+		].filter(Boolean).join(' ')
 	}
 
 	function hasFormSubmitProgress(preObservation, postObservation) {
@@ -294,7 +361,9 @@
 
 	function getActionInputText(action) {
 		const input = action?.input || {}
-		return String(input.text || input.value || '').trim()
+		if (Object.prototype.hasOwnProperty.call(input, 'text')) return String(input.text || '').trim()
+		if (Object.prototype.hasOwnProperty.call(input, 'value')) return String(input.value || '').trim()
+		return ''
 	}
 
 	function isDropdownOpenProbeAction(action) {
@@ -420,6 +489,20 @@
 		return (Array.isArray(observation?.forms) ? observation.forms : []).length
 	}
 
+	function countObservedTables(observation) {
+		return Array.isArray(observation?.tables) ? observation.tables.length : 0
+	}
+
+	function buildTableSummarySignature(observation) {
+		return JSON.stringify((Array.isArray(observation?.tables) ? observation.tables : []).map((table) => ({
+			kind: String(table?.kind || ''),
+			headers: (Array.isArray(table?.headers) ? table.headers : []).map((item) => String(item || '').trim()).slice(0, 20),
+			rows: (Array.isArray(table?.rows) ? table.rows : [])
+				.slice(0, 12)
+				.map((row) => (Array.isArray(row) ? row : [row]).map((cell) => String(cell || '').trim()).slice(0, 12)),
+		})))
+	}
+
 	function getFormSubmitFeedback(preObservation, postObservation) {
 		const before = collectObservationFeedbackText(preObservation)
 		const afterText = collectObservationFeedbackText(postObservation)
@@ -435,6 +518,26 @@
 			/不能为空|必填|请选择|请输入|请填写|请录入|校验失败|验证失败|格式错误|重复|已存在|已经存在|不能重复|唯一|保存失败|提交失败|操作失败|请求失败|提交异常|保存异常|is\s+required|required\s+field|invalid\s+(?:value|input|format)|duplicate|already\s+exists|\bunique\b|\berror\s*:|\bfailed\b/i,
 		])
 		return { success, error }
+	}
+
+	function getSearchSubmitFeedback(preObservation, postObservation) {
+		const before = collectObservationFeedbackText(preObservation)
+		const afterText = collectObservationFeedbackText(postObservation)
+		const after = afterText
+			.split(/\n+/)
+			.map((line) => line.trim())
+			.filter((line) => line && !before.includes(line))
+			.join('\n') || afterText
+		const success = findFirstFeedback(after, [
+			/搜索成功|查询成功|筛选成功|过滤成功|搜索完成|查询完成|筛选完成|过滤完成|结果已更新|列表已刷新|results?\s+(?:updated|loaded|refreshed)|search\s+(?:complete|completed|success)/i,
+		])
+		const empty = findFirstFeedback(after, [
+			/暂无数据|无数据|没有数据|暂无结果|无结果|未找到|没有匹配|no\s+(?:data|records|results|matches)|empty\s+result/i,
+		])
+		const error = findFirstFeedback(after, [
+			/搜索失败|查询失败|筛选失败|过滤失败|搜索异常|查询异常|筛选异常|请求失败|加载失败|search\s+failed|query\s+failed|filter\s+failed|request\s+failed|load(?:ing)?\s+failed/i,
+		])
+		return { success, empty, error }
 	}
 
 	function collectObservationFeedbackText(observation) {
@@ -499,7 +602,7 @@
 	function summarizeCreateEntryClickEvidence(preObservation, postObservation) {
 		const before = collectCreateFormEvidence(preObservation)
 		const after = collectCreateFormEvidence(postObservation)
-		if (after.createNamedForms > before.createNamedForms && after.businessFields > 0) {
+		if (after.createNamedForms > before.createNamedForms && after.structuredFields > 0) {
 			return {
 				reached: true,
 				reason: `create_named_forms ${before.createNamedForms}->${after.createNamedForms}`,
@@ -511,10 +614,10 @@
 				reason: `dialog_fields ${before.dialogFields}->${after.dialogFields}`,
 			}
 		}
-		if (after.businessFields >= 2 && after.businessFields > before.businessFields && after.denseForms >= before.denseForms) {
+		if (after.structuredFields >= 2 && after.structuredFields > before.structuredFields && after.denseForms >= before.denseForms) {
 			return {
 				reached: true,
-				reason: `business_fields ${before.businessFields}->${after.businessFields}`,
+				reason: `structured_fields ${before.structuredFields}->${after.structuredFields}`,
 			}
 		}
 		if (after.createOptions > before.createOptions) {
@@ -525,14 +628,14 @@
 		}
 		return {
 			reached: false,
-			reason: `forms ${before.forms}->${after.forms}, business_fields ${before.businessFields}->${after.businessFields}, dialog_fields ${before.dialogFields}->${after.dialogFields}, create_named_forms ${before.createNamedForms}->${after.createNamedForms}, create_options ${before.createOptions}->${after.createOptions}`,
+			reason: `forms ${before.forms}->${after.forms}, structured_fields ${before.structuredFields}->${after.structuredFields}, dialog_fields ${before.dialogFields}->${after.dialogFields}, create_named_forms ${before.createNamedForms}->${after.createNamedForms}, create_options ${before.createOptions}->${after.createOptions}`,
 		}
 	}
 
 	function collectCreateFormEvidence(observation) {
 		const evidence = {
 			forms: 0,
-			businessFields: 0,
+			structuredFields: 0,
 			dialogFields: 0,
 			createNamedForms: 0,
 			denseForms: 0,
@@ -541,9 +644,9 @@
 		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
 			evidence.forms += 1
 			const fields = (Array.isArray(form?.fields) ? form.fields : [])
-				.filter((field) => isBusinessCreateFormField(field))
+				.filter((field) => isStructuredCreateFormField(field))
 			const formName = normalizeVerifierKey(form?.name || form?.id || '')
-			evidence.businessFields += fields.length
+			evidence.structuredFields += fields.length
 			evidence.dialogFields += fields.filter((field) => isObservedDialogItem(field)).length
 			if (fields.length >= 1 && /(弹层|dialog|modal|drawer|新增|新建|创建|添加|create|new|add)/i.test(formName)) {
 				evidence.createNamedForms += 1
@@ -562,7 +665,7 @@
 		return evidence
 	}
 
-	function isBusinessCreateFormField(item) {
+	function isStructuredCreateFormField(item) {
 		if (!item || typeof item !== 'object') return false
 		const region = normalizeVerifierKey(item.region)
 		if (/^(header|sidebar|pagination)$/.test(region)) return false
@@ -571,7 +674,6 @@
 		const label = getObservedItemLabel(item)
 		const key = normalizeVerifierKey(label)
 		if (!key || key === '(empty)') return false
-		if (/(首页|个人信息|退出登录|搜索内容|更多|共\d*条|条\/页)/.test(key)) return false
 		return true
 	}
 
@@ -596,7 +698,7 @@
 		const intent = normalizeVerifierKey(item.actionIntent || item.intent)
 		return /^(button|link)$/.test(role) &&
 			/(新增|新建|创建|添加|增加|add|create|new)/i.test(intent) &&
-			!/(管理|审批|菜单|导航|导入|搜索|查询|重置)/.test(normalizeVerifierKey(label))
+			!isNonCreateEntryActionLabel(label)
 	}
 
 	function isCreateEntryLabel(value) {
@@ -604,10 +706,17 @@
 		if (!label) return false
 		if (/^(新增|新建|创建|添加|增加|add|create|new|\+)$/.test(label)) return true
 		if (/^(新增|新建|创建|添加|增加)[\u4e00-\u9fa5A-Za-z0-9_-]{1,8}$/.test(label)) {
-			return !/(管理|审批|导入|搜索|查询|重置|删除|编辑)/.test(label)
+			return true
 		}
 		if (/^(add|create|new)[A-Za-z0-9_-]{1,16}$/i.test(label)) return true
 		return false
+	}
+
+	function isNonCreateEntryActionLabel(value) {
+		const label = normalizeVerifierKey(value)
+		if (!label) return false
+		if (/^(新增|新建|创建|添加|增加|add|create|new|\+)/i.test(label)) return false
+		return /^(导入|导出|搜索|查询|重置|清空|删除|编辑|修改|提交|保存|取消|返回|详情|查看|import|export|search|query|reset|clear|delete|edit|submit|save|cancel|back|view)$/i.test(label)
 	}
 
 	function detectUnexpectedDialogCloseAfterFieldAction(action, preObservation, postObservation) {
@@ -659,8 +768,10 @@
 
 	function isSearchWorkflowStep(action, step) {
 		const input = action?.input || {}
-		return String(input.workflow || '') === 'search-fields' &&
-			String(input.workflow_step || '') === String(step || '')
+		const workflowStep = String(input.workflow_step || '')
+		if (workflowStep !== String(step || '')) return false
+		if (String(input.workflow || '') === 'search-fields') return true
+		return /^(expand_search_panel|fill_field|open_dropdown|select_option|submit_search|reset_filters|clear_field|finish_search_fields)$/.test(workflowStep)
 	}
 
 	function hasDropdownProbeCandidates(execution, postObs) {
@@ -760,16 +871,59 @@
 			.filter(Boolean)
 			.filter((part) => !/^(empty|unknown|null|undefined|-)$/.test(part))
 		if (!expected.length) return false
+		if (hasExpectedDateTokensSatisfied(item, expected)) return true
 		return expected.every((part) => actual.includes(part))
 	}
 
 	function hasSearchWorkflowFieldCleared(preObservation, postObservation, input) {
-		const index = Number(input?.workflow_field_index)
-		if (!Number.isFinite(index)) return false
-		const before = findObservedIndexedItem(preObservation, index)
-		const after = findObservedIndexedItem(postObservation, index)
-		if (!before || !after) return false
-		return isObservedFilled(before) && !isObservedFilled(after)
+		return getSearchWorkflowClearState(preObservation, postObservation, input).ok
+	}
+
+	function getSearchWorkflowClearState(preObservation, postObservation, input) {
+		const indexes = getSearchWorkflowResetFieldIndexes(input)
+		if (!indexes.length) return { ok: false, alreadyEmpty: false, observed: 0 }
+		const states = indexes.map((index) => {
+			const before = findObservedIndexedItem(preObservation, index)
+			const after = findObservedIndexedItem(postObservation, index)
+			return {
+				index,
+				before,
+				after,
+				wasFilled: !!before && isObservedFilled(before),
+				nowFilled: !!after && isObservedFilled(after),
+			}
+		})
+		const observed = states.filter((state) => !!state.after)
+		if (!observed.length) return { ok: false, alreadyEmpty: false, observed: 0 }
+		const filledBefore = observed.filter((state) => state.wasFilled)
+		if (filledBefore.length) {
+			const ok = filledBefore.every((state) => !state.nowFilled)
+			return { ok, alreadyEmpty: false, observed: observed.length }
+		}
+		const ok = observed.every((state) => !state.nowFilled)
+		return { ok, alreadyEmpty: ok, observed: observed.length }
+	}
+
+	function hasSearchWorkflowTrackedResetFields(input) {
+		return getSearchWorkflowResetFieldIndexes(input).length > 0
+	}
+
+	function getSearchWorkflowResetFieldIndexes(input) {
+		const raw = [
+			input?.workflow_field_index,
+			...String(input?.workflow_filled_field_indexes || '')
+				.split(/[|,，、\s]+/)
+				.filter(Boolean),
+		]
+		const seen = new Set()
+		const indexes = []
+		for (const value of raw) {
+			const index = Number(value)
+			if (!Number.isFinite(index) || seen.has(index)) continue
+			seen.add(index)
+			indexes.push(index)
+		}
+		return indexes
 	}
 
 	function findObservedIndexedItem(observation, index) {
@@ -802,6 +956,95 @@
 			item?.checked,
 			item?.expandedState,
 		].filter((part) => part !== undefined && part !== null).join('|')).trim()
+	}
+
+	function isDateSelectionCommitAction(action, preObservation) {
+		if (!isDropdownSelectionCommitAction(action)) return false
+		const input = action?.input || {}
+		if (!extractDateTokens([input.text, input.label, input.workflow_requested_text].join(' ')).length) return false
+		const index = Number(input.index)
+		const item = Number.isFinite(index) ? findObservedIndexedItem(preObservation, index) : null
+		if (!item) return true
+		const typeText = normalizeVerifierKey([
+			item.fieldType,
+			item.type,
+			item.selectionControl,
+			item.control,
+			item.role,
+			getObservedItemLabel(item),
+		].filter(Boolean).join(' '))
+		return /(date|time|daterange|datetimerange|picker|日期|时间|起止|区间|范围)/i.test(typeText)
+	}
+
+	function hasDateSelectionProgress(preObservation, postObservation, action) {
+		if (!hasPostObservationProgress(preObservation, postObservation)) {
+			return hasObservedIndexedTargetValueSatisfied(postObservation, action?.input?.index, action)
+		}
+		const expectedDates = extractDateTokens([
+			action?.input?.text,
+			action?.input?.label,
+			action?.input?.workflow_requested_text,
+		].filter(Boolean).join(' '))
+		if (!expectedDates.length) return false
+		if (hasObservedIndexedTargetValueSatisfied(postObservation, action?.input?.index, action)) return true
+		const selectedDates = extractDateTokens(collectSelectedChoiceText(postObservation))
+		return expectedDates.some((date) => selectedDates.includes(date))
+	}
+
+	function hasExpectedDateTokensSatisfied(item, expectedParts) {
+		const expectedDates = extractDateTokens(expectedParts.join(' '))
+		if (!expectedDates.length) return false
+		const actualDates = extractDateTokens([
+			readObservedValueSignature(item),
+			getObservedItemLabel(item),
+			item?.placeholder,
+			item?.text,
+		].filter(Boolean).join(' '))
+		if (!actualDates.length) return false
+		return expectedDates.every((date) => actualDates.includes(date))
+	}
+
+	function collectSelectedChoiceText(observation) {
+		const parts = []
+		for (const item of getObservedChoiceCandidates(observation)) {
+			const selectedText = [
+				item?.selected,
+				item?.checked,
+				item?.valueState,
+				item?.state,
+				item?.stateHints,
+				item?.className,
+				item?.classes,
+				item?.ariaSelected,
+				item?.ariaChecked,
+			].filter(Boolean).join(' ')
+			if (!/(true|selected|checked|active|current|range|start|end|in-range|is-selected|is-today)/i.test(selectedText)) continue
+			parts.push(item?.label, item?.text, item?.value)
+		}
+		return parts.filter(Boolean).join(' ')
+	}
+
+	function extractDateTokens(value) {
+		const source = String(value || '')
+		const out = []
+		const seen = new Set()
+		const push = (year, month, day) => {
+			const normalized = `${year}-${pad2(month)}-${pad2(day)}`
+			if (seen.has(normalized)) return
+			seen.add(normalized)
+			out.push(normalized)
+		}
+		for (const match of source.matchAll(/(\d{4})\s*[-/]\s*(\d{1,2})\s*[-/]\s*(\d{1,2})/g)) {
+			push(match[1], match[2], match[3])
+		}
+		for (const match of source.matchAll(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})/g)) {
+			push(match[1], match[2], match[3])
+		}
+		return out
+	}
+
+	function pad2(value) {
+		return String(Number(value)).padStart(2, '0')
 	}
 
 	function isObservedFilled(item) {

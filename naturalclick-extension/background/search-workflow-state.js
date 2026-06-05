@@ -1,5 +1,5 @@
 ;(function (g) {
-	const SEARCH_STATE_VERSION = 2
+	const SEARCH_STATE_VERSION = 6
 
 	function createSearchStateHelpers(deps = {}) {
 		const getFieldKey = typeof deps.getFieldKey === 'function' ? deps.getFieldKey : () => ''
@@ -42,11 +42,18 @@
 				fieldOrder: [],
 				fields: {},
 				completedKeys: [],
+				skippedKeys: [],
 				resetCompletedKeys: [],
+				resultsByKey: {},
+				clearRetryAttemptsByKey: {},
+				evidenceRequestAttemptsByKey: {},
 				failedLabelsByKey: {},
 				dropdownOpenAttemptsByKey: {},
+				pendingDateRangeStartByKey: {},
 				pendingDropdownCandidates: [],
 				pendingDropdownOutput: '',
+				baselineResetDone: false,
+				terminalFieldKey: '',
 				failedReason: '',
 				seededFromHistory: false,
 			}
@@ -54,7 +61,16 @@
 
 		function normalizeSearchStateVersion(state) {
 			if (!state || typeof state !== 'object') return
-			if (Number(state.version) === SEARCH_STATE_VERSION) return
+			if (Number(state.version) === SEARCH_STATE_VERSION) {
+				if (typeof state.baselineResetDone !== 'boolean') state.baselineResetDone = false
+				if (!state.resultsByKey || typeof state.resultsByKey !== 'object') state.resultsByKey = {}
+				if (!state.clearRetryAttemptsByKey || typeof state.clearRetryAttemptsByKey !== 'object') state.clearRetryAttemptsByKey = {}
+				if (!Array.isArray(state.skippedKeys)) state.skippedKeys = []
+				if (!state.evidenceRequestAttemptsByKey || typeof state.evidenceRequestAttemptsByKey !== 'object') state.evidenceRequestAttemptsByKey = {}
+				if (!state.pendingDateRangeStartByKey || typeof state.pendingDateRangeStartByKey !== 'object') state.pendingDateRangeStartByKey = {}
+				if (typeof state.terminalFieldKey !== 'string') state.terminalFieldKey = ''
+				return
+			}
 			state.version = SEARCH_STATE_VERSION
 			const phase = String(state.phase || '').trim()
 			if (isTerminalSearchPhase(phase) || phase === 'failed') return
@@ -64,11 +80,18 @@
 			state.fieldOrder = []
 			state.fields = {}
 			state.completedKeys = []
+			state.skippedKeys = []
 			state.resetCompletedKeys = []
+			state.resultsByKey = {}
+			state.clearRetryAttemptsByKey = {}
+			state.evidenceRequestAttemptsByKey = {}
 			state.failedLabelsByKey = {}
 			state.dropdownOpenAttemptsByKey = {}
+			state.pendingDateRangeStartByKey = {}
 			state.pendingDropdownCandidates = []
 			state.pendingDropdownOutput = ''
+			state.baselineResetDone = false
+			state.terminalFieldKey = ''
 			state.failedReason = ''
 			state.seededFromHistory = false
 		}
@@ -91,12 +114,29 @@
 			state.fieldOrder = nextOrder
 			state.fields = nextFields
 			state.completedKeys = (Array.isArray(state.completedKeys) ? state.completedKeys : []).filter((key) => !!nextFields[key])
+			state.skippedKeys = (Array.isArray(state.skippedKeys) ? state.skippedKeys : []).filter((key) => !!nextFields[key])
 			state.resetCompletedKeys = (Array.isArray(state.resetCompletedKeys) ? state.resetCompletedKeys : []).filter((key) => !!nextFields[key])
+			if (!state.resultsByKey || typeof state.resultsByKey !== 'object') state.resultsByKey = {}
+			for (const key of Object.keys(state.resultsByKey || {})) {
+				if (!nextFields[key]) delete state.resultsByKey[key]
+			}
+			if (!state.clearRetryAttemptsByKey || typeof state.clearRetryAttemptsByKey !== 'object') state.clearRetryAttemptsByKey = {}
+			for (const key of Object.keys(state.clearRetryAttemptsByKey || {})) {
+				if (!nextFields[key]) delete state.clearRetryAttemptsByKey[key]
+			}
+			if (!state.evidenceRequestAttemptsByKey || typeof state.evidenceRequestAttemptsByKey !== 'object') state.evidenceRequestAttemptsByKey = {}
+			for (const key of Object.keys(state.evidenceRequestAttemptsByKey || {})) {
+				if (!nextFields[key]) delete state.evidenceRequestAttemptsByKey[key]
+			}
 			for (const key of Object.keys(state.failedLabelsByKey || {})) {
 				if (!nextFields[key]) delete state.failedLabelsByKey[key]
 			}
 			for (const key of Object.keys(state.dropdownOpenAttemptsByKey || {})) {
 				if (!nextFields[key]) delete state.dropdownOpenAttemptsByKey[key]
+			}
+			if (!state.pendingDateRangeStartByKey || typeof state.pendingDateRangeStartByKey !== 'object') state.pendingDateRangeStartByKey = {}
+			for (const key of Object.keys(state.pendingDateRangeStartByKey || {})) {
+				if (!nextFields[key]) delete state.pendingDateRangeStartByKey[key]
 			}
 		}
 
@@ -113,6 +153,12 @@
 				if (!Array.isArray(state.resetCompletedKeys)) state.resetCompletedKeys = []
 				if (!state.resetCompletedKeys.includes(key)) state.resetCompletedKeys.push(key)
 			}
+		}
+
+		function markSearchFieldSkipped(state, key) {
+			if (!key) return
+			if (!Array.isArray(state.skippedKeys)) state.skippedKeys = []
+			if (!state.skippedKeys.includes(key)) state.skippedKeys.push(key)
 		}
 
 		function countCompletedFields(state) {
@@ -141,9 +187,39 @@
 			return Number.isFinite(count) ? count : 0
 		}
 
+		function incrementClearRetryAttempt(state, key) {
+			if (!key) return 0
+			if (!state.clearRetryAttemptsByKey || typeof state.clearRetryAttemptsByKey !== 'object') {
+				state.clearRetryAttemptsByKey = {}
+			}
+			state.clearRetryAttemptsByKey[key] = Number(state.clearRetryAttemptsByKey[key] || 0) + 1
+			return state.clearRetryAttemptsByKey[key]
+		}
+
+		function getClearRetryAttemptCount(state, key) {
+			if (!key || !state?.clearRetryAttemptsByKey) return 0
+			const count = Number(state.clearRetryAttemptsByKey[key])
+			return Number.isFinite(count) ? count : 0
+		}
+
+		function incrementEvidenceRequestAttempt(state, key) {
+			if (!key) return 0
+			if (!state.evidenceRequestAttemptsByKey || typeof state.evidenceRequestAttemptsByKey !== 'object') {
+				state.evidenceRequestAttemptsByKey = {}
+			}
+			state.evidenceRequestAttemptsByKey[key] = Number(state.evidenceRequestAttemptsByKey[key] || 0) + 1
+			return state.evidenceRequestAttemptsByKey[key]
+		}
+
+		function getEvidenceRequestAttemptCount(state, key) {
+			if (!key || !state?.evidenceRequestAttemptsByKey) return 0
+			const count = Number(state.evidenceRequestAttemptsByKey[key])
+			return Number.isFinite(count) ? count : 0
+		}
+
 		function getNextPendingField(state, fields) {
 			for (const key of state.fieldOrder || []) {
-				if ((state.completedKeys || []).includes(key)) continue
+				if (isSearchFieldDone(state, key)) continue
 				const field = getFieldByKey(fields, key)
 				if (field) return field
 			}
@@ -157,10 +233,15 @@
 					seenCurrent = true
 					continue
 				}
-				if (!seenCurrent || (state.completedKeys || []).includes(key)) continue
+				if (!seenCurrent || isSearchFieldDone(state, key)) continue
 				if (getFieldByKey(fields, key)) return true
 			}
 			return false
+		}
+
+		function isSearchFieldDone(state, key) {
+			return (Array.isArray(state?.completedKeys) && state.completedKeys.includes(key)) ||
+				(Array.isArray(state?.skippedKeys) && state.skippedKeys.includes(key))
 		}
 
 		function getLastSearchedField(state, fields) {
@@ -201,10 +282,15 @@
 			createSearchState,
 			markSearchWorkflowFailed,
 			markSearchFieldCompleted,
+			markSearchFieldSkipped,
 			countCompletedFields,
 			rememberFailedSelectionLabel,
 			incrementDropdownOpenAttempt,
 			getDropdownOpenAttemptCount,
+			incrementClearRetryAttempt,
+			getClearRetryAttemptCount,
+			incrementEvidenceRequestAttempt,
+			getEvidenceRequestAttemptCount,
 			getNextPendingField,
 			hasPendingFieldAfter,
 			getLastSearchedField,

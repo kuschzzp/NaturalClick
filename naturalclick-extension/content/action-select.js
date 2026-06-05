@@ -14,6 +14,7 @@
 			inferInteractionOutcome,
 			OUTCOME_KIND,
 			waitForVisibleOption,
+			findDropdownOptionByScrolling,
 			listVisibleOptionLabels,
 			getVisibleOptionLabel,
 			resolveDropdownTrigger,
@@ -23,19 +24,29 @@
 			resolveSelectableClickTarget,
 			findCascaderOptionByScrolling,
 			bringCascaderOptionIntoView,
+			getCascaderLevelSignature,
 			waitForCascaderMenuLevel,
 			summarizeCascaderLevel,
 		} = deps || {}
 
 		async function selectDropdownOptionAction(input, inputMode) {
 			const text = String(input.text || input.label || '').trim()
+			const dateSelectionTexts = parseDateSelectionRequest(text)
+			const lookupText = dateSelectionTexts[0] || text
 			const index = Number(input.index)
 			if (!text && !Number.isFinite(index)) {
 				return { success: false, message: 'select_dropdown_option 缺少 index 或 text。' }
 			}
+			if (text && !Number.isFinite(index)) {
+				return {
+					success: false,
+					message: 'select_dropdown_option 选择选项时缺少目标字段 index；为避免误选其他弹层，必须提供 index，或改用 open_dropdown(index) 后 choose_dropdown_option(index,text)。',
+				}
+			}
 			let field = null
 			let before = null
 			let option = null
+			let openedByField = false
 			if (!text && Number.isFinite(index)) {
 				field = observer.getElementByIndex(index)
 				if (!field) return { success: false, message: `索引 ${index} 不存在。` }
@@ -50,11 +61,24 @@
 					!hasEnabledSelectionTrigger(field, trigger)
 				before = getElementInteractionState(field)
 				await humanLikeClick(trigger, null, inputMode)
+				openedByField = true
 				const nativeLabels = nativeSelect ? listNativeSelectOptionLabels(nativeSelect, 16) : []
 				const visible = nativeLabels.length
 					? nativeLabels
-					: await waitForVisibleOptionLabels(field, inputMode, 16)
+					: await waitForVisibleOptionLabels(field, inputMode, 16, { openedByField })
 				const after = getElementInteractionState(field)
+				const openOutcome = visible.length
+					? createOutcome(OUTCOME_KIND.OPTIONS_VISIBLE, { visibleOptions: visible })
+					: inferInteractionOutcome(before, after, OUTCOME_KIND.NONE)
+				if (!visible.length && !openOutcome?.progress) {
+					return buildDropdownFailureResult({
+						index,
+						requestedText: '',
+						visibleOptions: [],
+						reason: `下拉框索引 ${index} 已尝试触发，但字段状态未变化且未检测到可见候选。`,
+						source: disabledLikeComposite ? 'disabled_like_composite_probe' : 'open_dropdown_probe',
+					})
+				}
 				const suffix = visible.length
 					? ` 当前候选: ${visible.join('、')}`
 					: `${disabledLikeComposite ? ' 字段带禁用样式/属性但已尝试点击下拉触发区。' : ''} 当前尚未检测到可见候选，下一轮应重新观察或等待弹层。`
@@ -65,14 +89,9 @@
 						before,
 						after,
 						visibleOptions: visible,
-						outcome: createOutcome(visible.length ? OUTCOME_KIND.OPTIONS_VISIBLE : OUTCOME_KIND.NONE, {
-							visibleOptions: visible,
-						}),
+						outcome: openOutcome,
 					},
 				}
-			}
-			if (!Number.isFinite(index)) {
-				option = await waitForVisibleOption(text, { selectableOnly: false, timeoutMs: 260 })
 			}
 			if (Number.isFinite(index)) {
 				field = observer.getElementByIndex(index)
@@ -83,7 +102,7 @@
 						return { success: false, message: `索引 ${index} 对应下拉框已禁用。` }
 					}
 					before = getElementInteractionState(field)
-					const matched = selectOptionByText(nativeSelect, text)
+					const matched = selectOptionByText(nativeSelect, lookupText)
 					if (!matched) {
 						const nativeLabels = listNativeSelectOptionLabels(nativeSelect, 20)
 						return buildDropdownFailureResult({
@@ -105,46 +124,96 @@
 				}
 				if (field) {
 					before = getElementInteractionState(field)
-					option = await waitForVisibleOption(text, {
+					option = await waitForVisibleOption(lookupText, {
 						selectableOnly: false,
 						timeoutMs: 260,
 						field,
+						openedByField: true,
 					})
+					if (!option) {
+						option = await findDropdownOptionByScrolling(lookupText, {
+							selectableOnly: false,
+							timeoutMs: 1200,
+							field,
+							openedByField: true,
+						})
+					}
 					if (!option) {
 						const trigger = resolveDropdownTrigger(field) || field
 						await humanLikeClick(trigger, null, inputMode)
+						openedByField = true
 						await sleep(inputMode === 'realistic' ? randomBetween(140, 240) : 120)
-						option = await waitForVisibleOption(text, {
+						option = await waitForVisibleOption(lookupText, {
 							selectableOnly: false,
 							timeoutMs: 1800,
 							field,
+							openedByField,
 						})
+						if (!option) {
+							option = await findDropdownOptionByScrolling(lookupText, {
+								selectableOnly: false,
+								timeoutMs: 2400,
+								field,
+								openedByField,
+							})
+						}
 					}
 				}
 			}
-			if (!option && !Number.isFinite(index)) {
-				option = await waitForVisibleOption(text, { selectableOnly: false, timeoutMs: 1200 })
-			}
 			if (!option) {
-				const visible = listVisibleOptionLabels(12, field ? { field } : {})
+				const scopedVisible = listVisibleOptionLabels(12, field ? { field, openedByField } : {})
+				const globalVisible = field ? listVisibleOptionLabels(12, {}) : []
+				const hasGlobalDiagnostic = field && !scopedVisible.length && globalVisible.length
+				const visible = scopedVisible.length ? scopedVisible : globalVisible
 				return buildDropdownFailureResult({
 					index: Number.isFinite(index) ? index : null,
 					requestedText: text,
 					visibleOptions: visible,
-					reason: `未找到可见下拉选项 "${text}"。`,
-					source: field ? 'field_scoped_popup' : 'global_popup',
+					reason: hasGlobalDiagnostic
+						? `未在目标字段范围内找到可见下拉选项 "${text}"，但页面存在字段外可见候选。`
+						: `未找到可见下拉选项 "${text}"。`,
+					source: hasGlobalDiagnostic ? 'global_popup_diagnostic' : (field ? 'field_scoped_popup' : 'global_popup'),
+					candidateLabel: hasGlobalDiagnostic ? '字段外可见下拉候选' : '当前字段候选',
+					emptyCandidateText: '当前字段范围内没有检测到可见下拉候选。',
+					advice: hasGlobalDiagnostic
+						? '下一步建议：先 request_options_for 当前字段确认候选；不要直接选择字段外候选。'
+						: undefined,
 				})
 			}
 			await humanLikeClick(option, null, inputMode)
+			const completedRange = await maybeCompleteDateRangeSelection({
+				field,
+				inputMode,
+				dateSelectionTexts,
+				firstOption: option,
+			})
 			const selection = await waitForDropdownSelectionEffect({ field, option, before, inputMode })
+			const selectedText = completedRange ? `${lookupText} - ${completedRange}` : text
+			const rangeStarted = dateSelectionTexts.length >= 2 && !completedRange
+			const outcome = completedRange && !selection.outcome?.progress
+				? createOutcome(OUTCOME_KIND.STATE_CHANGED, {
+					reason: 'date_range_second_option_selected',
+					requestedText: text,
+				})
+				: rangeStarted
+					? createOutcome(OUTCOME_KIND.STATE_CHANGED, {
+						reason: 'date_range_first_option_selected',
+						requestedText: text,
+						selectedDate: lookupText,
+						pendingText: dateSelectionTexts[1],
+					})
+					: selection.outcome
+			const messageText = rangeStarted
+				? `已选择日期范围起点 "${lookupText}"，等待选择结束日期 "${dateSelectionTexts[1]}"。`
+				: `已选择下拉选项 "${selectedText}"。`
 			return {
 				success: true,
-				message: appendStateChange(`已选择下拉选项 "${text}"。`, before, selection.after),
+				message: appendStateChange(messageText, before, selection.after),
 				meta: {
 					before,
 					after: selection.after,
 					optionAfter: selection.optionAfter,
-					outcome: selection.outcome,
+					outcome,
 				},
 			}
 		}
@@ -174,6 +243,12 @@
 			const text = String(input.text || input.label || '').trim()
 			if (!text) return { success: false, message: 'select_checkbox_option 缺少 text。' }
 			const index = Number(input.index)
+			if (!Number.isFinite(index)) {
+				return {
+					success: false,
+					message: 'select_checkbox_option 缺少目标字段 index；为避免误选其他弹层，必须提供 index，或先 open_dropdown(index) / request_options_for(index) 确认候选后再选择。',
+				}
+			}
 			let field = null
 			if (Number.isFinite(index)) {
 				field = observer.getElementByIndex(index)
@@ -184,14 +259,13 @@
 					await sleep(inputMode === 'realistic' ? randomBetween(90, 160) : 90)
 				}
 			}
-			const lookupScope = field ? { field } : {}
+			const lookupScope = field ? { field, openedByField: field instanceof HTMLElement } : {}
 			const scopedOption =
 				(await waitForVisibleOption(text, { ...lookupScope, selectableOnly: true, timeoutMs: 1400 })) ||
-				(await waitForVisibleOption(text, { ...lookupScope, timeoutMs: 900 }))
-			const option = scopedOption || (field
-				? (await waitForVisibleOption(text, { selectableOnly: true, timeoutMs: 1400 })) ||
-					(await waitForVisibleOption(text, { timeoutMs: 700 }))
-				: null)
+				(await findDropdownOptionByScrolling(text, { ...lookupScope, selectableOnly: true, timeoutMs: 1800 })) ||
+				(await waitForVisibleOption(text, { ...lookupScope, timeoutMs: 900 })) ||
+				(await findDropdownOptionByScrolling(text, { ...lookupScope, timeoutMs: 1800 }))
+			const option = scopedOption
 			if (!option) {
 				const scopedVisible = listVisibleOptionLabels(12, { ...lookupScope, selectableOnly: true })
 				const globalVisible = field ? listVisibleOptionLabels(12, { selectableOnly: true }) : []
@@ -201,11 +275,11 @@
 					requestedText: text,
 					visibleOptions: visible,
 					reason: `未找到可见复选项 "${text}"。`,
-					source: field && !scopedVisible.length && globalVisible.length ? 'global_selectable_popup_fallback' : (field ? 'field_scoped_selectable_popup' : 'global_selectable_popup'),
-					candidateLabel: '当前可见复选候选',
+					source: field && !scopedVisible.length && globalVisible.length ? 'global_selectable_popup_diagnostic' : (field ? 'field_scoped_selectable_popup' : 'global_selectable_popup'),
+					candidateLabel: field && !scopedVisible.length && globalVisible.length ? '字段外可见复选候选' : '当前可见复选候选',
 					emptyCandidateText: '当前字段范围内没有检测到可见复选候选。',
 					advice: visible.length
-						? '下一步建议：从当前复选候选中选择真实 label，或先 request_options_for 当前字段确认候选。'
+						? '下一步建议：先 request_options_for 当前字段确认候选；不要直接选择字段外候选。'
 						: '下一步建议：先展开对应多选字段，等待候选出现，或改用更具体的 checkbox/radio 子项。',
 				})
 			}
@@ -232,6 +306,12 @@
 			if (!path.length) return { success: false, message: 'select_cascader_path 缺少 path。' }
 
 			const index = Number(input.index)
+			if (!Number.isFinite(index)) {
+				return {
+					success: false,
+					message: 'select_cascader_path 缺少目标字段 index；为避免误选其他级联弹层，必须提供 index，再按该字段范围选择完整路径。',
+				}
+			}
 			let field = null
 			let before = null
 			let finalOption = null
@@ -261,7 +341,7 @@
 				}
 				await bringCascaderOptionIntoView(option, inputMode)
 				if (i < path.length - 1) {
-					const nextLevelReady = await expandCascaderParentOption(option, i + 1, inputMode)
+					const nextLevelReady = await expandCascaderParentOption(option, i + 1, inputMode, path[i + 1])
 					if (!nextLevelReady) {
 						const nextLabel = path[i + 1] || label
 						return buildSelectionFailureResult({
@@ -294,23 +374,64 @@
 			}
 		}
 
-		async function expandCascaderParentOption(option, nextLevelIndex, inputMode) {
+		async function expandCascaderParentOption(option, nextLevelIndex, inputMode, expectedNextLabel = '') {
 			if (!(option instanceof HTMLElement)) return false
+			const beforeSignature = readCascaderLevelSignature(nextLevelIndex)
 			await hoverElement(option, inputMode)
-			if (await waitForCascaderMenuLevel(nextLevelIndex, inputMode)) return true
+			if (await waitForCascaderNextLevelRefresh(option, nextLevelIndex, beforeSignature, expectedNextLabel, inputMode)) return true
 
 			const expandTarget = resolveCascaderExpandTarget(option)
 			if (expandTarget) {
 				await dispatchCascaderElementClick(expandTarget, inputMode)
-				if (await waitForCascaderMenuLevel(nextLevelIndex, inputMode)) return true
+				if (await waitForCascaderNextLevelRefresh(option, nextLevelIndex, beforeSignature, expectedNextLabel, inputMode)) return true
 			}
 
 			await dispatchCascaderElementClick(option, inputMode, { rightEdge: true })
-			if (await waitForCascaderMenuLevel(nextLevelIndex, inputMode)) return true
+			if (await waitForCascaderNextLevelRefresh(option, nextLevelIndex, beforeSignature, expectedNextLabel, inputMode)) return true
 
 			await hoverElement(option, inputMode)
 			await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 120)
-			return !!(await waitForCascaderMenuLevel(nextLevelIndex, inputMode))
+			return await waitForCascaderNextLevelRefresh(option, nextLevelIndex, beforeSignature, expectedNextLabel, inputMode)
+		}
+
+		async function waitForCascaderNextLevelRefresh(option, nextLevelIndex, previousSignature, expectedNextLabel, inputMode) {
+			const hasExpectedNextLabel = !!String(expectedNextLabel || '').trim()
+			const deadline = Date.now() + (inputMode === 'realistic' ? 1500 : 1000)
+			let sawMenu = false
+			let expandedAfterDelay = false
+			const startedAt = Date.now()
+			while (Date.now() <= deadline) {
+				const menu = await waitForCascaderMenuLevel(nextLevelIndex, inputMode)
+				if (menu) sawMenu = true
+				const signature = readCascaderLevelSignature(nextLevelIndex)
+				if (signature && (!previousSignature || signature !== previousSignature)) return true
+				if (
+					sawMenu &&
+					cascaderParentLooksExpanded(option) &&
+					Date.now() - startedAt >= (hasExpectedNextLabel ? 260 : 80)
+				) {
+					expandedAfterDelay = true
+					if (!previousSignature || !hasExpectedNextLabel) return true
+				}
+				await sleep(inputMode === 'realistic' ? randomBetween(80, 140) : 80)
+			}
+			const finalSignature = readCascaderLevelSignature(nextLevelIndex)
+			if (finalSignature && (!previousSignature || finalSignature !== previousSignature)) return true
+			return sawMenu && expandedAfterDelay
+		}
+
+		function readCascaderLevelSignature(levelIndex) {
+			return typeof getCascaderLevelSignature === 'function'
+				? String(getCascaderLevelSignature(levelIndex) || '')
+				: ''
+		}
+
+		function cascaderParentLooksExpanded(option) {
+			if (!(option instanceof HTMLElement)) return false
+			const attr = String(option.getAttribute('aria-expanded') || '').toLowerCase()
+			if (attr === 'true') return true
+			const cls = String(option.className || '')
+			return /(^|\s|--|__|-)(active|selected|expanded|checked|in-active|is-active|is-expanded)(\s|$)/i.test(cls)
 		}
 
 		function resolveCascaderExpandTarget(option) {
@@ -540,6 +661,46 @@
 			}
 		}
 
+		async function maybeCompleteDateRangeSelection({ field, inputMode, dateSelectionTexts, firstOption }) {
+			if (!Array.isArray(dateSelectionTexts) || dateSelectionTexts.length < 2) return ''
+			const secondText = dateSelectionTexts[1]
+			if (!secondText || secondText === dateSelectionTexts[0]) return ''
+			await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 100)
+			const scoped = field instanceof HTMLElement ? { field, openedByField: true } : {}
+			const secondOption = await waitForVisibleOption(secondText, {
+				...scoped,
+				selectableOnly: false,
+				timeoutMs: 1400,
+			}) || await findDropdownOptionByScrolling(secondText, {
+				...scoped,
+				selectableOnly: false,
+				timeoutMs: 2200,
+			})
+			if (!(secondOption instanceof HTMLElement) || secondOption === firstOption) return ''
+			await humanLikeClick(secondOption, null, inputMode)
+			await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 100)
+			return getVisibleOptionLabel(secondOption) || secondText
+		}
+
+		function parseDateSelectionRequest(value) {
+			const text = String(value || '')
+			const matches = []
+			const seen = new Set()
+			const pattern = /(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})/g
+			for (const match of text.matchAll(pattern)) {
+				const normalized = `${match[1]}-${pad2(match[2])}-${pad2(match[3])}`
+				if (seen.has(normalized)) continue
+				seen.add(normalized)
+				matches.push(normalized)
+				if (matches.length >= 2) break
+			}
+			return matches
+		}
+
+		function pad2(value) {
+			return String(Number(value)).padStart(2, '0')
+		}
+
 		function readDropdownSelectionState(field, option) {
 			if (field instanceof HTMLElement) return getElementInteractionState(field)
 			if (option instanceof HTMLElement && option.isConnected) return getElementInteractionState(option)
@@ -551,12 +712,12 @@
 			return getElementInteractionState(option)
 		}
 
-		async function waitForVisibleOptionLabels(field, inputMode, limit = 16) {
+		async function waitForVisibleOptionLabels(field, inputMode, limit = 16, options = {}) {
 			const timeoutMs = inputMode === 'realistic' ? 1600 : 1000
 			const deadline = Date.now() + timeoutMs
 			let labels = []
 			while (Date.now() <= deadline) {
-				labels = listVisibleOptionLabels(limit, { field })
+				labels = listVisibleOptionLabels(limit, { field, ...(options || {}) })
 				if (labels.length) return labels
 				await sleep(120)
 			}
@@ -592,16 +753,16 @@
 			return createOutcome(OUTCOME_KIND.NONE)
 		}
 
-		function buildDropdownFailureResult({ index, requestedText, visibleOptions, reason, source }) {
+		function buildDropdownFailureResult({ index, requestedText, visibleOptions, reason, source, candidateLabel, emptyCandidateText, advice }) {
 			return buildSelectionFailureResult({
 				index,
 				requestedText,
 				visibleOptions,
 				reason,
 				source,
-				candidateLabel: '当前字段候选',
-				emptyCandidateText: '当前字段范围内没有检测到可见候选。',
-				advice: buildDropdownFailureAdvice(index, visibleOptions),
+				candidateLabel: candidateLabel || '当前字段候选',
+				emptyCandidateText: emptyCandidateText || '当前字段范围内没有检测到可见候选。',
+				advice: advice || buildDropdownFailureAdvice(index, visibleOptions),
 			})
 		}
 
@@ -646,6 +807,7 @@
 						reason,
 						requestedText: String(requestedText || ''),
 						visibleOptions: options,
+						source: String(source || ''),
 					}),
 				},
 			}

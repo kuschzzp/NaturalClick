@@ -1,6 +1,6 @@
 # Runtime Configuration And Diagnostics
 
-This guide documents NaturalClick Agent 0.4.51 runtime settings, observation compaction, model streaming traces, and common troubleshooting workflows.
+This guide documents NaturalClick Agent 0.5.1 runtime settings, observation compaction, model streaming traces, and common troubleshooting workflows.
 
 ## Where Settings Live
 

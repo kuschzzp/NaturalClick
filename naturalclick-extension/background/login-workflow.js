@@ -19,7 +19,12 @@
 				'当前页面显示登录表单，先填写任务中提供的账号。',
 				'填写登录账号。',
 				'input_text',
-				{ index: Number(usernameField.index), text: credentials.username },
+				{
+					index: Number(usernameField.index),
+					text: credentials.username,
+					target_label: getLoginFieldLabel(usernameField, '登录账号'),
+					workflow_field_label: getLoginFieldLabel(usernameField, '登录账号'),
+				},
 				'fill_username'
 			)
 		}
@@ -29,7 +34,12 @@
 				'登录账号已填写或无需填写，继续填写任务中提供的密码。',
 				'填写登录密码。',
 				'input_text',
-				{ index: Number(passwordField.index), text: credentials.password },
+				{
+					index: Number(passwordField.index),
+					text: credentials.password,
+					target_label: getLoginFieldLabel(passwordField, '登录密码'),
+					workflow_field_label: getLoginFieldLabel(passwordField, '登录密码'),
+				},
 				'fill_password'
 			)
 		}
@@ -196,15 +206,65 @@
 			form?.container,
 			form?.region,
 		].join(' '))
-		if (/(新增|新建|创建|添加|编辑|修改|弹层|dialog|modal|drawer)/i.test(formText)) return true
-		const fieldText = normalizeText((Array.isArray(fields) ? fields : []).map((field) => [
+		if (/(新增|新建|创建|添加|编辑|修改|注册|弹层|dialog|modal|drawer|create|edit|register|signup|sign-up)/i.test(formText)) return true
+		const visibleFields = (Array.isArray(fields) ? fields : []).filter((field) => Number.isFinite(Number(field?.index)))
+		if (!findCredentialField(visibleFields, 'username') || !findCredentialField(visibleFields, 'password')) return false
+		if (visibleFields.some((field) => isPasswordConfirmationField(field))) return true
+		const nonLoginFields = visibleFields.filter((field) => isNonLoginFormField(field))
+		return nonLoginFields.length >= 2
+	}
+
+	function isPasswordConfirmationField(field) {
+		const text = getFieldSemanticText(field)
+		return /(confirm|confirmation|repeat|again|确认|重复|再次).*(password|pwd|密码)|(password|pwd|密码).*(confirm|confirmation|repeat|again|确认|重复|再次)/i.test(text)
+	}
+
+	function isNonLoginFormField(field) {
+		if (!field || !Number.isFinite(Number(field.index))) return false
+		if (findCredentialField([field], 'username') || findCredentialField([field], 'password')) return false
+		if (isLoginAuxiliaryField(field)) return false
+		if (isPassiveOrButtonField(field)) return false
+		return isEditableOrSelectableField(field)
+	}
+
+	function isLoginAuxiliaryField(field) {
+		const text = getFieldSemanticText(field)
+		return /(captcha|verificationcode|verifycode|authcode|securitycode|otp|totp|mfa|2fa|remember|验证码|校验码|动态码|安全码|记住|自动登录|保持登录)/i.test(text)
+	}
+
+	function isPassiveOrButtonField(field) {
+		const text = normalizeText([
+			field?.role,
+			field?.type,
+			field?.kind,
+			field?.actionIntent,
+			field?.intent,
+		].join(' '))
+		return /(button|submit|reset|hidden|image|file|static|label|textnode)/i.test(text)
+	}
+
+	function isEditableOrSelectableField(field) {
+		const text = normalizeText([
+			field?.role,
+			field?.type,
+			field?.kind,
+			field?.fieldType,
+			field?.selectionControl,
+		].join(' '))
+		return /(textbox|input|textarea|combobox|select|dropdown|cascader|picker|radio|checkbox|switch|date|time|number|email|tel|url|search|text|password)/i.test(text)
+	}
+
+	function getFieldSemanticText(field) {
+		return normalizeText([
 			field?.fieldType,
 			field?.label,
 			field?.placeholder,
 			field?.aliases,
-		].join(' ')).join(' '))
-		if (/(confirm_password|确认密码|用户姓名|姓名|手机|电话|邮箱|性别|角色|岗位|部门|区域|地区|地址|平台|生日)/i.test(fieldText)) return true
-		return false
+			field?.type,
+			field?.role,
+			field?.kind,
+			field?.selectionControl,
+		].join(' '))
 	}
 
 	function isLikelyLoginContext(observation) {
@@ -228,6 +288,10 @@
 			if (kind === 'password') return /(password|pwd|密码)/i.test(text)
 			return /(username|account|user|账号|账户|用户名|登录名)/i.test(text)
 		}) || null
+	}
+
+	function getLoginFieldLabel(field, fallback) {
+		return String(field?.label || field?.placeholder || field?.name || fallback || '').trim() || fallback
 	}
 
 	function findLoginSubmitAction(observation) {

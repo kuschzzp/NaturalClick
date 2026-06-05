@@ -28,9 +28,17 @@
 				if (seenLineKeys.has(lineKey)) continue
 				seenLineKeys.add(lineKey)
 
-				selectorMap.set(idx, element)
-				indexedElements.push({ index: idx, element })
 				const snapshot = buildElementSnapshot(idx, element, tag, text, fieldSemantics)
+				selectorMap.set(idx, element)
+				indexedElements.push({
+					index: idx,
+					element,
+					snapshot,
+					hitState: snapshot.hitState,
+					hitRatio: snapshot.hitRatio,
+					hitPoints: snapshot.hitPoints,
+					hitBlocker: snapshot.hitBlocker,
+				})
 				snapshot.signature = buildElementSignature(snapshot)
 				snapshot.newSinceLastObservation = !previousElementSignatures.has(snapshot.signature)
 				elements.push(snapshot)
@@ -44,6 +52,7 @@
 			const options = buildOptionCandidates(elements)
 			const popups = buildPopupCandidates(elements)
 			const panels = buildPanelCandidates(elements)
+			const tables = collectTableSummaries()
 			const feedback = collectPageFeedbackMessages()
 			const candidateDiagnostics = buildCandidateDiagnostics(indexedElements)
 			const rawCandidates = lines
@@ -70,6 +79,7 @@
 				options,
 				popups,
 				panels,
+				tables,
 				feedback,
 				candidateDiagnostics,
 				elements,
@@ -82,6 +92,7 @@
 					options,
 					popups,
 					panels,
+					tables,
 					feedback,
 					candidateDiagnostics,
 					treeCandidates,
@@ -175,6 +186,10 @@
 			'.el-select-dropdown__item',
 			'.el-cascader',
 			'.el-date-editor',
+			'.el-date-table td.available',
+			'.el-date-table td.available span',
+			'.el-month-table td:not(.disabled)',
+			'.el-year-table td:not(.disabled)',
 			'.el-cascader-node',
 			'.el-cascader-node__label',
 			'.el-checkbox',
@@ -187,18 +202,24 @@
 			'.ant-cascader-picker',
 			'.ant-cascader-menu-item',
 			'.ant-picker',
+			'.ant-picker-cell:not(.ant-picker-cell-disabled)',
+			'.ant-picker-cell-inner',
 			'.ant-switch',
 			'.ant-checkbox-wrapper',
 			'.ant-radio-wrapper',
 			'.arco-select',
 			'.arco-select-option',
 			'.arco-picker',
+			'.arco-picker-cell:not(.arco-picker-cell-disabled)',
+			'.arco-picker-date',
 			'.arco-switch',
 			'.arco-checkbox',
 			'.n-base-selection',
 			'.n-tree-select',
 			'.n-base-select-option',
 			'.n-date-picker',
+			'.n-date-panel-date',
+			'.n-date-panel-month',
 			'.n-checkbox',
 			'.n-switch',
 			'.van-dropdown-menu',
@@ -208,11 +229,14 @@
 			'.van-switch',
 			'.layui-form-select',
 			'.layui-select-title',
+			'.layui-laydate-content td:not(.laydate-disabled)',
 			'.ivu-select',
 			'.ivu-select-selection',
 			'.ivu-date-picker',
+			'.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled)',
 			'.ivu-switch',
 			'.vxe-select',
+			'.vxe-date-picker--date td:not(.is--disabled)',
 			'.vxe-input',
 			'.q-select',
 			'.q-field',
@@ -254,7 +278,7 @@
 			if (!(node instanceof HTMLElement)) continue
 			const cls = String(node.className || '')
 			const text = getElementText(node)
-			const maybeButtonLikeClass = /(btn|button|login|register|signup|signin|forgot|submit|dropdown|select|tree-select|cascader|picker|date-editor|time-picker|input--suffix|checkbox|radio|switch)/i.test(cls)
+			const maybeButtonLikeClass = /(btn|button|login|register|signup|signin|forgot|submit|dropdown|select|tree-select|cascader|picker|date-editor|date-table|date-panel|picker-cell|calendar|time-picker|input--suffix|checkbox|radio|switch)/i.test(cls)
 			if (
 				maybeButtonLikeClass ||
 				hasPointerCursor(node) ||
@@ -309,10 +333,12 @@
 
 	function normalizeInteractiveElement(element) {
 		if (!(element instanceof HTMLElement)) return null
+		const dateCell = getDatePickerCellCandidate(element)
+		if (dateCell instanceof HTMLElement) return dateCell
 		const composite = getCompositeFieldContainer(element)
 		if (composite instanceof HTMLElement) return composite
 		const semantic = element.closest(
-			'button,a,input,textarea,select,summary,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[role="combobox"],[role="option"],[role="checkbox"],[role="radio"],[role="switch"],[aria-selected],[aria-checked],[aria-expanded],[aria-haspopup],[onclick],[contenteditable="true"],.el-select,.el-select-v2,.el-select__wrapper,.el-select__tags,.el-select__input,.el-input,.el-input--suffix,.el-input__suffix,.el-input__prefix,.el-select-dropdown__item,.el-cascader,.el-date-editor,.el-cascader-node,.el-checkbox,.el-radio,.el-switch,.el-tree-node__content,.ant-select,.ant-select-selector,.ant-tree-select,.ant-select-item-option,.ant-cascader-picker,.ant-cascader-menu-item,.ant-picker,.ant-switch,.ant-checkbox-wrapper,.ant-radio-wrapper,.arco-select,.arco-select-option,.arco-picker,.arco-switch,.n-base-selection,.n-tree-select,.n-base-select-option,.n-date-picker,.n-switch,.van-dropdown-menu,.van-dropdown-item,.van-field,.van-picker,.van-switch,.layui-form-select,.layui-select-title,.ivu-select,.ivu-select-selection,.ivu-date-picker,.ivu-switch,.vxe-select,.vxe-input,.q-select,.q-field,.avue-select,.avue-cascader,.avue-date,.avue-time'
+			'button,a,input,textarea,select,summary,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[role="combobox"],[role="option"],[role="checkbox"],[role="radio"],[role="switch"],[aria-selected],[aria-checked],[aria-expanded],[aria-haspopup],[onclick],[contenteditable="true"],.el-select,.el-select-v2,.el-select__wrapper,.el-select__tags,.el-select__input,.el-input,.el-input--suffix,.el-input__suffix,.el-input__prefix,.el-select-dropdown__item,.el-cascader,.el-date-editor,.el-date-table td.available,.el-month-table td:not(.disabled),.el-year-table td:not(.disabled),.el-cascader-node,.el-checkbox,.el-radio,.el-switch,.el-tree-node__content,.ant-select,.ant-select-selector,.ant-tree-select,.ant-select-item-option,.ant-cascader-picker,.ant-cascader-menu-item,.ant-picker,.ant-picker-cell:not(.ant-picker-cell-disabled),.ant-picker-cell-inner,.ant-switch,.ant-checkbox-wrapper,.ant-radio-wrapper,.arco-select,.arco-select-option,.arco-picker,.arco-picker-cell:not(.arco-picker-cell-disabled),.arco-picker-date,.arco-switch,.n-base-selection,.n-tree-select,.n-base-select-option,.n-date-picker,.n-date-panel-date,.n-date-panel-month,.n-switch,.van-dropdown-menu,.van-dropdown-item,.van-field,.van-picker,.van-switch,.layui-form-select,.layui-select-title,.layui-laydate-content td:not(.laydate-disabled),.ivu-select,.ivu-select-selection,.ivu-date-picker,.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled),.ivu-switch,.vxe-select,.vxe-date-picker--date td:not(.is--disabled),.vxe-input,.q-select,.q-field,.avue-select,.avue-cascader,.avue-date,.avue-time'
 		)
 		return semantic instanceof HTMLElement ? semantic : element
 	}
@@ -330,6 +356,7 @@
 		if (tag === 'input') return true
 		if (element.isContentEditable) return true
 		if (isFieldLikeControl(element)) return true
+		if (isDatePickerOption(element)) return true
 
 		const role = String(element.getAttribute('role') || '').toLowerCase()
 		if (['button', 'link', 'menuitem', 'tab', 'combobox', 'option', 'checkbox', 'radio', 'switch'].includes(role)) {
@@ -353,7 +380,7 @@
 		const area = Math.max(0, rect.width) * Math.max(0, rect.height)
 		const maxArea = window.innerWidth * window.innerHeight * 0.26
 		if (isCommonCrudActionText(text) && isLikelyTextActionContext(element) && area > 8 && area <= 16000 && element.childElementCount <= 4) return true
-		const optionLikeByClass = /(el-select-dropdown__item|el-option|el-cascader-node|el-checkbox|el-radio|el-tree-node__content|ant-tree-node|arco-tree-node|n-tree-node|van-picker-column__item|layui-select-tips|ivu-select-item|vxe-select-option|q-item|dropdown-item|select-option|tree-option|cascader)/i.test(cls)
+		const optionLikeByClass = /(el-select-dropdown__item|el-option|el-cascader-node|el-checkbox|el-radio|el-tree-node__content|el-date-table|el-month-table|el-year-table|ant-picker-cell|ant-tree-node|arco-picker-cell|arco-tree-node|n-date-panel|n-tree-node|van-picker-column__item|van-calendar__day|layui-select-tips|layui-laydate|ivu-select-item|ivu-date-picker-cells-cell|vxe-select-option|vxe-date-picker|q-item|dropdown-item|select-option|tree-option|cascader)/i.test(cls)
 		if (optionLikeByClass && area > 8 && area <= maxArea) return true
 		const buttonLikeByClass = /(btn|button|login|register|signup|signin|forgot|submit)/i.test(cls)
 		if (buttonLikeByClass && text !== '(empty)' && area > 16 && area <= maxArea) return true
@@ -372,43 +399,176 @@
 			.sort((a, b) => getDomOrder(a, b))
 		const result = []
 		for (const candidate of sorted) {
-			const existingIndex = result.findIndex(
-				(item) => item !== candidate && (item.contains(candidate) || candidate.contains(item))
-			)
-			if (existingIndex < 0) {
-				result.push(candidate)
-				continue
-			}
-			const existing = result[existingIndex]
-			const relation =
-				existing.contains(candidate) && existing !== candidate
-					? 'existing-parent'
-					: candidate.contains(existing) && existing !== candidate
-						? 'candidate-parent'
-						: ''
-			if (relation === 'existing-parent') {
-				if (shouldKeepNestedCandidate(existing, candidate)) {
-					result.push(candidate)
-				} else if (candidateSpecificity(candidate) > candidateSpecificity(existing) + 1) {
-					result[existingIndex] = candidate
+			let blocked = false
+			const remove = new Set()
+			for (let i = 0; i < result.length; i += 1) {
+				const existing = result[i]
+				if (existing === candidate || !(existing.contains(candidate) || candidate.contains(existing))) continue
+				const parent = existing.contains(candidate) ? existing : candidate
+				const child = parent === existing ? candidate : existing
+				const preference = chooseNestedCandidatePreference(parent, child)
+				if (preference === 'keep-both') continue
+				if (preference === 'child') {
+					if (child === candidate) {
+						remove.add(i)
+					} else {
+						blocked = true
+						break
+					}
+					continue
 				}
-				continue
-			}
-			if (relation === 'candidate-parent') {
-				if (shouldKeepNestedCandidate(candidate, existing)) {
-					result.push(candidate)
-				} else if (candidateSpecificity(candidate) > candidateSpecificity(existing) + 1) {
-					result[existingIndex] = candidate
+				if (preference === 'parent') {
+					if (parent === candidate) {
+						remove.add(i)
+					} else {
+						blocked = true
+						break
+					}
 				}
 			}
+			if (blocked) continue
+			if (remove.size) {
+				for (const index of Array.from(remove).sort((a, b) => b - a)) {
+					result.splice(index, 1)
+				}
+			}
+			result.push(candidate)
 		}
 		return result
+	}
+
+	function chooseNestedCandidatePreference(parent, child) {
+		if (!(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return 'keep-both'
+		if (shouldPreferChildOverContainer(parent, child)) return 'child'
+		if (shouldKeepNestedCandidate(parent, child)) return 'keep-both'
+		return candidateSpecificity(child) > candidateSpecificity(parent) + 1 ? 'child' : 'parent'
+	}
+
+	function shouldPreferChildOverContainer(parent, child) {
+		if (!(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return false
+		if (shouldKeepNestedNavigationCandidate(parent, child)) return false
+		if (isFieldLikeControl(parent) && (isNativeTextInput(child) || isComboboxLike(child))) return false
+		if (isComboboxLike(parent) && isNativeTextInput(child)) return false
+		if (isAtomicInteractiveRoot(parent) && !hasMultipleIndependentInteractiveDescendants(parent)) return false
+		if (isEquivalentNestedOptionCandidate(parent, child)) return true
+		const childSpecificity = candidateSpecificity(child)
+		const parentSpecificity = candidateSpecificity(parent)
+		const childIsControl =
+			isNativeFormControl(child) ||
+			isOptionLike(child) ||
+			isSelectableControl(child) ||
+			isAtomicInteractiveRoot(child)
+		if (hasMultipleIndependentInteractiveDescendants(parent) && childIsControl) return true
+		if (isCollectionShellCandidate(parent) && childIsControl) return true
+		if (hasStrongNestedRectOverlap(parent, child) && childSpecificity > parentSpecificity) return true
+		const rects = getNestedCandidateRects(parent, child)
+		if (!rects) return false
+		if (rects.parentArea > 20000 && rects.childArea <= rects.parentArea * 0.72 && childSpecificity >= parentSpecificity) {
+			return true
+		}
+		return false
+	}
+
+	function isAtomicInteractiveRoot(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const tag = element.tagName.toLowerCase()
+		if (['a', 'button', 'summary', 'input', 'textarea', 'select'].includes(tag)) return true
+		const role = String(element.getAttribute('role') || '').toLowerCase()
+		if (['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(role)) return true
+		return element.hasAttribute('onclick') && !isCollectionShellCandidate(element)
+	}
+
+	function isCollectionShellCandidate(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const role = String(element.getAttribute('role') || '').toLowerCase()
+		if (['listbox', 'menu', 'tree', 'grid', 'rowgroup', 'toolbar'].includes(role)) return true
+		const cls = String(element.className || '')
+		if (/(popup|popover|dropdown|panel|menu|listbox|calendar|picker|date-table|table|toolbar|operation|actions|container|wrapper)/i.test(cls)) {
+			return hasMultipleIndependentInteractiveDescendants(element)
+		}
+		return false
+	}
+
+	function hasMultipleIndependentInteractiveDescendants(element) {
+		return countIndependentInteractiveDescendants(element, 2) >= 2
+	}
+
+	function countIndependentInteractiveDescendants(element, limit) {
+		if (!(element instanceof HTMLElement)) return 0
+		const selector = [
+			'a[href]',
+			'button',
+			'input',
+			'textarea',
+			'select',
+			'[role="button"]',
+			'[role="link"]',
+			'[role="menuitem"]',
+			'[role="tab"]',
+			'[role="option"]',
+			'[role="checkbox"]',
+			'[role="radio"]',
+			'[role="switch"]',
+			'[aria-selected]',
+			'[aria-checked]',
+			'.el-select-dropdown__item',
+			'.el-date-table td.available',
+			'.el-month-table td:not(.disabled)',
+			'.el-year-table td:not(.disabled)',
+			'.ant-select-item-option',
+			'.ant-picker-cell:not(.ant-picker-cell-disabled)',
+			'.arco-select-option',
+			'.arco-picker-cell:not(.arco-picker-cell-disabled)',
+			'.n-base-select-option',
+			'.n-date-panel-date',
+			'.van-picker-column__item',
+			'.layui-laydate-content td:not(.laydate-disabled)',
+			'.ivu-select-item',
+			'.vxe-select-option',
+		].join(',')
+		const seen = new Set()
+		let nodes = []
+		try {
+			nodes = Array.from(element.querySelectorAll(selector))
+		} catch (_) {
+			nodes = []
+		}
+		for (const node of nodes) {
+			if (!(node instanceof HTMLElement)) continue
+			const normalized = normalizeInteractiveElement(node) || node
+			if (!(normalized instanceof HTMLElement) || normalized === element || !element.contains(normalized)) continue
+			if (seen.has(normalized)) continue
+			if (!hasUsableRect(normalized)) continue
+			seen.add(normalized)
+			if (seen.size >= limit) break
+		}
+		return seen.size
+	}
+
+	function hasUsableRect(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const rect = element.getBoundingClientRect()
+		return rect.width >= 2 && rect.height >= 2
+	}
+
+	function getNestedCandidateRects(parent, child) {
+		try {
+			const parentRect = parent.getBoundingClientRect()
+			const childRect = child.getBoundingClientRect()
+			const parentArea = Math.max(0, parentRect.width) * Math.max(0, parentRect.height)
+			const childArea = Math.max(0, childRect.width) * Math.max(0, childRect.height)
+			if (!parentArea || !childArea) return null
+			return { parentRect, childRect, parentArea, childArea }
+		} catch (_) {
+			return null
+		}
 	}
 
 	function shouldKeepNestedCandidate(parent, child) {
 		if (!(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return true
 		if (isNativeFormControl(child) || isNativeFormControl(parent)) return true
 		if (shouldKeepNestedNavigationCandidate(parent, child)) return true
+		if (isEquivalentNestedOptionCandidate(parent, child)) return false
 		if (isOptionLike(child) || isSelectableControl(child)) return true
 		if (isOptionLike(parent) && isSelectableControl(child)) return true
 		if (isComboboxLike(parent) && isOptionLike(child)) return true
@@ -432,6 +592,7 @@
 		if (element.id || element.getAttribute('name')) score += 2
 		if (element.getAttribute('aria-label') || element.getAttribute('placeholder')) score += 2
 		if (element.getAttribute('data-testid') || element.getAttribute('data-test') || element.getAttribute('data-cy')) score += 2
+		if (isDatePickerOption(element)) score += 4
 		if (isSelectableControl(element) || isOptionLike(element) || isComboboxLike(element)) score += 3
 		if (hasPointerCursor(element)) score += 1
 		return score
@@ -502,6 +663,7 @@
 
 	function isOptionLike(element) {
 		if (!(element instanceof HTMLElement)) return false
+		if (isDatePickerOption(element)) return true
 		const role = String(element.getAttribute('role') || '').toLowerCase()
 		const cls = String(element.className || '')
 		return (
@@ -509,6 +671,173 @@
 			element.hasAttribute('aria-selected') ||
 			/(option|dropdown__item|cascader-node|menu-item|tree-node__content|tree-node|tree-option|van-picker-column__item|layui-select-tips|ivu-select-item|vxe-select-option|q-item)/i.test(cls)
 		)
+	}
+
+	function getDatePickerCellCandidate(element) {
+		if (!(element instanceof HTMLElement)) return null
+		const selector = [
+			'.el-date-table td.available',
+			'.el-month-table td:not(.disabled)',
+			'.el-year-table td:not(.disabled)',
+			'.ant-picker-cell:not(.ant-picker-cell-disabled)',
+			'.arco-picker-cell:not(.arco-picker-cell-disabled)',
+			'.n-date-panel-date',
+			'.n-date-panel-month',
+			'.van-calendar__day:not(.van-calendar__day--disabled)',
+			'.layui-laydate-content td:not(.laydate-disabled)',
+			'.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled)',
+			'.vxe-date-picker--date td:not(.is--disabled)',
+			'[role="gridcell"]:not([aria-disabled="true"])',
+		].join(',')
+		const cell = element.closest?.(selector)
+		return cell instanceof HTMLElement && !isDatePickerDisabled(cell) && isInsideDatePickerPopup(cell) ? cell : null
+	}
+
+	function isDatePickerOption(element) {
+		const cell = getDatePickerCellCandidate(element)
+		return cell instanceof HTMLElement && cell === element
+	}
+
+	function isInsideDatePickerPopup(element) {
+		if (!(element instanceof HTMLElement)) return false
+		return !!element.closest?.(
+			'.el-picker-panel,.ant-picker-dropdown,.arco-picker-container,.arco-trigger-popup,.n-date-panel,.van-calendar,.layui-laydate,.ivu-date-picker,.ivu-date-picker-transfer,.vxe-date-picker--panel,[class*="date-picker"],[class*="calendar"],[class*="picker-panel"]'
+		)
+	}
+
+	function isDatePickerDisabled(element) {
+		if (!(element instanceof HTMLElement)) return true
+		if (String(element.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return true
+		if (element.hasAttribute('disabled')) return true
+		const cls = String(element.className || '')
+		return /(^|\s|--|__|-)(disabled|is-disabled|unavailable|not-allowed)(\s|$)/i.test(cls)
+	}
+
+	function getDatePickerOptionLabel(element) {
+		const cell = getDatePickerCellCandidate(element)
+		if (!(cell instanceof HTMLElement)) return ''
+		const direct = readDateAttributeLabel(cell)
+		if (direct) return direct
+		const text = getElementText(cell)
+		const day = parseDayCellText(text)
+		if (!Number.isFinite(day)) return text && text !== '(empty)' ? shortText(text, 36) : ''
+		const context = inferDatePickerMonthContext(cell)
+		if (!context) return String(day)
+		const shifted = adjustDatePickerMonth(context.year, context.month, getDateCellMonthShift(cell))
+		return formatDateParts(shifted.year, shifted.month, day)
+	}
+
+	function readDateAttributeLabel(cell) {
+		if (!(cell instanceof HTMLElement)) return ''
+		const attrs = ['aria-label', 'title', 'data-date', 'data-day', 'data-value', 'data-time', 'datetime']
+		for (const attr of attrs) {
+			const parsed = parseDateText(cell.getAttribute(attr))
+			if (parsed) return parsed
+		}
+		return ''
+	}
+
+	function inferDatePickerMonthContext(cell) {
+		if (!(cell instanceof HTMLElement)) return null
+		const scope =
+			cell.closest?.(
+				'.el-date-range-picker__content,.el-date-picker__content,.el-picker-panel__content,.ant-picker-date-panel,.arco-picker-date-panel,.n-date-panel,.ivu-date-picker-cells,.layui-laydate-main,.vxe-date-picker--content'
+			) ||
+			cell.closest?.('.el-picker-panel,.ant-picker-panel,.arco-picker-panel,.layui-laydate,.ivu-date-picker,.vxe-date-picker--panel')
+		const headerText = readDatePickerHeaderText(scope, cell)
+		return parseYearMonthText(headerText)
+	}
+
+	function readDatePickerHeaderText(scope, cell) {
+		const localSelectors = [
+			'.el-date-range-picker__header div',
+			'.el-date-picker__header-label',
+			'.ant-picker-header-view',
+			'.arco-picker-header-value',
+			'.n-date-panel-month__text',
+			'.ivu-date-picker-header-label',
+			'.layui-laydate-header',
+			'.vxe-date-picker--header',
+		].join(',')
+		for (const root of [scope, cell?.closest?.('.el-picker-panel,.ant-picker-panel,.arco-picker-panel,.layui-laydate,.ivu-date-picker,.vxe-date-picker--panel')]) {
+			if (!(root instanceof HTMLElement)) continue
+			for (const node of Array.from(root.querySelectorAll?.(localSelectors) || [])) {
+				if (!(node instanceof HTMLElement)) continue
+				const parsed = parseYearMonthText(getElementText(node))
+				if (parsed) return getElementText(node)
+			}
+			const parsed = parseYearMonthText(getElementText(root))
+			if (parsed) return getElementText(root)
+		}
+		return ''
+	}
+
+	function parseYearMonthText(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return null
+		let match = text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月/)
+		if (!match) match = text.match(/(\d{4})\s*[-/]\s*(\d{1,2})(?!\s*[-/]\s*\d{1,2})/)
+		if (!match) match = text.match(/([A-Za-z]+)\s+(\d{4})/)
+		if (match && Number.isFinite(Number(match[1])) && Number.isFinite(Number(match[2]))) {
+			return { year: Number(match[1]), month: Number(match[2]) }
+		}
+		if (match) {
+			const month = parseEnglishMonth(match[1])
+			const year = Number(match[2])
+			if (month && Number.isFinite(year)) return { year, month }
+		}
+		return null
+	}
+
+	function parseEnglishMonth(value) {
+		const key = String(value || '').slice(0, 3).toLowerCase()
+		return ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(key) + 1 || 0
+	}
+
+	function parseDateText(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return ''
+		let match = text.match(/(\d{4})\s*[-/]\s*(\d{1,2})\s*[-/]\s*(\d{1,2})/)
+		if (!match) match = text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?/)
+		if (!match) return ''
+		return formatDateParts(Number(match[1]), Number(match[2]), Number(match[3]))
+	}
+
+	function parseDayCellText(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!/^\d{1,2}$/.test(text)) return NaN
+		const day = Number(text)
+		return day >= 1 && day <= 31 ? day : NaN
+	}
+
+	function getDateCellMonthShift(cell) {
+		const cls = String(cell?.className || '')
+		if (/(^|\s)(prev-month|is-prev|prev)(\s|$)/i.test(cls)) return -1
+		if (/(^|\s)(next-month|is-next|next)(\s|$)/i.test(cls)) return 1
+		return 0
+	}
+
+	function adjustDatePickerMonth(year, month, shift) {
+		let nextYear = Number(year)
+		let nextMonth = Number(month) + Number(shift || 0)
+		while (nextMonth < 1) {
+			nextMonth += 12
+			nextYear -= 1
+		}
+		while (nextMonth > 12) {
+			nextMonth -= 12
+			nextYear += 1
+		}
+		return { year: nextYear, month: nextMonth }
+	}
+
+	function formatDateParts(year, month, day) {
+		if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return ''
+		return `${year}-${pad2(month)}-${pad2(day)}`
+	}
+
+	function pad2(value) {
+		return String(Number(value)).padStart(2, '0')
 	}
 
 	function isSelectableControl(element) {
@@ -521,6 +850,72 @@
 			return type === 'checkbox' || type === 'radio'
 		}
 		return /(checkbox|radio|switch)/i.test(cls) || element.hasAttribute('aria-checked')
+	}
+
+	function isEquivalentNestedOptionCandidate(parent, child) {
+		if (!(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return false
+		if (isSelectableControl(child)) return false
+		const parentDateCell = getDatePickerCellCandidate(parent)
+		const childDateCell = getDatePickerCellCandidate(child)
+		if (parentDateCell instanceof HTMLElement && parentDateCell === childDateCell) return true
+		const parentOption = getClosestOptionCandidate(parent)
+		const childOption = getClosestOptionCandidate(child)
+		if (parentOption instanceof HTMLElement && parentOption === childOption) return true
+		if (!isOptionLike(parent) || !isOptionLike(child)) return false
+		const parentKey = normalizeCompactText(getElementText(parent))
+		const childKey = normalizeCompactText(getElementText(child))
+		if (!parentKey || !childKey) return false
+		if (!(parentKey === childKey || parentKey.includes(childKey) || childKey.includes(parentKey))) return false
+		return hasStrongNestedRectOverlap(parent, child)
+	}
+
+	function getClosestOptionCandidate(element) {
+		if (!(element instanceof HTMLElement)) return null
+		const selector = [
+			'[role="option"]',
+			'[role="menuitem"]',
+			'[role="treeitem"]',
+			'[aria-selected]',
+			'.el-select-dropdown__item',
+			'.el-option',
+			'.el-cascader-node',
+			'.el-tree-node__content',
+			'.ant-select-item-option',
+			'.ant-tree-node-content-wrapper',
+			'.arco-select-option',
+			'.arco-cascader-node',
+			'.n-base-select-option',
+			'.van-picker-column__item',
+			'.layui-select-tips',
+			'.ivu-select-item',
+			'.vxe-select-option',
+			'.q-item',
+			'.dropdown-item',
+			'.select-option',
+			'.tree-option',
+			'.cascader',
+		].join(',')
+		const option = element.closest?.(selector)
+		if (option instanceof HTMLElement && isOptionLike(option)) return option
+		return isOptionLike(element) ? element : null
+	}
+
+	function hasStrongNestedRectOverlap(parent, child) {
+		try {
+			const parentRect = parent.getBoundingClientRect()
+			const childRect = child.getBoundingClientRect()
+			const parentArea = Math.max(0, parentRect.width) * Math.max(0, parentRect.height)
+			const childArea = Math.max(0, childRect.width) * Math.max(0, childRect.height)
+			if (!parentArea || !childArea) return false
+			const left = Math.max(parentRect.left, childRect.left)
+			const right = Math.min(parentRect.right, childRect.right)
+			const top = Math.max(parentRect.top, childRect.top)
+			const bottom = Math.min(parentRect.bottom, childRect.bottom)
+			const overlap = Math.max(0, right - left) * Math.max(0, bottom - top)
+			return overlap >= childArea * 0.82 || childArea >= parentArea * 0.9
+		} catch (_) {
+			return false
+		}
 	}
 
 	function shouldKeepNestedNavigationCandidate(parent, child) {
@@ -551,7 +946,7 @@
 	}
 
 	function normalizeCompactText(value) {
-		return String(value || '').replace(/\s+/g, '').trim().toLowerCase()
+		return String(value || '').replace(/[\s_\-:：.。/\\|｜]+/g, '').trim().toLowerCase()
 	}
 
 	function isElementVisible(element) {
@@ -785,19 +1180,82 @@
 			if (node.querySelector('input,textarea,select,button,[role="button"]')) continue
 			const text = cleanLabelText(getElementText(node))
 			if (!text || text.length > 40 || isLikelyCounterText(text)) continue
+			if (!isLikelySpatialLabelNode(node, text)) continue
 			const rect = node.getBoundingClientRect()
 			if (rect.width < 2 || rect.height < 2) continue
 			const sameRow = rect.bottom >= targetRect.top - 8 && rect.top <= targetRect.bottom + 8
 			const above = rect.bottom <= targetRect.top && targetRect.top - rect.bottom <= 36
 			const left = rect.right <= targetRect.left + 8 && targetRect.left - rect.right <= 180
-			if (!((sameRow && left) || above)) continue
+			const alignedAbove = above && isSpatialAboveLabelAligned(rect, targetRect)
+			if (!((sameRow && left) || alignedAbove)) continue
+			if (sameRow && left && hasIntermediateSpatialFieldControl(root, element, rect, targetRect)) continue
 			const distance = Math.abs(rect.top - targetRect.top) + Math.max(0, targetRect.left - rect.right)
-			const score = (sameRow && left ? 0.78 : 0.7) - Math.min(distance / 1000, 0.2)
+			const score = (sameRow && left ? 0.78 : 0.62) - Math.min(distance / 1000, 0.2)
 			if (!best || score > best.confidence) {
 				best = { text, source: sameRow && left ? 'spatial-left' : 'spatial-above', confidence: score }
 			}
 		}
 		return best
+	}
+
+	function isLikelySpatialLabelNode(node, text) {
+		if (!(node instanceof HTMLElement)) return false
+		const tag = node.tagName.toLowerCase()
+		if (tag === 'label') return true
+		const cls = String(node.className || '')
+		if (/(^|[-_\s])(label|form-label|field-label|item-label|control-label)([-_\s]|$)|form-item__label/i.test(cls)) return true
+		const rawText = String(node.innerText || node.textContent || '').trim()
+		if (/[:：]\s*$/.test(rawText)) return true
+		if (isGenericFieldLabelText(text) || isCommonCrudActionText(text)) return false
+		return text.length <= 16 && /[\p{L}]/u.test(text)
+	}
+
+	function isSpatialAboveLabelAligned(labelRect, targetRect) {
+		const labelCenter = (labelRect.left + labelRect.right) / 2
+		const targetCenter = (targetRect.left + targetRect.right) / 2
+		const overlaps = labelRect.right >= targetRect.left - 12 && labelRect.left <= targetRect.right + 12
+		const leftAligned = Math.abs(labelRect.left - targetRect.left) <= 48
+		const centerAligned = Math.abs(labelCenter - targetCenter) <= Math.max(56, targetRect.width * 0.65)
+		return overlaps || leftAligned || centerAligned
+	}
+
+	function hasIntermediateSpatialFieldControl(root, target, labelRect, targetRect) {
+		if (!(root instanceof HTMLElement) || !(target instanceof HTMLElement)) return false
+		const selector = [
+			'input',
+			'textarea',
+			'select',
+			'[role="combobox"]',
+			'.el-select',
+			'.el-select__wrapper',
+			'.el-cascader',
+			'.el-date-editor',
+			'.ant-select',
+			'.ant-picker',
+			'.arco-select',
+			'.arco-picker',
+			'.n-base-selection',
+			'.n-date-picker',
+			'.van-field',
+			'.layui-form-select',
+			'.ivu-select',
+			'.vxe-input',
+			'.q-field',
+			'.avue-select',
+			'.avue-date',
+		].join(',')
+		for (const control of Array.from(root.querySelectorAll?.(selector) || []).slice(0, 160)) {
+			if (!(control instanceof HTMLElement)) continue
+			if (control === target || target.contains(control) || control.contains(target)) continue
+			if (!isElementVisible(control)) continue
+			const rect = control.getBoundingClientRect()
+			if (rect.width < 4 || rect.height < 4) continue
+			const centerX = (rect.left + rect.right) / 2
+			const sameRow = rect.bottom >= targetRect.top - 6 && rect.top <= targetRect.bottom + 6
+			if (!sameRow) continue
+			if (centerX > labelRect.right + 2 && centerX < targetRect.left - 2) return true
+		}
+		return false
 	}
 
 	function rankLabelCandidates(candidates) {
@@ -992,20 +1450,56 @@
 		)
 	}
 
-	function isLikelyRenderedOnTop(element) {
+	function getElementHitState(element) {
 		const rect = element.getBoundingClientRect()
-		const points = [
+		const points = getElementHitTestPoints(rect)
+		let tested = 0
+		let hits = 0
+		let blocker = ''
+		for (const p of points) {
+			if (p.x < 0 || p.y < 0 || p.x > window.innerWidth || p.y > window.innerHeight) continue
+			tested += 1
+			const hit = document.elementFromPoint(p.x, p.y)
+			if (!hit) continue
+			if (isComposedHitRelated(element, hit)) {
+				hits += 1
+			} else if (!blocker) {
+				blocker = summarizeHitBlocker(hit)
+			}
+		}
+		const ratio = tested ? hits / tested : 0
+		return {
+			state: hits <= 0 ? 'covered' : (hits >= tested ? 'hittable' : 'partial'),
+			hits,
+			tested,
+			ratio: Math.round(ratio * 100) / 100,
+			blocker,
+		}
+	}
+
+	function getElementHitTestPoints(rect) {
+		return [
 			{ x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.5 },
 			{ x: rect.left + rect.width * 0.25, y: rect.top + rect.height * 0.5 },
 			{ x: rect.left + rect.width * 0.75, y: rect.top + rect.height * 0.5 },
+			{ x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.25 },
+			{ x: rect.left + rect.width * 0.5, y: rect.top + rect.height * 0.75 },
 		]
-		for (const p of points) {
-			if (p.x < 0 || p.y < 0 || p.x > window.innerWidth || p.y > window.innerHeight) continue
-			const hit = document.elementFromPoint(p.x, p.y)
-			if (!hit) continue
-			if (isComposedHitRelated(element, hit)) return true
-		}
-		return false
+	}
+
+	function isLikelyRenderedOnTop(element) {
+		return getElementHitState(element).hits > 0
+	}
+
+	function summarizeHitBlocker(hit) {
+		if (!(hit instanceof Element)) return ''
+		const tag = String(hit.tagName || '').toLowerCase()
+		const role = String(hit.getAttribute?.('role') || '')
+		const cls = String(hit.getAttribute?.('class') || '')
+		const text = hit instanceof HTMLElement ? shortText(getElementText(hit), 28) : ''
+		return [tag, role ? `role=${role}` : '', text && text !== '(empty)' ? `text=${text}` : '', cls ? `class=${shortText(cls, 40)}` : '']
+			.filter(Boolean)
+			.join(' ')
 	}
 
 	function isComposedHitRelated(element, hit) {
@@ -1077,17 +1571,18 @@
 		return 'content'
 	}
 
-	function buildElementSnapshot(index, element, tag, text, fieldSemantics) {
+		function buildElementSnapshot(index, element, tag, text, fieldSemantics) {
 		const role = getElementRole(element, tag)
 		const type = String(element.getAttribute('type') || '').toLowerCase()
 		const semantic = fieldSemantics || emptyFieldSemantics()
-		const label = semantic.primary || getElementAccessibleName(element)
+		const label = getDatePickerOptionLabel(element) || semantic.primary || getElementAccessibleName(element)
 		const placeholder = String(element.getAttribute('placeholder') || '').trim()
 		const editable = isEditableElement(element)
 		const clickable = isClickableElement(element)
 		const fieldLike = editable || isFieldLikeControl(element)
 		const labelContext = `${label} ${(semantic.aliases || []).join(' ')}`
-		const fieldType = fieldLike ? inferFieldType({ label: labelContext, placeholder, text, type, role }) : ''
+		const inferredFieldType = fieldLike ? inferFieldType({ label: labelContext, placeholder, text, type, role }) : ''
+		const fieldType = fieldLike ? refineFieldTypeFromControl(element, inferredFieldType) : ''
 		const actionIntent =
 			!editable && clickable && !fieldType
 				? inferActionIntent({ label, text, role, type, element })
@@ -1097,11 +1592,13 @@
 		const selectionControl = getSelectionControlType(element)
 		const relationHints = getRelationHints(element)
 		const popupHints = getPopupContainerHints(element)
-		const navigationTarget = getNavigationTargetHint(element)
-		const validationState = readValidationState(element)
-		const snapshot = {
-			index,
-			stableId: '',
+			const navigationTarget = getNavigationTargetHint(element)
+				const validationState = readValidationState(element)
+				const hitState = getElementHitState(element)
+				const constraintHints = readFieldConstraintHints(element)
+				const snapshot = {
+				index,
+				stableId: '',
 			tag,
 			role,
 			type,
@@ -1125,14 +1622,26 @@
 			optionLabels: getNativeOptionLabels(element),
 			editable,
 			clickable,
-			required: isRequiredFieldControl(element),
-			invalid: validationState.invalid,
-			validationMessage: shortText(validationState.message, 120),
-			validationSource: validationState.source,
-			rect: getElementRect(element),
-			selectorHints: getSelectorHints(element),
-			domPath: shortText(getDomPath(element), 120),
-			confidence: computeElementConfidence({ element, editable, clickable, fieldType, actionIntent, label, text }),
+				required: isRequiredFieldControl(element),
+				maxLength: constraintHints.maxLength,
+				minLength: constraintHints.minLength,
+				min: constraintHints.min,
+				max: constraintHints.max,
+				step: constraintHints.step,
+				pattern: constraintHints.pattern,
+				inputMode: constraintHints.inputMode,
+				autocomplete: constraintHints.autocomplete,
+				invalid: validationState.invalid,
+				validationMessage: shortText(validationState.message, 120),
+					validationSource: validationState.source,
+				rect: getElementRect(element),
+				hitState: hitState.state,
+				hitRatio: hitState.ratio,
+				hitPoints: `${hitState.hits}/${hitState.tested || 0}`,
+				hitBlocker: shortText(hitState.blocker || '', 64),
+				selectorHints: getSelectorHints(element),
+				domPath: shortText(getDomPath(element), 120),
+				confidence: computeElementConfidence({ element, editable, clickable, fieldType, actionIntent, label, text }),
 		}
 		snapshot.controlKind = getObservedControlKind(snapshot)
 		snapshot.stableId = buildStableElementId(snapshot)
@@ -1154,10 +1663,42 @@
 				if (/[*＊]/.test(before)) return true
 			}
 		}
-		return false
-	}
+			return false
+		}
 
-	function readValidationState(element) {
+		function readFieldConstraintHints(element) {
+			if (!(element instanceof HTMLElement)) return {}
+			const target = resolveFieldConstraintTarget(element)
+			if (!(target instanceof HTMLElement)) return {}
+			return {
+				maxLength: readPositiveIntegerAttr(target, 'maxlength', target.maxLength),
+				minLength: readPositiveIntegerAttr(target, 'minlength', target.minLength),
+				min: shortText(target.getAttribute('min') || '', 32),
+				max: shortText(target.getAttribute('max') || '', 32),
+				step: shortText(target.getAttribute('step') || '', 32),
+				pattern: shortText(target.getAttribute('pattern') || '', 96),
+				inputMode: shortText(target.getAttribute('inputmode') || target.inputMode || '', 32),
+				autocomplete: shortText(target.getAttribute('autocomplete') || '', 48),
+			}
+		}
+
+		function resolveFieldConstraintTarget(element) {
+			if (!(element instanceof HTMLElement)) return null
+			if (/^(input|textarea)$/i.test(element.tagName)) return element
+			const nested = element.querySelector?.('input,textarea')
+			return nested instanceof HTMLElement ? nested : element
+		}
+
+		function readPositiveIntegerAttr(element, name, propertyValue) {
+			const raw = String(element?.getAttribute?.(name) || '').trim()
+			const attrNumber = Number(raw)
+			if (Number.isFinite(attrNumber) && attrNumber > 0) return Math.round(attrNumber)
+			const propNumber = Number(propertyValue)
+			if (Number.isFinite(propNumber) && propNumber > 0) return Math.round(propNumber)
+			return 0
+		}
+
+		function readValidationState(element) {
 		if (!(element instanceof HTMLElement)) return { invalid: false, message: '', source: '' }
 		const target = resolveValidationTarget(element) || element
 		const messages = []
@@ -1359,6 +1900,532 @@
 		return messages
 	}
 
+	function collectTableSummaries() {
+		const selector = [
+			'table',
+			'[role="table"]',
+			'[role="grid"]',
+			'.el-table',
+			'.ant-table',
+			'.arco-table',
+			'.n-data-table',
+			'.vxe-table',
+			'.ag-root',
+			'.avue-crud',
+			'.avue-crud__table',
+			'.el-table__inner-wrapper',
+			'.el-table__header-wrapper',
+			'.el-table__body-wrapper',
+			'[class*="data-table"]',
+			'[class*="data-grid"]',
+			'[class*="grid-table"]',
+			'[class*="table-list"]',
+			'[class*="list-table"]',
+			'[class*="table-wrapper"]',
+			'[class*="table-container"]',
+			'[class*="crud-table"]',
+		].join(',')
+		const roots = []
+		for (const node of querySelectorAllDeep(selector)) {
+			if (!(node instanceof HTMLElement)) continue
+			if (!isElementVisible(node)) continue
+			if (node.closest('#naturalclick-right-dock-host')) continue
+			const root = normalizeTableSummaryRoot(node)
+			if (!(root instanceof HTMLElement) || !isElementVisible(root)) continue
+			if (roots.some((item) => item.contains(root) || root.contains(item))) continue
+			const region = inferElementRegion(root)
+			if (region && !['content', 'dialog'].includes(region)) continue
+			roots.push(root)
+			if (roots.length >= 4) break
+		}
+		const summaries = []
+		for (const root of roots) {
+			const summary = buildTableSummary(root)
+			if (!summary) continue
+			summaries.push(summary)
+			if (summaries.length >= 4) break
+		}
+		if (summaries.length < 4) {
+			for (const summary of collectRecordListSummaries(roots)) {
+				summaries.push(summary)
+				if (summaries.length >= 4) break
+			}
+		}
+		return summaries
+	}
+
+	function normalizeTableSummaryRoot(node) {
+		if (!(node instanceof HTMLElement)) return node
+		const frameworkRoot = node.closest?.(
+			'.el-table,.ant-table,.arco-table,.n-data-table,.vxe-table,.ag-root,.avue-crud__table,.avue-crud,[class*="data-grid"],[class*="grid-table"],[class*="table-list"],[class*="list-table"],[class*="table-wrapper"],[class*="table-container"],[class*="crud-table"]'
+		)
+		if (frameworkRoot instanceof HTMLElement) return frameworkRoot
+		return node.closest?.('[role="table"],[role="grid"],[class*="data-table"],[class*="data-grid"],[class*="grid-table"],[class*="table-list"],[class*="list-table"],[class*="table-wrapper"],[class*="table-container"],[class*="crud-table"],table') || node
+	}
+
+	function buildTableSummary(root) {
+		const realHeaders = collectTableHeaders(root).slice(0, 12)
+		let rows = collectTableRows(root, realHeaders.length).slice(0, 8)
+		if (!rows.length) {
+			rows = collectVisualTableRows(root, realHeaders.length).slice(0, 8)
+		}
+		const headers = realHeaders.length ? realHeaders : inferFallbackTableHeaders(rows)
+		if (!headers.length || !rows.length) return null
+		return {
+			kind: realHeaders.length ? undefined : 'unlabeled-table',
+			region: inferElementRegion(root),
+			headers,
+			rows,
+			rect: getElementRect(root),
+		}
+	}
+
+	function inferFallbackTableHeaders(rows) {
+		const maxCells = Math.min(
+			12,
+			Math.max(0, ...((Array.isArray(rows) ? rows : [])
+				.map((row) => Array.isArray(row) ? row.filter(Boolean).length : 0)))
+		)
+		if (!maxCells) return []
+		return Array.from({ length: maxCells }, (_item, index) => `col${index + 1}`)
+	}
+
+	function collectVisualTableRows(root, headerCount) {
+		const body = getTableBodyRoot(root) || root
+		const selector = [
+			'.el-table__body-wrapper .el-table__cell',
+			'.el-table__body-wrapper .cell',
+			'.el-table__body .el-table__cell',
+			'.el-table__body .cell',
+			'.ant-table-body .ant-table-cell',
+			'.arco-table-body .arco-table-td',
+			'.n-data-table-td',
+			'.vxe-table--body .vxe-body--column',
+			'.ag-center-cols-container .ag-cell',
+			'[role="row"] [role="cell"]',
+			'[role="row"] [role="gridcell"]',
+			'[data-label]',
+			'[data-field]',
+			'[class*="body"] [class*="cell"]',
+			'[class*="row"] [class*="cell"]',
+			'[class*="row"] [class*="column"]',
+			'[class*="row"] [class*="col"]',
+			'[class*="row"] [class*="td"]',
+		].join(',')
+		const cells = []
+		const seenNodes = new Set()
+		for (const rawNode of Array.from(body.querySelectorAll?.(selector) || [])) {
+			if (!(rawNode instanceof HTMLElement) || !isElementVisible(rawNode)) continue
+			if (rawNode.closest('thead,.el-table__header-wrapper,.ant-table-header,.arco-table-header,.vxe-table--header,.ag-header,[role="columnheader"]')) continue
+			const cell = normalizeVisualTableCell(rawNode)
+			if (!(cell instanceof HTMLElement) || seenNodes.has(cell) || !isElementVisible(cell)) continue
+			seenNodes.add(cell)
+			const text = getTableCellText(cell)
+			if (!text || isTableActionOnlyText(text)) continue
+			const rect = cell.getBoundingClientRect()
+			if (rect.width < 4 || rect.height < 4) continue
+			cells.push({ cell, text, rect })
+			if (cells.length >= 160) break
+		}
+		return groupVisualTableCellsIntoRows(cells, headerCount)
+	}
+
+	function getTableBodyRoot(root) {
+		if (!(root instanceof HTMLElement)) return null
+		const selectors = [
+			'.el-table__body-wrapper',
+			'.ant-table-body',
+			'.arco-table-body',
+			'.n-data-table-base-table-body',
+			'.vxe-table--body-wrapper',
+			'.ag-center-cols-container',
+			'[role="rowgroup"]:not([aria-label*="header" i])',
+			'[class*="table-body"]',
+			'[class*="body-wrapper"]',
+		].join(',')
+		const found = root.querySelector?.(selectors)
+		return found instanceof HTMLElement ? found : null
+	}
+
+	function normalizeVisualTableCell(node) {
+		if (!(node instanceof HTMLElement)) return null
+		const cell = node.closest?.(
+			'td,th,[role="cell"],[role="gridcell"],.el-table__cell,.ant-table-cell,.arco-table-td,.n-data-table-td,.vxe-body--column,.ag-cell,[class*="table-cell"],[class*="grid-cell"]'
+		)
+		if (cell instanceof HTMLElement) return cell
+		return node
+	}
+
+	function groupVisualTableCellsIntoRows(cells, headerCount) {
+		const sorted = (Array.isArray(cells) ? cells : [])
+			.filter((item) => item?.rect)
+			.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left)
+		const bands = []
+		for (const item of sorted) {
+			const centerY = item.rect.top + item.rect.height / 2
+			let band = bands.find((entry) => Math.abs(entry.centerY - centerY) <= Math.max(8, Math.min(18, item.rect.height * 0.55)))
+			if (!band) {
+				band = { centerY, cells: [] }
+				bands.push(band)
+			}
+			band.cells.push(item)
+			band.centerY = (band.centerY * (band.cells.length - 1) + centerY) / band.cells.length
+		}
+		const rows = []
+		const seen = new Set()
+		for (const band of bands) {
+			const values = band.cells
+				.sort((a, b) => a.rect.left - b.rect.left || b.rect.width - a.rect.width)
+				.map((item) => item.text)
+				.filter(Boolean)
+			const deduped = []
+			for (const value of values) {
+				if (deduped[deduped.length - 1] === value) continue
+				deduped.push(value)
+				if (headerCount > 0 && deduped.length >= headerCount) break
+				if (deduped.length >= 12) break
+			}
+			if (deduped.filter(Boolean).length < 2) continue
+			const key = deduped.join('|')
+			if (seen.has(key)) continue
+			seen.add(key)
+			rows.push(deduped)
+			if (rows.length >= 8) break
+		}
+		return rows
+	}
+
+	function collectRecordListSummaries(existingRoots = []) {
+		const selector = [
+			'[role="list"]',
+			'[role="feed"]',
+			'.ant-list',
+			'.arco-list',
+			'.n-list',
+			'.el-card',
+			'[class*="record-list"]',
+			'[class*="data-list"]',
+			'[class*="card-list"]',
+			'[class*="list-panel"]',
+			'[class*="cards"]',
+		].join(',')
+		const roots = []
+		for (const node of querySelectorAllDeep(selector)) {
+			if (!(node instanceof HTMLElement)) continue
+			if (!isElementVisible(node)) continue
+			if (node.closest('#naturalclick-right-dock-host')) continue
+			if ((existingRoots || []).some((root) => root instanceof HTMLElement && (root.contains(node) || node.contains(root)))) continue
+			const region = inferElementRegion(node)
+			if (region && !['content', 'dialog'].includes(region)) continue
+			if (roots.some((root) => root.contains(node))) continue
+			roots.push(node)
+			if (roots.length >= 6) break
+		}
+		const summaries = []
+		for (const root of roots) {
+			const summary = buildRecordListSummary(root)
+			if (!summary) continue
+			summaries.push(summary)
+			if (summaries.length >= 4) break
+		}
+		return summaries
+	}
+
+	function buildRecordListSummary(root) {
+		const records = collectRecordListRecords(root).slice(0, 8)
+		if (records.length < 2) return null
+		const headers = collectRecordListHeaders(records).slice(0, 12)
+		if (headers.length < 2) return null
+		const rows = records
+			.map((pairs) => headers.map((header) => pairs[header] || ''))
+			.filter((row) => row.filter(Boolean).length >= 2)
+			.slice(0, 8)
+		if (rows.length < 2) return null
+		return {
+			kind: 'record-list',
+			region: inferElementRegion(root),
+			headers,
+			rows,
+			rect: getElementRect(root),
+		}
+	}
+
+	function collectRecordListRecords(root) {
+		const itemSelector = [
+			'[role="listitem"]',
+			'.ant-list-item',
+			'.arco-list-item',
+			'.n-list-item',
+			'.el-card',
+			'.ant-card',
+			'.arco-card',
+			'[class*="record-item"]',
+			'[class*="list-item"]',
+			'[class*="card-item"]',
+		].join(',')
+		const candidates = Array.from(root.querySelectorAll?.(itemSelector) || [])
+			.filter((item) => item instanceof HTMLElement && isElementVisible(item))
+			.filter((item, _index, all) => !all.some((other) => other !== item && other instanceof HTMLElement && other.contains(item)))
+		const items = candidates.length ? candidates : [root]
+		const records = []
+		const seen = new Set()
+		for (const item of items) {
+			const pairs = extractRecordListPairs(item)
+			const keys = Object.keys(pairs)
+			if (keys.length < 2) continue
+			const signature = keys.map((key) => `${key}:${pairs[key]}`).join('|')
+			if (seen.has(signature)) continue
+			seen.add(signature)
+			records.push(pairs)
+			if (records.length >= 8) break
+		}
+		return records
+	}
+
+	function collectRecordListHeaders(records) {
+		const counts = new Map()
+		for (const pairs of records) {
+			for (const key of Object.keys(pairs || {})) {
+				counts.set(key, (counts.get(key) || 0) + 1)
+			}
+		}
+		return Array.from(counts.entries())
+			.filter(([, count]) => count >= 2)
+			.sort((a, b) => b[1] - a[1] || a[0].length - b[0].length)
+			.map(([key]) => key)
+	}
+
+	function extractRecordListPairs(item) {
+		const pairs = {}
+		for (const pair of [
+			...extractRecordPairsFromDataAttributes(item),
+			...extractRecordPairsFromDefinitionList(item),
+			...extractRecordPairsFromLabelElements(item),
+			...extractRecordPairsFromTextLines(item),
+		]) {
+			const label = normalizeRecordPairLabel(pair.label)
+			const value = cleanTableCellText(pair.value)
+			if (!label || !value) continue
+			if (isTableActionOnlyText(label) || isTableActionOnlyText(value)) continue
+			if (!pairs[label]) pairs[label] = shortText(value, 64)
+			if (Object.keys(pairs).length >= 12) break
+		}
+		return pairs
+	}
+
+	function extractRecordPairsFromDataAttributes(item) {
+		const pairs = []
+		for (const node of Array.from(item.querySelectorAll?.('[data-label],[data-field],[aria-label]') || [])) {
+			if (!(node instanceof HTMLElement) || !isElementVisible(node)) continue
+			const label = node.getAttribute('data-label') || node.getAttribute('data-field') || ''
+			if (!label) continue
+			const value = getElementText(node)
+			pairs.push({ label, value })
+			if (pairs.length >= 12) break
+		}
+		return pairs
+	}
+
+	function extractRecordPairsFromDefinitionList(item) {
+		const pairs = []
+		for (const dt of Array.from(item.querySelectorAll?.('dt') || [])) {
+			if (!(dt instanceof HTMLElement) || !isElementVisible(dt)) continue
+			const dd = dt.nextElementSibling
+			if (!(dd instanceof HTMLElement) || dd.tagName.toLowerCase() !== 'dd' || !isElementVisible(dd)) continue
+			pairs.push({ label: getElementText(dt), value: getElementText(dd) })
+			if (pairs.length >= 12) break
+		}
+		return pairs
+	}
+
+	function extractRecordPairsFromLabelElements(item) {
+		const pairs = []
+		const selector = [
+			'[class*="label"]',
+			'[class*="field-label"]',
+			'[class*="item-label"]',
+			'[data-key]',
+		].join(',')
+		for (const labelNode of Array.from(item.querySelectorAll?.(selector) || [])) {
+			if (!(labelNode instanceof HTMLElement) || !isElementVisible(labelNode)) continue
+			const label = labelNode.getAttribute('data-key') || getElementText(labelNode)
+			if (!isRecordPairLabel(label)) continue
+			const value = readNearbyRecordValue(labelNode)
+			if (!value) continue
+			pairs.push({ label, value })
+			if (pairs.length >= 12) break
+		}
+		return pairs
+	}
+
+	function extractRecordPairsFromTextLines(item) {
+		const raw = String(item?.innerText || item?.textContent || '')
+		const pairs = []
+		for (const line of raw.split(/\n+/).map((part) => part.trim()).filter(Boolean).slice(0, 32)) {
+			for (const pair of parseRecordPairsFromLine(line)) {
+				pairs.push(pair)
+				if (pairs.length >= 12) return pairs
+			}
+		}
+		return pairs
+	}
+
+	function parseRecordPairsFromLine(line) {
+		const text = cleanTableCellText(line)
+		if (!text || text.length > 240) return []
+		const pairs = []
+		const compactPattern = /([^:：\s]{1,24})\s*[:：]\s*([^:：]{1,64}?)(?=\s+[^:：\s]{1,24}\s*[:：]|$)/g
+		let match = null
+		while ((match = compactPattern.exec(text))) {
+			pairs.push({ label: match[1], value: match[2] })
+			if (pairs.length >= 8) return pairs
+		}
+		if (pairs.length) return pairs
+		const splitMatch = text.match(/^(.{1,24}?)(?:\s{2,}|\t+)(.{1,80})$/)
+		return splitMatch ? [{ label: splitMatch[1], value: splitMatch[2] }] : []
+	}
+
+	function readNearbyRecordValue(labelNode) {
+		const explicit = labelNode.getAttribute('data-value')
+		if (explicit) return explicit
+		const sibling = labelNode.nextElementSibling
+		if (sibling instanceof HTMLElement && isElementVisible(sibling)) {
+			const text = getElementText(sibling)
+			if (text && !isRecordPairLabel(text)) return text
+		}
+		const parent = labelNode.parentElement
+		if (parent instanceof HTMLElement) {
+			const parentText = String(parent.innerText || parent.textContent || '').trim()
+			const labelText = getElementText(labelNode)
+			const value = parentText.replace(labelText, '').replace(/^[:：\s]+/, '').trim()
+			if (value && value.length <= 80) return value
+		}
+		return ''
+	}
+
+	function normalizeRecordPairLabel(value) {
+		const label = cleanTableCellText(value)
+			.replace(/[:：]+$/g, '')
+			.trim()
+		return isRecordPairLabel(label) ? shortText(label, 32) : ''
+	}
+
+	function isRecordPairLabel(value) {
+		const label = cleanTableCellText(value)
+		if (!label || label.length > 32) return false
+		if (/^\d+([.,]\d+)?$/.test(label)) return false
+		if (/^(操作|动作|更多|展开|收起|详情|查看|编辑|删除|保存|取消)$/i.test(label)) return false
+		return /[\p{L}\p{N}_-]/u.test(label)
+	}
+
+	function collectTableHeaders(root) {
+		const selectors = [
+			'thead th',
+			'.el-table th',
+			'.el-table__header th',
+			'.el-table__header-wrapper th',
+			'.el-table__header-wrapper .cell',
+			'.ant-table-thead th',
+			'.arco-table-th',
+			'.n-data-table-th',
+			'.vxe-header--column',
+			'.ag-header-cell',
+			'[role="columnheader"]',
+		].join(',')
+		return collectUniqueTableTexts(root, selectors, 16)
+	}
+
+	function collectTableRows(root, headerCount) {
+		const rowSelectors = [
+			'tbody tr',
+			'.el-table__body tr',
+			'.el-table__row',
+			'.el-table__body-wrapper tbody tr',
+			'.el-table__body-wrapper .el-table__row',
+			'.ant-table-tbody tr',
+			'.arco-table-tr',
+			'.n-data-table-tr',
+			'.vxe-body--row',
+			'.ag-center-cols-container [role="row"]',
+			'[role="row"]',
+		].join(',')
+		const rows = []
+		const seen = new Set()
+		for (const row of Array.from(root.querySelectorAll?.(rowSelectors) || [])) {
+			if (!(row instanceof HTMLElement) || !isElementVisible(row)) continue
+			if (row.closest('thead,[role="rowgroup"][aria-label*="header" i]')) continue
+			const cells = collectTableRowCells(row, headerCount)
+			if (!cells.length) continue
+			const key = cells.join('|')
+			if (seen.has(key)) continue
+			seen.add(key)
+			rows.push(cells)
+			if (rows.length >= 8) break
+		}
+		return rows
+	}
+
+	function collectTableRowCells(row, headerCount) {
+		const selectors = [
+			'td',
+			'th',
+			'.el-table__cell',
+			'.ant-table-cell',
+			'.arco-table-td',
+			'.n-data-table-td',
+			'.vxe-body--column',
+			'.ag-cell',
+			'[role="cell"]',
+			'[role="gridcell"]',
+		].join(',')
+		const cells = []
+		for (const cell of Array.from(row.querySelectorAll?.(selectors) || [])) {
+			if (!(cell instanceof HTMLElement) || !isElementVisible(cell)) continue
+			const text = getTableCellText(cell)
+			if (!text) continue
+			cells.push(text)
+			if (headerCount > 0 && cells.length >= headerCount) break
+			if (cells.length >= 12) break
+		}
+		return cells.filter((value) => !isTableActionOnlyText(value))
+	}
+
+	function collectUniqueTableTexts(root, selector, limit) {
+		const out = []
+		const seen = new Set()
+		for (const node of Array.from(root.querySelectorAll?.(selector) || [])) {
+			if (!(node instanceof HTMLElement) || !isElementVisible(node)) continue
+			const text = getTableCellText(node)
+			const key = normalizeTableText(text)
+			if (!key || seen.has(key)) continue
+			seen.add(key)
+			out.push(text)
+			if (out.length >= limit) break
+		}
+		return out
+	}
+
+	function getTableCellText(cell) {
+		if (!(cell instanceof HTMLElement)) return ''
+		const preferred = cell.querySelector?.('.cell,.ant-table-cell-content,.arco-table-cell,.n-data-table-td__content,.vxe-cell,.ag-cell-value')
+		const text = preferred instanceof HTMLElement ? getElementText(preferred) : getElementText(cell)
+		return shortText(cleanTableCellText(text), 64)
+	}
+
+	function cleanTableCellText(value) {
+		return String(value || '')
+			.replace(/\s+/g, ' ')
+			.replace(/^\s+|\s+$/g, '')
+	}
+
+	function normalizeTableText(value) {
+		return String(value || '').replace(/\s+/g, '').trim().toLowerCase()
+	}
+
+	function isTableActionOnlyText(value) {
+		return /^(详情|明细|查看|编辑|删除|移除|推送|保存|取消|操作|更多|展开|收起)$/i.test(normalizeTableText(value))
+	}
+
 	function inferFeedbackKind(text, element) {
 		const source = `${text} ${String(element?.className || '')}`.toLowerCase()
 		if (/成功|完成|success|saved|created|submitted/.test(source)) return 'success'
@@ -1373,7 +2440,7 @@
 		return kind && kind !== 'unknown' ? kind : ''
 	}
 
-	function formatElementLine(item) {
+		function formatElementLine(item) {
 		const attrs = []
 		if (item.stableId) attrs.push(`sid="${item.stableId}"`)
 		if (item.role) attrs.push(`role="${item.role}"`)
@@ -1399,13 +2466,14 @@
 		if (item.newSinceLastObservation) attrs.push('new="true"')
 		if (item.required) attrs.push('required="true"')
 		if (item.invalid) attrs.push('invalid="true"')
-		if (item.validationMessage) attrs.push(`error="${shortText(item.validationMessage, 80)}"`)
-		if (item.validationSource) attrs.push(`errorSource="${shortText(item.validationSource, 48)}"`)
-		attrs.push(`conf="${item.confidence}"`)
-		return `[${item.index}]<${item.tag} ${attrs.join(' ')}>${shortText(item.text, 80)}</${item.tag}>`
-	}
+			if (item.validationMessage) attrs.push(`error="${shortText(item.validationMessage, 80)}"`)
+			if (item.validationSource) attrs.push(`errorSource="${shortText(item.validationSource, 48)}"`)
+			if (item.hitState) attrs.push(`hit="${formatHitState(item)}"`)
+			attrs.push(`conf="${item.confidence}"`)
+			return `[${item.index}]<${item.tag} ${attrs.join(' ')}>${shortText(item.text, 80)}</${item.tag}>`
+		}
 
-	function formatObservationText({ forms, actions, options, popups, panels, feedback, candidateDiagnostics, treeCandidates, simplifiedDom, rawCandidates }) {
+	function formatObservationText({ forms, actions, options, popups, panels, tables, feedback, candidateDiagnostics, treeCandidates, simplifiedDom, rawCandidates }) {
 		const sections = []
 		if (Array.isArray(feedback) && feedback.length) {
 			sections.push('<feedback>')
@@ -1421,15 +2489,22 @@
 			}
 			sections.push('</panels>')
 		}
+		if (Array.isArray(tables) && tables.length) {
+			sections.push('<tables>')
+			for (const table of tables.slice(0, 4)) {
+				sections.push(formatTableLine(table))
+			}
+			sections.push('</tables>')
+		}
 		if (forms.length) {
 			sections.push('<forms>')
 			for (const form of forms) {
 				sections.push(`form ${form.id}: ${form.name}`)
-				for (const field of form.fields) {
-					sections.push(
-						`  field index=${field.index} region=${field.region || '-'} fieldType=${field.fieldType || 'unknown'} kind=${field.controlKind || '-'} label="${field.label || field.placeholder || field.text}" source=${field.labelSource || '-'} conf=${field.labelConfidence || '-'} aliases="${(field.aliases || []).join('|')}" container="${field.semanticContainer || '-'}" value=${field.valueState} type=${field.type || '-'} role=${field.role || '-'} control=${field.selectionControl || '-'} required=${field.required ? 'true' : 'false'} invalid=${field.invalid ? 'true' : 'false'} error="${field.validationMessage || ''}" options="${Array.isArray(field.optionLabels) ? field.optionLabels.join('|') : ''}" expanded=${field.expandedState || '-'}`
-					)
-				}
+					for (const field of form.fields) {
+						sections.push(
+							`  field index=${field.index} region=${field.region || '-'} rect=${formatObservationRect(field.rect)} hit=${formatHitState(field)} fieldType=${field.fieldType || 'unknown'} kind=${field.controlKind || '-'} label="${field.label || field.placeholder || field.text}" source=${field.labelSource || '-'} conf=${field.labelConfidence || '-'} aliases="${(field.aliases || []).join('|')}" container="${field.semanticContainer || '-'}" value=${field.valueState} type=${field.type || '-'} role=${field.role || '-'} control=${field.selectionControl || '-'} required=${field.required ? 'true' : 'false'} invalid=${field.invalid ? 'true' : 'false'} error="${field.validationMessage || ''}" options="${Array.isArray(field.optionLabels) ? field.optionLabels.join('|') : ''}" expanded=${field.expandedState || '-'}`
+						)
+					}
 			}
 			sections.push('</forms>')
 		}
@@ -1449,11 +2524,11 @@
 		}
 		if (actions.length) {
 			sections.push('<actions>')
-			for (const action of actions.slice(0, 60)) {
-				sections.push(
-					`  action index=${action.index} region=${action.region || '-'} rect=${formatObservationRect(action.rect)} intent=${action.actionIntent || 'unknown'} kind=${action.controlKind || '-'} label="${action.label || action.text}" role=${action.role || '-'} value=${action.valueState || 'unknown'} control=${action.selectionControl || '-'} expanded=${action.expandedState || '-'}`
-				)
-			}
+				for (const action of actions.slice(0, 60)) {
+					sections.push(
+						`  action index=${action.index} region=${action.region || '-'} rect=${formatObservationRect(action.rect)} hit=${formatHitState(action)} intent=${action.actionIntent || 'unknown'} kind=${action.controlKind || '-'} label="${action.label || action.text}" source=${action.labelSource || '-'} conf=${action.labelConfidence || '-'} aliases="${(action.aliases || []).join('|')}" role=${action.role || '-'} value=${action.valueState || 'unknown'} control=${action.selectionControl || '-'} expanded=${action.expandedState || '-'}`
+					)
+				}
 			sections.push('</actions>')
 		}
 		if (candidateDiagnostics && Number(candidateDiagnostics.textActionProbeCount || 0) > 0) {
@@ -1487,6 +2562,20 @@
 		return `${left},${top},${width}x${height}`
 	}
 
+	function formatHitState(item) {
+		const state = String(item?.hitState || '').trim() || 'unknown'
+		const points = String(item?.hitPoints || '').trim()
+		const ratio = Number(item?.hitRatio)
+		const ratioText = Number.isFinite(ratio) ? `:${ratio}` : ''
+		const pointText = points ? `(${points})` : ''
+		const blocker = item?.hitBlocker ? ` blocker=${formatHitBlockerText(item.hitBlocker)}` : ''
+		return `${state}${ratioText}${pointText}${blocker}`
+	}
+
+	function formatHitBlockerText(value) {
+		return shortText(String(value || '').replace(/["'<>]/g, '').replace(/\s+/g, '_'), 48)
+	}
+
 	function formatCandidateDiagnostics(candidateDiagnostics) {
 		const lines = [
 			'<candidate_diagnostics>',
@@ -1503,7 +2592,7 @@
 	}
 
 	function formatOptionLine(item, kind) {
-		return `  ${kind} index=${item.index} sid=${item.stableId || '-'} region=${item.region || '-'} label="${item.label || item.text || ''}" role=${item.role || '-'} value=${item.valueState || 'unknown'} kind=${item.controlKind || '-'} control=${item.selectionControl || '-'} expanded=${item.expandedState || '-'}${item.popupHints ? ` popup="${shortText(item.popupHints, 96)}"` : ''}`
+		return `  ${kind} index=${item.index} sid=${item.stableId || '-'} region=${item.region || '-'} rect=${formatObservationRect(item.rect)} hit=${formatHitState(item)} label="${item.label || item.text || ''}" role=${item.role || '-'} value=${item.valueState || 'unknown'} kind=${item.controlKind || '-'} control=${item.selectionControl || '-'} expanded=${item.expandedState || '-'}${item.popupHints ? ` popup="${shortText(item.popupHints, 96)}"` : ''}`
 	}
 
 	function formatPanelLine(panel) {
@@ -1514,6 +2603,24 @@
 			? ` triggerIndex=${panel.triggerIndex} triggerLabel="${shortText(panel.triggerLabel || '', 32)}"`
 			: ''
 		return `  panel kind=${panel.kind || 'unknown'} region=${panel.region || '-'} state=${panel.state || 'unknown'} label="${shortText(panel.label || '', 40)}"${trigger}${fields}`
+	}
+
+	function formatTableLine(table) {
+		const headers = Array.isArray(table?.headers) ? table.headers : []
+		const rows = Array.isArray(table?.rows) ? table.rows : []
+		const kind = table?.kind ? ` kind=${table.kind}` : ''
+		const lines = [
+			`  table${kind} region=${table?.region || '-'} rect=${formatObservationRect(table?.rect)} headers="${shortText(headers.join('|'), 160)}"`,
+		]
+		for (let rowIndex = 0; rowIndex < rows.length && rowIndex < 6; rowIndex += 1) {
+			const cells = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : []
+			const pairs = cells.map((cell, cellIndex) => {
+				const header = headers[cellIndex] || `col${cellIndex + 1}`
+				return `${header}=${cell}`
+			})
+			lines.push(`    row ${rowIndex + 1}: ${shortText(pairs.join(' | '), 240)}`)
+		}
+		return lines.join('\n')
 	}
 
 	function buildSimplifiedDom(elements) {
@@ -1527,8 +2634,10 @@
 				item.role ? `role="${item.role}"` : '',
 				item.fieldType ? `fieldType="${item.fieldType}"` : '',
 				item.actionIntent ? `intent="${item.actionIntent}"` : '',
-				item.region ? `region="${item.region}"` : '',
-				item.labelSource ? `labelSource="${item.labelSource}"` : '',
+					item.region ? `region="${item.region}"` : '',
+					item.rect ? `rect="${formatObservationRect(item.rect)}"` : '',
+					item.hitState ? `hit="${formatHitState(item)}"` : '',
+					item.labelSource ? `labelSource="${item.labelSource}"` : '',
 				item.labelConfidence ? `labelConf="${item.labelConfidence}"` : '',
 				Array.isArray(item.aliases) && item.aliases.length ? `aliases="${shortText(item.aliases.join('|'), 64)}"` : '',
 				item.semanticContainer ? `container="${shortText(item.semanticContainer, 32)}"` : '',
@@ -1539,6 +2648,7 @@
 				item.expandedState ? `expanded="${item.expandedState}"` : '',
 				item.stateHints ? `state="${shortText(item.stateHints, 32)}"` : '',
 				item.relationHints ? `rel="${shortText(item.relationHints, 48)}"` : '',
+				item.popupHints ? `popup="${shortText(item.popupHints, 96)}"` : '',
 				item.newSinceLastObservation ? 'new="true"' : '',
 			].filter(Boolean)
 			const label = shortText(item.label || item.placeholder || item.text || '', 64)
@@ -1548,6 +2658,7 @@
 
 	function getSemanticTagName(item) {
 		if (item.fieldType) return 'field'
+		if (item.selectionControl === 'date-option') return 'date-option'
 		if (item.selectionControl === 'cascader-parent') return 'cascader-parent'
 		if (item.selectionControl === 'cascader-leaf') return 'cascader-option'
 		if (item.selectionControl === 'checkbox') return 'checkbox'
@@ -1571,8 +2682,9 @@
 			if (isLikelyScrollableItem(item)) flags.push('scrollable')
 			if (item.selectionControl) flags.push(item.selectionControl)
 			if (Array.isArray(item.optionLabels) && item.optionLabels.length) flags.push(`options=${item.optionLabels.length}`)
-			if (item.expandedState) flags.push(item.expandedState)
-			const role = item.fieldType || item.actionIntent || item.role || item.tag
+				if (item.expandedState) flags.push(item.expandedState)
+				if (item.hitState && item.hitState !== 'hittable') flags.push(`hit=${item.hitState}`)
+				const role = item.fieldType || item.actionIntent || item.role || item.tag
 			const label = item.label || item.placeholder || item.text || ''
 			const source = item.labelSource ? ` source=${item.labelSource}` : ''
 			const aliases = Array.isArray(item.aliases) && item.aliases.length
@@ -1581,8 +2693,8 @@
 			const indent = '  '.repeat(depth)
 			return {
 				index: item.index,
-				line: `${indent}${marker}[${item.index}] ${role} region=${item.region || '-'} label="${shortText(label, 44)}"${source}${aliases} value=${item.valueState || 'unknown'} rect=${item.rect.left},${item.rect.top},${item.rect.width}x${item.rect.height}${flags.length ? ` flags=${flags.join('|')}` : ''}`,
-			}
+					line: `${indent}${marker}[${item.index}] ${role} region=${item.region || '-'} label="${shortText(label, 44)}"${source}${aliases} value=${item.valueState || 'unknown'} rect=${item.rect.left},${item.rect.top},${item.rect.width}x${item.rect.height} hit=${formatHitState(item)}${flags.length ? ` flags=${flags.join('|')}` : ''}`,
+				}
 		})
 	}
 
@@ -1607,7 +2719,8 @@
 	}
 
 	function isLikelyScrollableItem(item) {
-		return item.rect.width > 220 && item.rect.height > 80 && /select|region|department|page_form|unknown/.test(String(item.fieldType || item.actionIntent || ''))
+		const descriptor = `${item.fieldType || ''} ${item.actionIntent || ''} ${item.selectionControl || ''} ${item.controlKind || ''} ${item.role || ''}`
+		return item.rect.width > 220 && item.rect.height > 80 && /select|dropdown|cascader|combobox|page_form|unknown/i.test(descriptor)
 	}
 
 	function buildElementSignature(item) {
@@ -1862,16 +2975,10 @@
 
 	function inferFieldType({ label, placeholder, text, type, role }) {
 		const haystack = `${label} ${placeholder} ${text}`.toLowerCase()
-		if (/所属部门|部门|组织|机构|dept|department|org/.test(haystack)) return 'department'
-		if (/所属岗位|岗位|职位|职务|position|post|job/.test(haystack)) return 'position'
-		if (/所属角色|角色|role/.test(haystack)) return 'role'
-		if (/用户平台|平台|platform|client/.test(haystack)) return 'platform'
-		if (/所属区域|区域|地区|省|市|区|县|region|area|province|city|district/.test(haystack)) return 'region'
-		if (/性别|gender|sex/.test(haystack)) return 'gender'
-		if (/状态|启用|禁用|status|state/.test(haystack)) return 'status'
-		if (/类型|分类|类别|category|type/.test(haystack)) return 'category'
-		if (/生日|出生日期|日期|时间|date|birthday|time/.test(haystack)) return 'date'
 		if (role === 'combobox' || type === 'select-one' || type === 'select-multiple') return 'select'
+		const temporalType = inferTemporalFieldTypeFromText(haystack)
+		if (temporalType) return temporalType
+		if (/生日|出生日期|日期|时间|date|birthday|time/.test(haystack)) return 'date'
 		if (/确认密码|重复密码|再次输入密码|confirm\s*password|password\s*confirm|re-?enter/.test(haystack)) {
 			return 'confirm_password'
 		}
@@ -1885,6 +2992,101 @@
 		if (/姓名|真实姓名|name/.test(haystack)) return 'name'
 		if (/搜索|search/.test(haystack) || type === 'search') return 'search'
 		return ''
+	}
+
+	function refineFieldTypeFromControl(element, fieldType) {
+		if (!(element instanceof HTMLElement)) return fieldType || ''
+		const temporalType = inferTemporalFieldTypeFromControl(element, fieldType)
+		if (temporalType) return temporalType
+		if (isDateRangeControl(element)) return 'daterange'
+		if (isDatePickerControl(element) && (!fieldType || fieldType === 'select')) return 'date'
+		return fieldType || ''
+	}
+
+	function inferTemporalFieldTypeFromControl(element, fieldType) {
+		if (!(element instanceof HTMLElement)) return ''
+		const inputs = Array.from(element.querySelectorAll?.('input') || [])
+			.filter((node) => node instanceof HTMLInputElement)
+			.slice(0, 4)
+		const primary = element instanceof HTMLInputElement ? element : inputs[0]
+		const descriptor = [
+			fieldType,
+			element.className,
+			element.getAttribute?.('type'),
+			element.getAttribute?.('data-type'),
+			element.getAttribute?.('data-field-type'),
+			element.getAttribute?.('aria-label'),
+			element.getAttribute?.('placeholder'),
+			primary?.className,
+			primary?.getAttribute?.('type'),
+			primary?.getAttribute?.('data-type'),
+			primary?.getAttribute?.('data-field-type'),
+			primary?.getAttribute?.('aria-label'),
+			primary?.getAttribute?.('placeholder'),
+			...inputs.map((input) => input.getAttribute?.('placeholder')),
+		].map((value) => String(value || '')).join(' ').toLowerCase()
+		return inferTemporalFieldTypeFromText(descriptor)
+	}
+
+	function inferTemporalFieldTypeFromText(value) {
+		const text = String(value || '').toLowerCase()
+		const hasRangeSignal = /(range|区间|范围|起止|开始.{0,24}结束|start.{0,24}end)/i.test(text)
+		const hasDateSignal = /daterange|date[-_\s]?range|range[-_\s]?date|(^|[^a-z])date([^a-z]|$)|日期|日历|calendar|birthday|出生日期/i.test(text)
+		const hasDateTimeSignal = /datetimerange|date[-_\s]?time[-_\s]?range|datetime.*range|datetime|date[-_\s]?time|日期.*时间|时间.*日期/i.test(text)
+		const hasTimeSignal = /timerange|time[-_\s]?range|range[-_\s]?time|(^|[^a-z])time([^a-z]|$)|时间/i.test(text)
+		const hasMonthSignal = /monthrange|month[-_\s]?range|range[-_\s]?month|(^|[^a-z])month([^a-z]|$)|月份|按月/i.test(text)
+		const hasYearSignal = /yearrange|year[-_\s]?range|range[-_\s]?year|(^|[^a-z])year([^a-z]|$)|年份|年度|按年/i.test(text)
+		const hasWeekSignal = /weekrange|week[-_\s]?range|range[-_\s]?week|(^|[^a-z])week([^a-z]|$)|星期|周次|按周|周度/i.test(text)
+		if (/datetimerange|date[-_\s]?time[-_\s]?range|datetime.*range|日期.*时间.*(范围|区间|起止)/i.test(text)) return 'datetimerange'
+		if (/timerange|time[-_\s]?range|range[-_\s]?time|时间.*(范围|区间|起止)/i.test(text)) return 'timerange'
+		if (/monthrange|month[-_\s]?range|range[-_\s]?month|月份.*(范围|区间|起止)/i.test(text)) return 'monthrange'
+		if (/yearrange|year[-_\s]?range|range[-_\s]?year|年份.*(范围|区间|起止)|年度.*(范围|区间|起止)/i.test(text)) return 'yearrange'
+		if (/weekrange|week[-_\s]?range|range[-_\s]?week|星期.*(范围|区间|起止)|周次.*(范围|区间|起止)|按周.*(范围|区间|起止)|周度.*(范围|区间|起止)/i.test(text)) return 'weekrange'
+		if (/daterange|date[-_\s]?range|range[-_\s]?date/i.test(text)) return 'daterange'
+		if (hasRangeSignal && hasDateTimeSignal) return 'datetimerange'
+		if (hasRangeSignal && hasTimeSignal) return 'timerange'
+		if (hasRangeSignal && hasMonthSignal) return 'monthrange'
+		if (hasRangeSignal && hasYearSignal) return 'yearrange'
+		if (hasRangeSignal && hasWeekSignal) return 'weekrange'
+		if (hasRangeSignal && hasDateSignal) return 'daterange'
+		if (hasDateTimeSignal) return 'datetime'
+		if (hasMonthSignal) return 'month'
+		if (hasYearSignal) return 'year'
+		if (hasWeekSignal) return 'week'
+		return ''
+	}
+
+	function isDateRangeControl(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const cls = String(element.className || '')
+		if (/(date.*range|range.*date|daterange|datetimerange|picker-range|date-editor--daterange|date-editor--datetimerange)/i.test(cls)) return true
+		if (element.querySelector?.('.el-range-input,.ant-picker-range-separator,.arco-picker-range-separator,.n-date-picker-icon + input,.ivu-date-picker-rel')) {
+			const inputs = Array.from(element.querySelectorAll?.('input') || [])
+				.filter((node) => node instanceof HTMLInputElement)
+			if (inputs.length >= 2) return true
+		}
+		return false
+	}
+
+	function isDatePickerControl(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const cls = String(element.className || '')
+		if (/(date-editor|date-picker|datepicker|calendar|ant-picker|arco-picker|n-date-picker|ivu-date-picker|avue-date)/i.test(cls)) return true
+		const input = element instanceof HTMLInputElement ? element : element.querySelector?.('input')
+		const type = String(input?.getAttribute?.('type') || '').toLowerCase()
+		const placeholder = String(input?.getAttribute?.('placeholder') || element.getAttribute('placeholder') || '')
+		return type === 'date' || /日期|时间|开始|结束|date|time/i.test(placeholder)
+	}
+
+	function isResetActionIntentText(haystack) {
+		const text = normalizeCompactText(haystack)
+		if (!text) return false
+		if (/(resetpassword|forgotpassword|找回密码|忘记密码)/i.test(text)) return false
+		if (/(取消筛选|清除筛选|清空筛选|重置筛选|移除筛选|取消过滤|清除过滤|清空过滤|重置过滤|移除过滤|清除条件|清空条件|重置条件|清除搜索|清空搜索|重置搜索|清除查询|清空查询|重置查询|clearfilter|clearfilters|clearallfilters|resetfilter|resetfilters|resetallfilters|removefilter|removefilters|removeallfilters|clearsearch|resetsearch|clearcondition|resetcondition|clearcriteria|resetcriteria|clearquery|resetquery)/i.test(text)) {
+			return true
+		}
+		if (/(删除|移除|作废|注销|退出|关闭|取消|delete|remove|trash|void|logout|signout|close|cancel)/i.test(text)) return false
+		return /^(重置|清空|清除|清理|恢复默认|清空全部|全部清空|重置全部|全部重置|reset|clear|clearall|resetall)$/.test(text)
 	}
 
 	function inferActionIntent({ label, text, role, type, element }) {
@@ -1920,19 +3122,18 @@
 		if (/高级搜索|更多条件|查询条件|筛选条件|过滤条件|展开搜索|展开查询|展开筛选|open.*filter|more.*filter|advanced.*search/.test(haystack)) {
 			return 'open_filter'
 		}
+		if (isResetActionIntentText(haystack)) return 'reset'
 		if (/查询|搜索|筛选|过滤|search|query|filter/.test(haystack)) return 'search'
 		if (/提交|确认|保存|submit|confirm|save/.test(haystack)) return 'submit'
 		if (/下一步|继续|next|continue/.test(haystack)) return 'next'
 		if (/取消|关闭|返回|cancel|close|back/.test(haystack)) return 'cancel_or_back'
-		if (/企业管理员|超级管理员|管理员|角色|岗位|部门|平台|男|女|启用|禁用|正常|停用|省|市|区|县|北京市|天津市/.test(haystack)) {
-			return 'select_option'
-		}
 		return ''
 	}
 
 	function getElementRole(element, tag) {
 		const role = String(element.getAttribute('role') || '').trim()
 		if (role) return role
+		if (isDatePickerOption(element)) return 'option'
 		if (tag === 'a') return 'link'
 		if (tag === 'button') return 'button'
 		if (element instanceof HTMLInputElement) {
@@ -1949,7 +3150,7 @@
 		if (/(el-cascader-node)/i.test(cls)) return 'option'
 		if (/(el-cascader|cascader)/i.test(cls) && !/(node|panel|menu|dropdown)/i.test(cls)) return 'combobox'
 		if (/(el-select|ant-select|tree-select|n-base-selection|n-tree-select|van-dropdown|van-field|layui-form-select|ivu-select|vxe-select|q-select|select-wrapper|combobox)/i.test(cls) && !/(dropdown__item|option|tree-node|select-item)/i.test(cls)) return 'combobox'
-		if (/(el-select-dropdown__item|el-option|dropdown-item|select-option|ant-select-item-option|ant-tree-node|arco-select-option|arco-tree-node|n-base-select-option|n-tree-node|van-picker-column__item|layui-select-tips|ivu-select-item|vxe-select-option|q-item)/i.test(cls)) return 'option'
+		if (/(el-select-dropdown__item|el-option|dropdown-item|select-option|el-date-table|el-month-table|el-year-table|ant-picker-cell|ant-select-item-option|ant-tree-node|arco-picker-cell|arco-select-option|arco-tree-node|n-date-panel|n-base-select-option|n-tree-node|van-picker-column__item|van-calendar__day|layui-select-tips|layui-laydate|ivu-select-item|ivu-date-picker-cells-cell|vxe-select-option|vxe-date-picker|q-item)/i.test(cls)) return 'option'
 		if (/(el-checkbox|ant-checkbox|arco-checkbox|n-checkbox|van-checkbox)/i.test(cls)) return 'checkbox'
 		if (/(el-radio|ant-radio|arco-radio|n-radio|van-radio)/i.test(cls)) return 'radio'
 		if (/(el-switch|ant-switch|arco-switch|n-switch|van-switch|ivu-switch)/i.test(cls)) return 'switch'
@@ -1958,6 +3159,8 @@
 	}
 
 	function getElementAccessibleName(element) {
+		const dateLabel = getDatePickerOptionLabel(element)
+		if (dateLabel) return dateLabel
 		const aria = String(element.getAttribute('aria-label') || '').trim()
 		if (aria) return aria
 		const labelledBy = readIdRefText(element, 'aria-labelledby')
@@ -2243,6 +3446,7 @@
 		const role = String(element?.getAttribute?.('role') || '').toLowerCase()
 		const cascaderNode = element.closest?.('.el-cascader-node,[class*="cascader-node"]')
 		const cls = String(element.className || '')
+		if (isDatePickerOption(element)) return 'date-option'
 		if (cascaderNode instanceof HTMLElement || /(el-cascader-node)/i.test(cls)) {
 			const node = cascaderNode instanceof HTMLElement ? cascaderNode : element
 			return hasCascaderChildren(node) ? 'cascader-parent' : 'cascader-leaf'
@@ -2371,6 +3575,7 @@
 		const ariaExpanded = String(element.getAttribute('aria-expanded') || '').trim()
 		if (ariaExpanded) return ariaExpanded === 'true' ? 'expanded' : 'collapsed'
 		if (hasExpandedClassSignal(element)) return 'expanded'
+		if (isFocusedSelectionFieldWithVisiblePopup(element)) return 'expanded'
 		if (isDropdownLikeControl(element)) return 'collapsed'
 		return ''
 	}
@@ -2379,6 +3584,48 @@
 		if (!(element instanceof HTMLElement)) return false
 		const cls = String(element.className || '')
 		return /(is-opened|is-expanded|open|opened|show|visible)/i.test(cls) && /select|dropdown|cascader|popover|picker/i.test(cls)
+	}
+
+	function isFocusedSelectionFieldWithVisiblePopup(element) {
+		if (!(element instanceof HTMLElement)) return false
+		if (!isDropdownLikeControl(element) && !isDatePickerControl(element)) return false
+		const active = document.activeElement
+		if (!(active instanceof HTMLElement) || !element.contains(active)) return false
+		return hasVisibleSelectionPopup()
+	}
+
+	function hasVisibleSelectionPopup() {
+		return querySelectorAllDeep(getSelectionPopupSelector()).some((node) => {
+			if (!(node instanceof HTMLElement)) return false
+			const style = window.getComputedStyle(node)
+			if (style.display === 'none' || style.visibility === 'hidden') return false
+			const rect = node.getBoundingClientRect()
+			return rect.width > 2 && rect.height > 2
+		})
+	}
+
+	function getSelectionPopupSelector() {
+		return [
+			'.el-popper',
+			'.el-popover',
+			'.el-select-dropdown',
+			'.el-picker-panel',
+			'.el-cascader-panel',
+			'.el-dropdown-menu',
+			'.ant-select-dropdown',
+			'.ant-tree-select-dropdown',
+			'.ant-picker-dropdown',
+			'.ant-cascader-menus',
+			'.arco-trigger-popup',
+			'.n-popover',
+			'.n-dropdown-menu',
+			'.van-popup',
+			'.van-picker',
+			'.layui-anim',
+			'.ivu-select-dropdown',
+			'.vxe-table--ignore-clear',
+			'[role="listbox"]',
+		].join(',')
 	}
 
 	function getElementRect(element) {
@@ -2399,6 +3646,7 @@
 			testId: shortText(element.getAttribute('data-testid') || '', 48),
 			dataTest: shortText(element.getAttribute('data-test') || '', 48),
 			dataCy: shortText(element.getAttribute('data-cy') || '', 48),
+			className: shortText(String(element.className || '').replace(/\s+/g, ' '), 80),
 			formId: shortText(form?.id || '', 48),
 			formName: shortText(form?.getAttribute?.('name') || '', 48),
 		}
@@ -2469,7 +3717,7 @@
 	function getPopupContainerHints(element) {
 		if (!(element instanceof HTMLElement)) return ''
 		const popup = element.closest?.(
-			'.el-popper,.el-popover,.el-select-dropdown,.el-picker-panel,.el-cascader-panel,.el-dropdown-menu,.ant-select-dropdown,.ant-tree-select-dropdown,.ant-picker-dropdown,.ant-cascader-menus,.arco-trigger-popup,.n-popover,.n-dropdown-menu,.van-popup,.van-picker,.layui-anim,.ivu-select-dropdown,.vxe-table--ignore-clear,[role="listbox"]'
+			getSelectionPopupSelector()
 		)
 		if (!(popup instanceof HTMLElement) || popup === element && !isLikelyPopupNode(popup)) return ''
 		const parts = []

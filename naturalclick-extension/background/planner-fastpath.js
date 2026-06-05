@@ -12,7 +12,12 @@
 				'当前标签页不是任务目标站点，先切换到已打开的目标标签页。',
 				'切换到任务目标页面。',
 				'switch_to_tab',
-				{ tab_id: targetTab.id }
+				{
+					tab_id: targetTab.id,
+					target_label: getTabTargetLabel(targetTab, targetUrl),
+					target_url: targetUrl,
+					reason: '切换到任务目标页面',
+				}
 			)
 		}
 		if (!targetTab) {
@@ -20,10 +25,18 @@
 				'当前页面不是任务目标站点，先打开任务中的目标 URL。',
 				'打开任务目标页面。',
 				'open_new_tab',
-				{ url: targetUrl }
+				{
+					url: targetUrl,
+					target_label: targetUrl,
+					reason: '打开任务目标 URL',
+				}
 			)
 		}
 		return null
+	}
+
+	function getTabTargetLabel(tab, targetUrl) {
+		return String(tab?.title || tab?.url || targetUrl || '任务目标页面').trim()
 	}
 
 	function hasRecentTargetUrlNavigation(session, targetUrl) {

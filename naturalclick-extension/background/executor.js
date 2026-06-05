@@ -62,7 +62,10 @@
 		if ((name === 'input_text' || name === 'type') && !rawText) {
 			return { ok: false, message: 'locate_by_vision 输入类动作缺少 text，无法执行。' }
 		}
-		const delegatedInput = {}
+		const delegatedInput = {
+			target_description: targetDescription,
+			target_label: String(input?.target_label || input?.label || '').trim() || targetDescription,
+		}
 		if (rawText) delegatedInput.text = rawText
 		return {
 			ok: true,

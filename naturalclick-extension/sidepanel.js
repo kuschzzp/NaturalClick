@@ -37,6 +37,7 @@
 		currentTask: '',
 		activityText: '等待任务...',
 		planItems: [],
+		resultSummary: null,
 		traceItems: [],
 		view: { name: 'chat' },
 		sessions: [],
@@ -311,6 +312,7 @@
 				if (sessionId === currentConversationId) {
 					resetConversationState()
 					state.traceItems = []
+					state.resultSummary = null
 					state.currentTask = ''
 					state.status = 'idle'
 					state.activityText = '等待任务...'
@@ -334,6 +336,7 @@
 			if (deletingSessionId === currentConversationId) {
 				resetConversationState()
 				state.traceItems = []
+				state.resultSummary = null
 				state.currentTask = ''
 				state.status = 'idle'
 				state.activityText = '等待任务...'
@@ -371,11 +374,13 @@
 
 				const prevStatus = state.status
 				const nextTraceItems = mergeTraceItemsFromRuntime(payload)
+				const hasPayloadResultSummary = Object.prototype.hasOwnProperty.call(payload, 'resultSummary')
 				Object.assign(state, {
 					status: payload.status || state.status,
 					currentTask: payload.currentTask || state.currentTask,
 					activityText: payload.activityText || state.activityText,
 					planItems: Array.isArray(payload.planItems) ? payload.planItems : state.planItems,
+					resultSummary: hasPayloadResultSummary ? payload.resultSummary : state.resultSummary,
 					traceItems: nextTraceItems,
 				})
 
@@ -413,6 +418,7 @@
 		if (taskStarting || taskStopping || state.status === 'running') return
 		taskStarting = true
 		state.activityText = '正在启动任务...'
+		state.resultSummary = null
 		render()
 
 		const startNewConversation = !!options.newConversation
@@ -512,13 +518,14 @@
 			activeAskResolve = null
 		}
 		const question = String(payload.question || payload.description || '').trim()
+		const reason = String(payload.reason || payload.purpose || '').trim()
 		const title = String(payload.title || 'Agent 需要你确认').trim()
 		const placeholder = String(payload.placeholder || '').trim()
 		el.askTitle.textContent = title
-		el.askDesc.textContent = question
+		el.askDesc.textContent = reason ? `原因：${reason}\n\n${question}` : question
 		el.askInput.value = placeholder
 		el.askOverlay.style.display = 'flex'
-		state.activityText = question ? `等待用户回答：${question}` : '等待用户回答...'
+		state.activityText = reason ? `等待用户回答：${reason}` : question ? `等待用户回答：${question}` : '等待用户回答...'
 		render()
 		setTimeout(() => {
 			try {
@@ -597,6 +604,12 @@
 				el.chatStream.appendChild(renderTraceCard(item))
 			})
 		}
+
+		const planCard = renderPlanItemsCard(state.planItems)
+		if (planCard) el.chatStream.appendChild(planCard)
+
+		const resultSummary = renderResultSummaryCard(state.resultSummary)
+		if (resultSummary) el.chatStream.appendChild(resultSummary)
 
 		const activity = document.createElement('div')
 		activity.className = 'sp-card activity'
@@ -720,6 +733,310 @@
 			wrap.appendChild(line)
 		}
 		return wrap
+	}
+
+	function renderPlanItemsCard(planItems) {
+		const items = normalizePlanItems(planItems)
+		if (!items.length) return null
+		const card = document.createElement('div')
+		card.className = 'sp-card sp-plan-card'
+		const head = document.createElement('div')
+		head.className = 'sp-plan-head'
+		const title = document.createElement('div')
+		title.className = 'sp-plan-title'
+		title.textContent = '当前进度'
+		const count = document.createElement('span')
+		count.className = 'sp-plan-count'
+		count.textContent = `${items.length} 项`
+		head.appendChild(title)
+		head.appendChild(count)
+		card.appendChild(head)
+
+		const list = document.createElement('div')
+		list.className = 'sp-plan-list'
+		items.slice(0, 6).forEach((item) => list.appendChild(renderPlanItemRow(item)))
+		card.appendChild(list)
+		if (items.length > 6) {
+			const more = document.createElement('div')
+			more.className = 'sp-plan-more'
+			more.textContent = `另有 ${items.length - 6} 项进度已记录。`
+			card.appendChild(more)
+		}
+		return card
+	}
+
+	function normalizePlanItems(planItems) {
+		return (Array.isArray(planItems) ? planItems : [])
+			.map((item, index) => ({
+				id: String(item?.id || `plan_${index}`),
+				title: clampText(String(item?.title || item?.label || item?.text || '').trim(), 220),
+				status: normalizePlanStatus(item?.status),
+			}))
+			.filter((item) => item.title)
+	}
+
+	function renderPlanItemRow(item) {
+		const row = document.createElement('div')
+		row.className = `sp-plan-item ${item.status}`.trim()
+		const dot = document.createElement('span')
+		dot.className = 'sp-plan-dot'
+		const body = document.createElement('div')
+		body.className = 'sp-plan-body'
+		const title = document.createElement('div')
+		title.className = 'sp-plan-item-title'
+		title.textContent = item.title
+		const status = document.createElement('div')
+		status.className = 'sp-plan-item-status'
+		status.textContent = formatPlanStatus(item.status)
+		body.appendChild(title)
+		body.appendChild(status)
+		row.appendChild(dot)
+		row.appendChild(body)
+		return row
+	}
+
+	function normalizePlanStatus(status) {
+		const value = String(status || '').trim().toLowerCase()
+		if (['running', 'done', 'failed', 'pending', 'stopped'].includes(value)) return value
+		if (['completed', 'success', 'passed'].includes(value)) return 'done'
+		if (['error', 'fail'].includes(value)) return 'failed'
+		return 'pending'
+	}
+
+	function formatPlanStatus(status) {
+		const labels = {
+			running: '进行中',
+			done: '已完成',
+			failed: '需关注',
+			pending: '等待中',
+			stopped: '已中止',
+		}
+		return labels[status] || '等待中'
+	}
+
+	function renderResultSummaryCard(summary) {
+		if (!summary || typeof summary !== 'object') return null
+		const headline = String(summary.headline || '').trim()
+		if (!headline) return null
+		const card = document.createElement('div')
+		card.className = `sp-card sp-result-summary ${String(summary.status || '').trim()}`.trim()
+
+		const head = document.createElement('div')
+		head.className = 'sp-result-head'
+		const title = document.createElement('div')
+		title.className = 'sp-result-title'
+		title.textContent = String(summary.title || '结果总结')
+		const status = document.createElement('span')
+		status.className = `sp-result-status ${String(summary.status || '').trim()}`.trim()
+		status.textContent = formatResultSummaryStatus(summary.status)
+		head.appendChild(title)
+		head.appendChild(status)
+		const sourceLabel = getResultSummarySourceLabel(summary)
+		if (sourceLabel) {
+			const source = document.createElement('span')
+			source.className = 'sp-result-source'
+			source.textContent = sourceLabel
+			head.appendChild(source)
+		}
+		card.appendChild(head)
+
+		const desc = document.createElement('div')
+		desc.className = 'sp-result-headline'
+		desc.textContent = headline
+		card.appendChild(desc)
+
+		const stats = renderResultStats(summary.stats)
+		if (stats) card.appendChild(stats)
+
+		const diagnostics = renderResultDiagnostics(summary.diagnostics)
+		if (diagnostics) card.appendChild(diagnostics)
+
+		const items = Array.isArray(summary.items) ? summary.items : []
+		if (items.length) {
+			const list = document.createElement('div')
+			list.className = 'sp-result-list'
+			items.slice(0, 8).forEach((item) => list.appendChild(renderResultSummaryItem(item)))
+			card.appendChild(list)
+			if (items.length > 8) {
+				const more = document.createElement('div')
+				more.className = 'sp-result-more'
+				more.textContent = `另有 ${items.length - 8} 项已记录，可在导出信息中查看完整结果。`
+				card.appendChild(more)
+			}
+		}
+
+		const issues = Array.isArray(summary.issues) ? summary.issues : []
+		if (issues.length) {
+			const issueWrap = document.createElement('div')
+			issueWrap.className = 'sp-result-issues'
+			const issueTitle = document.createElement('div')
+			issueTitle.className = 'sp-result-issues-title'
+			issueTitle.textContent = '重点问题'
+			issueWrap.appendChild(issueTitle)
+			issues.slice(0, 3).forEach((item) => issueWrap.appendChild(renderResultIssueLine(item)))
+			card.appendChild(issueWrap)
+		}
+		const skippedDetails = Array.isArray(summary.skippedDetails) ? summary.skippedDetails : []
+		if (skippedDetails.length > 3) {
+			const skippedWrap = document.createElement('div')
+			skippedWrap.className = 'sp-result-issues'
+			const skippedTitle = document.createElement('div')
+			skippedTitle.className = 'sp-result-issues-title'
+			skippedTitle.textContent = '安全跳过明细'
+			skippedWrap.appendChild(skippedTitle)
+			skippedDetails.slice(0, 5).forEach((item) => skippedWrap.appendChild(renderResultIssueLine(item)))
+			if (skippedDetails.length > 5) {
+				const more = document.createElement('div')
+				more.className = 'sp-result-more'
+				more.textContent = `另有 ${skippedDetails.length - 5} 个安全跳过字段，可在导出信息中查看完整原因。`
+				skippedWrap.appendChild(more)
+			}
+			card.appendChild(skippedWrap)
+		}
+		return card
+	}
+
+	function renderResultStats(stats) {
+		if (!stats || typeof stats !== 'object') return null
+		const entries = [
+			['total', '总数'],
+			['tested', '已测'],
+			['passed', '通过'],
+			['failed', '异常'],
+			['cleanupFailed', '清空异常'],
+			['cleanupUnverified', '清空未确认'],
+			['dateCandidateOwnership', '日期候选归属'],
+			['contextRequestLimit', '上下文补证上限'],
+			['verificationRecoveryIncomplete', '校验恢复未完成'],
+			['terminalFailed', '终态异常'],
+			['unknown', '未确认'],
+			['recoveredFailures', '失败后成功'],
+			['retried', '重试'],
+			['skipped', '安全跳过'],
+			['remaining', '未完成'],
+			['completed', '成功动作'],
+			['modelErrors', '模型错误'],
+			['timeouts', '超时'],
+			['loopGuards', '循环保护'],
+			['verificationFailures', '校验失败'],
+		]
+			.map(([key, label]) => ({ key, label, value: Number(stats[key]) }))
+			.filter((item) => Number.isFinite(item.value))
+		if (!entries.length) return null
+		const wrap = document.createElement('div')
+		wrap.className = 'sp-result-stats'
+		entries.forEach((item) => {
+			const chip = document.createElement('span')
+			chip.className = `sp-result-stat ${item.key}`.trim()
+			chip.textContent = `${item.label} ${item.value}`
+			wrap.appendChild(chip)
+		})
+		return wrap
+	}
+
+	function renderResultIssueLine(issue) {
+		const row = document.createElement('div')
+		row.className = `sp-result-issue ${String(issue?.status || '').trim()}`.trim()
+		const head = document.createElement('div')
+		head.className = 'sp-result-issue-head'
+		head.textContent = [
+			String(issue?.label || '未命名项').trim(),
+			String(issue?.statusLabel || issue?.status || '').trim(),
+			issue?.clearStatusLabel ? `清空：${issue.clearStatusLabel}` : '',
+		].filter(Boolean).join(' · ')
+		row.appendChild(head)
+		const summary = String(issue?.summary || '').trim()
+		if (summary) {
+			const body = document.createElement('div')
+			body.className = 'sp-result-issue-summary'
+			body.textContent = clampText(summary, 220)
+			row.appendChild(body)
+		}
+		return row
+	}
+
+	function renderResultDiagnostics(diagnostics) {
+		const groups = groupResultDiagnostics(diagnostics)
+		if (!groups.length) return null
+		const wrap = document.createElement('div')
+		wrap.className = 'sp-result-diagnostics'
+		for (const group of groups) {
+			wrap.appendChild(renderResultDiagnosticGroup(group))
+		}
+		return wrap
+	}
+
+	function renderResultDiagnosticGroup(group) {
+		const section = document.createElement('div')
+		section.className = `sp-result-diagnostic-group ${String(group?.kind || '').trim()}`.trim()
+		const title = document.createElement('div')
+		title.className = 'sp-result-diagnostic-title'
+		title.textContent = String(group?.title || '诊断')
+		section.appendChild(title)
+		const limit = group?.kind === 'recommendations' ? 3 : 4
+		const items = Array.isArray(group?.items) ? group.items : []
+		items.slice(0, limit).forEach((item) => {
+			const row = document.createElement('div')
+			row.className = [
+				'sp-result-diagnostic',
+				String(item.severity || '').trim(),
+				isResultRecommendation(item) ? 'recommendation' : '',
+			].filter(Boolean).join(' ')
+			row.textContent = String(item.text || '').trim()
+			section.appendChild(row)
+		})
+		if (items.length > limit) {
+			const more = document.createElement('div')
+			more.className = 'sp-result-more'
+			more.textContent = `另有 ${items.length - limit} 条${group?.kind === 'recommendations' ? '建议' : '诊断'}，可在导出信息中查看完整内容。`
+			section.appendChild(more)
+		}
+		return section
+	}
+
+	function renderResultSummaryItem(item) {
+		const row = document.createElement('div')
+		row.className = `sp-result-item ${String(item?.status || '').trim()}`.trim()
+		const label = document.createElement('div')
+		label.className = 'sp-result-item-label'
+		label.textContent = `${item?.order ? `${item.order}. ` : ''}${String(item?.label || item?.key || '未命名项')}`
+		const status = document.createElement('div')
+		status.className = 'sp-result-item-status'
+		status.textContent = String(item?.statusLabel || item?.status || '未确认')
+		row.appendChild(label)
+		row.appendChild(status)
+			const meta = [
+				item?.value ? `值：${item.value}` : '',
+				item?.sourceLabel ? `${item?.sourceTitle || '依据'}：${item.sourceLabel}` : '',
+				item?.valueSourceLabel ? `取值：${item.valueSourceLabel}` : '',
+				item?.basis ? `依据说明：${item.basis}` : '',
+				item?.clearStatusLabel ? `清空：${item.clearStatusLabel}` : '',
+			].filter(Boolean).join(' · ')
+		if (meta) {
+			const metaLine = document.createElement('div')
+			metaLine.className = 'sp-result-item-meta'
+			metaLine.textContent = meta
+			row.appendChild(metaLine)
+		}
+		const summary = String(item?.summary || '').trim()
+		if (summary) {
+			const summaryLine = document.createElement('div')
+			summaryLine.className = 'sp-result-item-summary'
+			summaryLine.textContent = clampText(summary, 180)
+			row.appendChild(summaryLine)
+		}
+		return row
+	}
+
+	function formatResultSummaryStatus(status) {
+		const labels = {
+			running: '进行中',
+			passed: '通过',
+			failed: '异常',
+			inconclusive: '未确认',
+			stopped: '已中止',
+		}
+		return labels[String(status || '').trim()] || String(status || '总结')
 	}
 
 	function getTraceMark(kind) {
@@ -941,7 +1258,7 @@
 			render()
 			return
 		}
-		await copyText(JSON.stringify(payload, null, 2))
+		await copyText(formatSessionExportText(payload))
 		state.activityText = `会话信息已复制（${payload.session?.traceCount || 0} 条轨迹）。`
 		render()
 	}
@@ -953,11 +1270,289 @@
 			render()
 			return
 		}
-		const text = JSON.stringify(payload, null, 2)
+		const text = formatSessionExportText(payload)
 		const fileName = buildExportFileName(payload)
 		downloadTextFile(fileName, text)
 		state.activityText = `会话信息已下载为 TXT（${payload.session?.traceCount || 0} 条轨迹）。`
 		render()
+	}
+
+	function formatSessionExportText(payload) {
+		const sanitizedPayload = sanitizeSessionExportPayload(payload)
+		const session = sanitizedPayload?.session || {}
+		const lines = [
+			'NaturalClick 会话导出',
+			`导出时间：${sanitizedPayload?.exportedAt || ''}`,
+			`扩展版本：${sanitizedPayload?.extensionVersion || ''}`,
+			'',
+			'任务信息',
+			`任务：${session.latestTask || session.task || ''}`,
+			`状态：${formatExportStatus(session.status)}`,
+			`创建时间：${session.createdAt ? new Date(session.createdAt).toLocaleString() : ''}`,
+			`更新时间：${session.updatedAt ? new Date(session.updatedAt).toLocaleString() : ''}`,
+			`轨迹数量：${Number(session.traceCount || 0)}`,
+			session.activityText ? `当前提示：${session.activityText}` : '',
+		].filter((line) => line !== '')
+		appendResultSummaryExport(lines, session.resultSummary)
+		appendPlanItemsExport(lines, session.planItems)
+		appendSessionDiagnosticsExport(lines, session.diagnostics)
+		appendTraceSummaryExport(lines, session.traceItems)
+		lines.push('', '原始 JSON 附录', JSON.stringify(sanitizedPayload, null, 2))
+		return `${lines.join('\n')}\n`
+	}
+
+	function appendResultSummaryExport(lines, summary) {
+		lines.push('', '结果总结')
+		if (!summary || typeof summary !== 'object') {
+			lines.push('暂无结构化结果总结。')
+			return
+		}
+		lines.push(`标题：${summary.title || '结果总结'}`)
+		lines.push(`状态：${formatResultSummaryStatus(summary.status)}`)
+		const sourceLine = getResultSummaryExportSourceLine(summary)
+		if (sourceLine) lines.push(sourceLine)
+		if (summary.headline) lines.push(`结论：${summary.headline}`)
+		const stats = formatResultSummaryStats(summary.stats)
+		if (stats) lines.push(`统计：${stats}`)
+		for (const group of groupResultDiagnostics(summary.diagnostics)) {
+			lines.push(`${group.title}：`)
+			for (const diagnostic of group.items) {
+				const text = String(diagnostic?.text || '').trim()
+				if (text) lines.push(`- ${text}`)
+			}
+		}
+		if (summary.reason) lines.push(`原因：${summary.reason}`)
+		const items = Array.isArray(summary.items) ? summary.items : []
+		if (items.length) {
+			lines.push('字段/项目明细：')
+			for (const item of items) lines.push(`- ${formatResultSummaryItemExport(item)}`)
+		}
+		const issues = Array.isArray(summary.issues) ? summary.issues : []
+		if (issues.length) {
+			lines.push('重点问题：')
+			for (const issue of issues) lines.push(`- ${formatResultIssueExport(issue)}`)
+		}
+		const skipped = Array.isArray(summary.skipped) ? summary.skipped.filter(Boolean) : []
+		if (skipped.length) lines.push(`安全跳过：${skipped.join('、')}`)
+		const skippedDetails = Array.isArray(summary.skippedDetails) ? summary.skippedDetails.filter(Boolean) : []
+		if (skippedDetails.length) {
+			lines.push('安全跳过明细：')
+			for (const item of skippedDetails) lines.push(`- ${formatResultSkippedDetailExport(item)}`)
+		}
+		const remaining = Array.isArray(summary.remaining) ? summary.remaining.filter(Boolean) : []
+		if (remaining.length) lines.push(`未完成：${remaining.join('、')}`)
+	}
+
+	function getResultSummarySourceLabel(summary) {
+		if (!summary || typeof summary !== 'object' || !summary.fallback) return ''
+		const type = String(summary.type || '').trim()
+		if (type === 'summary_error') return '总结异常'
+		if (type === 'general_fallback') return '轨迹摘要'
+		return '兜底摘要'
+	}
+
+	function getResultSummaryExportSourceLine(summary) {
+		if (!summary || typeof summary !== 'object' || !summary.fallback) return ''
+		const type = String(summary.type || '').trim()
+		if (type === 'summary_error') {
+			return '来源：总结异常兜底（结果总结生成失败；任务轨迹和进度仍可用于排查，不能等同于完整测试结论）'
+		}
+		if (type === 'general_fallback') {
+			return '来源：轨迹兜底摘要（缺少结构化测试明细，不能等同于完整测试结论）'
+		}
+		return '来源：兜底摘要（缺少完整结构化测试明细，不能等同于完整测试结论）'
+	}
+
+	function formatResultSummaryStats(stats) {
+		if (!stats || typeof stats !== 'object') return ''
+		const entries = [
+			['total', '总数'],
+			['tested', '已测'],
+			['passed', '通过'],
+			['failed', '异常'],
+			['cleanupFailed', '清空异常'],
+			['cleanupUnverified', '清空未确认'],
+			['dateCandidateOwnership', '日期候选归属'],
+			['contextRequestLimit', '上下文补证上限'],
+			['verificationRecoveryIncomplete', '校验恢复未完成'],
+			['terminalFailed', '终态异常'],
+			['unknown', '未确认'],
+			['recoveredFailures', '失败后成功'],
+			['retried', '重试'],
+			['skipped', '安全跳过'],
+			['remaining', '未完成'],
+			['completed', '成功动作'],
+			['modelErrors', '模型错误'],
+			['timeouts', '超时'],
+			['loopGuards', '循环保护'],
+			['verificationFailures', '校验失败'],
+		]
+		return entries
+			.map(([key, label]) => ({ key, label, value: Number(stats[key]) }))
+			.filter((item) => Number.isFinite(item.value))
+			.map((item) => `${item.label} ${item.value}`)
+			.join('，')
+	}
+
+	function groupResultDiagnostics(diagnostics) {
+		const items = (Array.isArray(diagnostics) ? diagnostics : [])
+			.filter((item) => item && String(item.text || '').trim())
+		const diagnosticItems = items.filter((item) => !isResultRecommendation(item))
+		const recommendationItems = items.filter(isResultRecommendation)
+		return [
+			{ kind: 'diagnostics', title: '诊断', items: diagnosticItems },
+			{ kind: 'recommendations', title: '建议', items: recommendationItems },
+		].filter((group) => group.items.length)
+	}
+
+	function isResultRecommendation(item) {
+		return String(item?.kind || '').trim() === 'next_step_recommendation'
+	}
+
+	function formatResultSummaryItemExport(item) {
+		const parts = [
+			item?.order ? `${item.order}. ${item.label || item.key || '未命名项'}` : String(item?.label || item?.key || '未命名项'),
+			item?.statusLabel || item?.status || '未确认',
+				item?.value ? `值=${item.value}` : '',
+				item?.sourceLabel ? `${item?.sourceTitle || '依据'}=${item.sourceLabel}` : '',
+				item?.valueSourceLabel ? `取值=${item.valueSourceLabel}` : '',
+				item?.basis ? `依据说明=${item.basis}` : '',
+				item?.clearStatusLabel ? `清空=${item.clearStatusLabel}` : '',
+			item?.attempts ? `尝试=${item.attempts}` : '',
+			item?.failedAttempts ? `失败尝试=${item.failedAttempts}` : '',
+			item?.summary ? `说明=${item.summary}` : '',
+		].filter(Boolean)
+		return parts.join('；')
+	}
+
+	function formatResultIssueExport(issue) {
+		return [
+			issue?.label || '未命名项',
+			issue?.statusLabel || issue?.status || '',
+			issue?.clearStatusLabel ? `清空=${issue.clearStatusLabel}` : '',
+			issue?.summary || '',
+		].filter(Boolean).join('；')
+	}
+
+	function formatResultSkippedDetailExport(item) {
+		return [
+			item?.label || '未命名字段',
+			item?.statusLabel || item?.status || '未确认',
+			item?.sourceLabel ? `依据=${item.sourceLabel}` : '',
+			item?.basis ? `依据说明=${item.basis}` : '',
+			item?.summary || '',
+		].filter(Boolean).join('；')
+	}
+
+	function appendPlanItemsExport(lines, planItems) {
+		const items = normalizePlanItems(planItems)
+		if (!items.length) return
+		lines.push('', '当前进度')
+		items.slice(0, 12).forEach((item, index) => {
+			lines.push(`${index + 1}. [${formatPlanStatus(item.status)}] ${item.title}`)
+		})
+		if (items.length > 12) lines.push(`另有 ${items.length - 12} 项进度已记录。`)
+	}
+
+	function appendSessionDiagnosticsExport(lines, diagnostics) {
+		if (!diagnostics || typeof diagnostics !== 'object') return
+		const parts = [
+			Number.isFinite(Number(diagnostics.modelCallCount)) ? `模型调用 ${Number(diagnostics.modelCallCount)}` : '',
+			Number(diagnostics.modelErrorCount) ? `模型错误 ${Number(diagnostics.modelErrorCount)}` : '',
+			Number(diagnostics.timeoutCount) ? `超时 ${Number(diagnostics.timeoutCount)}` : '',
+			Number(diagnostics.loopGuardCount) ? `循环保护 ${Number(diagnostics.loopGuardCount)}` : '',
+			Number(diagnostics.verificationFailureCount) ? `校验失败 ${Number(diagnostics.verificationFailureCount)}` : '',
+			Number(diagnostics.dateCandidateOwnershipCount) ? `日期候选归属 ${Number(diagnostics.dateCandidateOwnershipCount)}` : '',
+			Number(diagnostics.verificationRecoveryIncompleteCount) ? `校验恢复未完成 ${Number(diagnostics.verificationRecoveryIncompleteCount)}` : '',
+			Number(diagnostics.contextRequestLimitCount) ? `上下文补证上限 ${Number(diagnostics.contextRequestLimitCount)}` : '',
+		].filter(Boolean)
+		const lastError = diagnostics.lastError?.detail || diagnostics.lastModelError?.message || ''
+		const progressSummary = formatProgressStageSummary(diagnostics)
+		const lastPlanningProgress = diagnostics.lastPlanningProgress?.detail || ''
+		const lastRuntimeProgress = diagnostics.lastRuntimeProgress?.detail || ''
+		if (!parts.length && !lastError && !progressSummary && !lastPlanningProgress && !lastRuntimeProgress && !Array.isArray(diagnostics.candidateDiagnostics)) return
+		lines.push('', '诊断概览')
+		if (parts.length) lines.push(parts.join('，'))
+		if (progressSummary) lines.push(`进度阶段：${progressSummary}`)
+		if (lastPlanningProgress) lines.push(`最后规划进度：${clampText(lastPlanningProgress, 500)}`)
+		if (lastRuntimeProgress) lines.push(`最后运行进度：${clampText(lastRuntimeProgress, 500)}`)
+		if (lastError) lines.push(`最后错误：${clampText(lastError, 500)}`)
+		const candidateDiagnostics = Array.isArray(diagnostics.candidateDiagnostics) ? diagnostics.candidateDiagnostics : []
+		if (candidateDiagnostics.length) {
+			lines.push('候选定位诊断：')
+			candidateDiagnostics.slice(0, 2).forEach((item) => lines.push(clampText(String(item || ''), 700)))
+		}
+	}
+
+	function formatProgressStageSummary(diagnostics) {
+		if (!diagnostics || typeof diagnostics !== 'object') return ''
+		const planning = formatStageCountMap(diagnostics.planningStageCounts, PLANNING_STAGE_EXPORT_LABELS)
+		const runtime = formatStageCountMap(diagnostics.runtimeStageCounts, RUNTIME_STAGE_EXPORT_LABELS)
+		return [
+			planning ? `规划 ${planning}` : '',
+			runtime ? `运行 ${runtime}` : '',
+		].filter(Boolean).join('；')
+	}
+
+	const PLANNING_STAGE_EXPORT_LABELS = {
+		observation_summary: '页面观察',
+		task_intent_request: '任务理解请求',
+		task_intent_heuristic: '本地任务理解',
+		workflow_analysis: '工作流分析',
+		workflow_decision: '确定性决策',
+		model_request: '模型规划',
+		model_compact_request: '精简模型规划',
+		model_context_round: '上下文补充轮',
+		model_wait_heartbeat: '模型等待',
+		model_stream_delta: '模型流式输出',
+		compact_retry: '压缩重试',
+		planning_context_request: '上下文请求',
+		planning_context: '上下文结果',
+		validation_feedback: '动作校验反馈',
+		timeout_recovery: '超时恢复',
+		timeout_no_recovery: '超时无恢复',
+	}
+
+	const RUNTIME_STAGE_EXPORT_LABELS = {
+		observation_heartbeat: '页面观察',
+		action_execution_heartbeat: '动作执行',
+		execution_recovery: '执行恢复',
+		verification_heartbeat: '动作复核',
+		verification_recovery: '校验恢复',
+	}
+
+	function formatStageCountMap(counts, labels) {
+		if (!counts || typeof counts !== 'object') return ''
+		return Object.entries(counts)
+			.filter(([, count]) => Number(count) > 0)
+			.map(([stage, count]) => `${labels?.[stage] || stage} ${Number(count)}`)
+			.join('，')
+	}
+
+	function appendTraceSummaryExport(lines, traceItems) {
+		const items = Array.isArray(traceItems) ? traceItems : []
+		lines.push('', '执行轨迹摘要')
+		if (!items.length) {
+			lines.push('暂无轨迹。')
+			return
+		}
+		items.slice(-80).forEach((item, index) => {
+			const actionName = item?.action?.name || item?.action || ''
+			const output = item?.action?.output || item?.detail || ''
+			const title = item?.title || getTraceTypeLabel(item)
+			const pieces = [
+				`${index + 1}. ${title || '执行步骤'}`,
+				actionName ? `动作=${actionName}` : '',
+				output ? `结果=${clampText(output, 260)}` : '',
+			].filter(Boolean)
+			lines.push(pieces.join('；'))
+		})
+		if (items.length > 80) lines.push(`仅展示最后 80 条轨迹；完整轨迹见 JSON 附录。`)
+	}
+
+	function formatExportStatus(status) {
+		const code = String(status || '').trim()
+		return STATUS_LABELS[code] || code || '未知'
 	}
 
 	function downloadTextFile(fileName, text) {
@@ -974,7 +1569,7 @@
 	}
 
 	function buildExportFileName(payload) {
-		const session = payload?.session || {}
+		const session = sanitizeSessionExportPayload(payload)?.session || {}
 		const stamp = new Date()
 			.toISOString()
 			.replace(/[:.]/g, '-')
@@ -983,6 +1578,164 @@
 		const task = sanitizeFileName(session.latestTask || session.task || 'session').slice(0, 48)
 		const id = sanitizeFileName(session.id || 'unknown').slice(0, 28)
 		return `naturalclick_${stamp}_${id}_${task}.txt`
+	}
+
+	function sanitizeSessionExportPayload(payload) {
+		const cloned = cloneJson(payload)
+		if (!cloned || typeof cloned !== 'object') return cloned
+		const sensitiveValues = collectExportSensitiveValues(cloned)
+		return redactExportValue(cloned, sensitiveValues)
+	}
+
+	function collectExportSensitiveValues(value) {
+		const values = []
+		const visit = (node) => {
+			if (node === null || node === undefined) return
+			if (typeof node === 'string') {
+				values.push(...extractSensitiveAssignments(node))
+				return
+			}
+			if (Array.isArray(node)) {
+				node.forEach(visit)
+				return
+			}
+			if (typeof node !== 'object') return
+			if (isExportSensitiveObject(node)) {
+				for (const candidate of [
+					node.text,
+					node.value,
+					node.workflow_test_value,
+					node.lastTestValue,
+					node.selected_text,
+					node.option,
+				]) pushSensitiveValue(values, candidate)
+				for (const candidate of [
+					node.summary,
+					node.basis,
+					node.reason,
+					node.output,
+					node.detail,
+				]) {
+					values.push(...extractSensitiveObjectTextTokens(candidate))
+				}
+			}
+			for (const [key, child] of Object.entries(node)) {
+				if (isExportSensitiveKey(key)) pushSensitiveValue(values, child)
+				visit(child)
+			}
+		}
+		visit(value)
+		return uniqueExportSensitiveValues(values)
+	}
+
+	function isExportSensitiveObject(value) {
+		if (!value || typeof value !== 'object') return false
+		const descriptor = [
+			value.target_label,
+			value.workflow_field_label,
+			value.label,
+			value.name,
+			value.placeholder,
+			value.type,
+			value.fieldType,
+			value.workflow_field_type,
+			value.semanticContainer,
+		].map((item) => String(item || '')).join(' ')
+		return isExportSensitiveDescriptor(descriptor)
+	}
+
+	function isExportSensitiveKey(key) {
+		return /(?:api[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|password|passcode|pwd|otp|captcha|verification|secret|token|密码|口令|验证码|校验码|动态码|安全码|密钥|令牌)/i.test(String(key || ''))
+	}
+
+	function isExportSensitiveDescriptor(text) {
+		return /(?:password|passcode|pwd|otp|captcha|verification|secret|token|密码|口令|验证码|校验码|动态码|安全码|密钥|令牌)/i.test(String(text || ''))
+	}
+
+	function extractSensitiveAssignments(text) {
+		const out = []
+		const source = String(text || '')
+		const pattern = /(?:密码|口令|验证码|校验码|动态码|安全码|密钥|令牌|password|passcode|pwd|otp|captcha|verification(?:\s*code)?|secret|token|api[_-]?key)\s*(是|为|=|:|：)?\s*([^\s,，;；。"'<>`]+)/gi
+		for (const match of source.matchAll(pattern)) {
+			const hasSeparator = !!String(match[1] || '').trim()
+			const candidate = String(match[2] || '').trim()
+			if (hasSeparator || isLikelyUnseparatedSecretToken(candidate)) pushSensitiveValue(out, candidate)
+		}
+		return out
+	}
+
+	function extractSensitiveObjectTextTokens(text) {
+		const source = String(text || '')
+		if (!source) return []
+		const out = []
+		for (const match of source.matchAll(/[A-Za-z0-9!@#$%^&*_=+\-./\\:;?]{4,}/g)) {
+			const token = String(match[0] || '').trim()
+			if (!token || !isLikelyUnseparatedSecretToken(token)) continue
+			pushSensitiveValue(out, token)
+		}
+		return out
+	}
+
+	function isLikelyUnseparatedSecretToken(value) {
+		const text = String(value || '').trim()
+		if (text.length < 4) return false
+		if (/[0-9]/.test(text)) return true
+		if (/[^A-Za-z\u4e00-\u9fff]/.test(text)) return true
+		if (/^[A-Za-z]{10,}$/.test(text)) return true
+		return false
+	}
+
+	function pushSensitiveValue(values, value) {
+		if (Array.isArray(value)) {
+			value.forEach((item) => pushSensitiveValue(values, item))
+			return
+		}
+		if (value === null || value === undefined || typeof value === 'object') return
+		const text = String(value).trim()
+		if (text.length >= 4 && text !== '已隐藏') values.push(text)
+	}
+
+	function uniqueExportSensitiveValues(values) {
+		const out = []
+		const seen = new Set()
+		for (const value of (Array.isArray(values) ? values : [])) {
+			const text = String(value || '').trim()
+			if (!text || seen.has(text)) continue
+			seen.add(text)
+			out.push(text)
+		}
+		return out.sort((a, b) => b.length - a.length)
+	}
+
+	function redactExportValue(value, sensitiveValues, parentKey = '') {
+		if (typeof value === 'string') return redactExportText(value, sensitiveValues)
+		if (Array.isArray(value)) return value.map((item) => redactExportValue(item, sensitiveValues, parentKey))
+		if (!value || typeof value !== 'object') {
+			return isExportSensitiveKey(parentKey) && String(value ?? '').trim() ? '已隐藏' : value
+		}
+		const out = {}
+		for (const [key, child] of Object.entries(value)) {
+			if (isExportSensitiveKey(key) && String(child ?? '').trim()) {
+				out[key] = '已隐藏'
+				continue
+			}
+			out[key] = redactExportValue(child, sensitiveValues, key)
+		}
+		return out
+	}
+
+	function redactExportText(text, sensitiveValues) {
+		let out = String(text || '')
+		for (const value of (Array.isArray(sensitiveValues) ? sensitiveValues : [])) {
+			const secret = String(value || '').trim()
+			if (secret.length < 4) continue
+			out = out.replace(new RegExp(escapeRegExp(secret), 'g'), '已隐藏')
+		}
+		return out
+	}
+
+	function escapeRegExp(value) {
+		return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 	}
 
 	function sanitizeFileName(value) {
@@ -1029,6 +1782,7 @@
 					traceItems: state.traceItems,
 					planItems: state.planItems,
 					activityText: state.activityText,
+					resultSummary: cloneJson(state.resultSummary || null),
 					runtimeSessionId: currentSessionId,
 				},
 				{ source: 'live' }
@@ -1048,6 +1802,9 @@
 
 	function normalizeSessionSnapshot(session, meta = {}) {
 		const traceItems = Array.isArray(session?.traceItems) ? session.traceItems : []
+		const diagnostics = buildSessionDiagnostics(traceItems)
+		const activityText = String(session?.activityText || state.activityText || '')
+		const resultSummary = resolveSessionResultSummary(session, traceItems, diagnostics, activityText)
 		return {
 			source: meta.source || 'unknown',
 			id: String(session?.id || ''),
@@ -1059,11 +1816,196 @@
 			updatedAt: Number(session?.updatedAt || Date.now()),
 			turnCount: Number(session?.turnCount || inferTurnCount(session)),
 			traceCount: traceItems.length,
-			activityText: String(session?.activityText || state.activityText || ''),
+			activityText,
 			planItems: cloneJson(session?.planItems || []),
-			diagnostics: buildSessionDiagnostics(traceItems),
+			resultSummary,
+			diagnostics,
 			traceItems: cloneJson(traceItems),
 		}
+	}
+
+	function resolveSessionResultSummary(session, traceItems, diagnostics, activityText = '') {
+		const existing = cloneJson(session?.resultSummary || null)
+		if (existing && typeof existing === 'object' && String(existing.headline || '').trim()) return existing
+		return buildFallbackResultSummary(session, traceItems, diagnostics, activityText)
+	}
+
+	function buildFallbackResultSummary(session, traceItems, diagnostics, activityText = '') {
+		const status = String(session?.status || state.status || '').trim()
+		const items = Array.isArray(traceItems) ? traceItems : []
+		const sensitiveValues = collectExportSensitiveValues({
+			session,
+			traceItems,
+			diagnostics,
+			activityText,
+		})
+		const issue = redactExportText(pickFallbackResultIssue(status, diagnostics, activityText), sensitiveValues)
+		if (!status && !items.length && !issue) return null
+		const mappedStatus = status === 'completed'
+			? 'inconclusive'
+			: status === 'running'
+				? 'running'
+				: status === 'stopped'
+					? 'stopped'
+					: status === 'error'
+						? 'failed'
+						: 'inconclusive'
+		const stats = {
+			total: items.length,
+			modelErrors: Number(diagnostics?.modelErrorCount || 0),
+			timeouts: Number(diagnostics?.timeoutCount || 0),
+			loopGuards: Number(diagnostics?.loopGuardCount || 0),
+			verificationFailures: Number(diagnostics?.verificationFailureCount || 0),
+			dateCandidateOwnership: Number(diagnostics?.dateCandidateOwnershipCount || 0),
+			verificationRecoveryIncomplete: Number(diagnostics?.verificationRecoveryIncompleteCount || 0),
+			contextRequestLimit: Number(diagnostics?.contextRequestLimitCount || 0),
+			terminalFailed: issue && status === 'error' ? 1 : 0,
+		}
+		const headline = buildFallbackResultHeadline(status, items.length, stats)
+		const fallbackDiagnostics = buildFallbackResultDiagnostics(status, issue, diagnostics, { sensitiveValues })
+		const issueLabel = status === 'stopped' ? '终止原因' : '最后问题'
+		return {
+			type: 'general_fallback',
+			title: '任务结果摘要',
+			status: mappedStatus,
+			headline,
+			stats,
+			diagnostics: fallbackDiagnostics,
+			items: [],
+			issues: issue ? [{
+				label: issueLabel,
+				status: status === 'stopped' ? 'stopped' : 'failed',
+				statusLabel: status === 'stopped' ? '已中止' : '失败',
+				summary: issue,
+			}] : [],
+			remaining: [],
+			reason: issue,
+			text: [
+				headline,
+				...fallbackDiagnostics.map((item) => `诊断：${item.text}`),
+				issue ? `${issueLabel}：${issue}` : '',
+			].filter(Boolean).join('\n'),
+			fallback: true,
+			generatedAt: Date.now(),
+		}
+	}
+
+	function pickFallbackResultIssue(status, diagnostics, activityText) {
+		const values = [
+			diagnostics?.lastError?.detail,
+			diagnostics?.lastModelError?.message,
+			status === 'completed' ? '' : activityText,
+		]
+		for (const value of values) {
+			const text = String(value || '').replace(/\s+/g, ' ').trim()
+			if (text) return clampText(text, 500)
+		}
+		return ''
+	}
+
+	function buildFallbackResultHeadline(status, traceCount, stats) {
+		const label = status === 'completed'
+			? '任务已完成'
+			: status === 'running'
+				? '任务执行中'
+				: status === 'stopped'
+					? '任务已中止'
+					: status === 'error'
+						? '任务未完成'
+						: '任务状态未确认'
+		const extras = [
+			Number(stats.modelErrors) ? `模型错误 ${Number(stats.modelErrors)} 次` : '',
+			Number(stats.timeouts) ? `超时 ${Number(stats.timeouts)} 次` : '',
+			Number(stats.loopGuards) ? `循环保护 ${Number(stats.loopGuards)} 次` : '',
+			Number(stats.verificationFailures) ? `校验失败 ${Number(stats.verificationFailures)} 次` : '',
+			Number(stats.dateCandidateOwnership) ? `日期候选归属 ${Number(stats.dateCandidateOwnership)} 次` : '',
+			Number(stats.verificationRecoveryIncomplete) ? `校验恢复未完成 ${Number(stats.verificationRecoveryIncomplete)} 次` : '',
+			Number(stats.contextRequestLimit) ? `上下文补证上限 ${Number(stats.contextRequestLimit)} 次` : '',
+		].filter(Boolean)
+		return `${label}：已记录 ${traceCount} 条轨迹${extras.length ? `，${extras.join('，')}` : ''}。`
+	}
+
+	function buildFallbackResultDiagnostics(status, issue, diagnostics, options = {}) {
+		const out = []
+		const text = String(issue || '').trim()
+		if (text) {
+			out.push({
+				kind: status === 'stopped' ? 'task_stopped' : 'task_terminal_failure',
+				severity: status === 'stopped' ? 'warning' : 'error',
+				count: 1,
+				text: status === 'stopped' ? `任务已中止：${text}` : `任务终止：${text}`,
+			})
+		}
+		if (Number(diagnostics?.modelErrorCount || 0)) {
+			out.push({
+				kind: 'model_error',
+				severity: 'error',
+				count: Number(diagnostics.modelErrorCount || 0),
+				text: `模型调用异常：${Number(diagnostics.modelErrorCount || 0)} 次。`,
+			})
+		}
+		if (Number(diagnostics?.timeoutCount || 0)) {
+			out.push({
+				kind: 'timeout',
+				severity: 'warning',
+				count: Number(diagnostics.timeoutCount || 0),
+				text: `等待或请求超时：${Number(diagnostics.timeoutCount || 0)} 次。`,
+			})
+		}
+		if (Number(diagnostics?.loopGuardCount || 0)) {
+			out.push({
+				kind: 'loop_guard',
+				severity: 'warning',
+				count: Number(diagnostics.loopGuardCount || 0),
+				text: `循环保护触发：${Number(diagnostics.loopGuardCount || 0)} 次。`,
+			})
+		}
+		if (Number(diagnostics?.dateCandidateOwnershipCount || 0)) {
+			out.push({
+				kind: 'date_candidate_ownership',
+				severity: 'warning',
+				count: Number(diagnostics.dateCandidateOwnershipCount || 0),
+				text: `日期/时间候选归属不足：${Number(diagnostics.dateCandidateOwnershipCount || 0)} 条轨迹显示日期弹层候选没有稳定归属到目标字段。`,
+			})
+			out.push({
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: '建议：复查日期/时间选择器的弹层归属、当前活动字段和候选坐标，优先让候选稳定归属到对应字段后再选择。',
+			})
+		}
+		if (Number(diagnostics?.verificationRecoveryIncompleteCount || 0)) {
+			out.push({
+				kind: 'verification_recovery_incomplete',
+				severity: 'warning',
+				count: Number(diagnostics.verificationRecoveryIncompleteCount || 0),
+				text: `校验恢复未完成：${Number(diagnostics.verificationRecoveryIncompleteCount || 0)} 条轨迹包含恢复处理失败、跳过或不适合视觉恢复的原因。`,
+			})
+			out.push({
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: '建议：不要重复同一失败动作；先重新观察页面状态，确认目标是否被遮挡、候选是否归属当前字段，再换定位或补上下文。',
+			})
+		}
+		if (Number(diagnostics?.contextRequestLimitCount || 0)) {
+			out.push({
+				kind: 'context_request_limit',
+				severity: 'warning',
+				count: Number(diagnostics.contextRequestLimitCount || 0),
+				text: `上下文补证达到上限：${Number(diagnostics.contextRequestLimitCount || 0)} 条轨迹显示模型连续请求内部上下文仍未形成可执行证据。`,
+			})
+			out.push({
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: '建议：先查看最后的补充上下文，确认是缺少页面证据、候选归属不稳定，还是目标字段定位不稳定，再重新规划。',
+			})
+		}
+		return out.map((item) => ({
+			...item,
+			text: redactExportText(item.text, options.sensitiveValues),
+		}))
 	}
 
 	function buildSessionDiagnostics(traceItems) {
@@ -1086,6 +2028,13 @@
 			timeoutCount: items.filter((item) => /超时|timeout/i.test(`${item?.title || ''} ${item?.detail || ''}`)).length,
 			loopGuardCount: items.filter((item) => /循环保护|loop_guard/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
 			verificationFailureCount: items.filter((item) => /校验失败|verify/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
+			dateCandidateOwnershipCount: items.filter(isDateCandidateOwnershipTrace).length,
+			verificationRecoveryIncompleteCount: items.filter(isVerificationRecoveryIncompleteTrace).length,
+			contextRequestLimitCount: items.filter(isContextRequestLimitTrace).length,
+			planningStageCounts: countProgressStages(items, 'planning'),
+			runtimeStageCounts: countProgressStages(items, 'runtime'),
+			lastPlanningProgress: getLastProgressTrace(items, 'planning'),
+			lastRuntimeProgress: getLastProgressTrace(items, 'runtime'),
 			candidateDiagnostics: extractCandidateDiagnostics(modelItems),
 			lastError: lastError ? {
 				title: String(lastError.title || ''),
@@ -1095,6 +2044,83 @@
 			lastModelError: lastModelErrorItem ? getModelErrorSummary(lastModelErrorItem) : null,
 			modelThoughts,
 		}
+	}
+
+	function isContextRequestLimitTrace(item) {
+		const input = item?.action?.input && typeof item.action.input === 'object' ? item.action.input : {}
+		if (input.planning_context_limit === true) return true
+		const text = [
+			item?.title,
+			item?.detail,
+			item?.action?.name,
+			item?.action?.output,
+			input.text,
+			input.reason,
+			input.planning_context_diagnostic,
+			input.workflow_planning_context_diagnostic,
+		].map((value) => String(value || '')).join(' ')
+		return /(内部\s*(?:ReAct\s*)?上下文请求次数达到上限|上下文请求次数达到上限|planning_context_limit|context[-_\s]?request[-_\s]?limit|context[-_\s]?round[-_\s]?limit|补充上下文.*上限|上下文补证.*上限)/i.test(text)
+	}
+
+	function isVerificationRecoveryIncompleteTrace(item) {
+		const text = [
+			item?.title,
+			item?.detail,
+			item?.action?.name,
+			item?.action?.output,
+			item?.action?.input?.workflow_result_summary,
+			item?.action?.input?.reason,
+		].map((value) => String(value || '')).join(' ')
+		return /(恢复处理[:：]|视觉恢复失败|视觉回退失败|不支持视觉恢复|不适合视觉恢复|不做视觉恢复|恢复未完成|recovery\s+failed|verification_recovery.*failed|vision_recovery.*failed)/i.test(text)
+	}
+
+	function isDateCandidateOwnershipTrace(item) {
+		const input = item?.action?.input && typeof item.action.input === 'object' ? item.action.input : {}
+		const text = [
+			item?.title,
+			item?.detail,
+			item?.action?.name,
+			item?.action?.output,
+			input.text,
+			input.reason,
+			input.workflow_result_summary,
+			input.workflow_skip_reason,
+			input.planning_context_diagnostic,
+			input.workflow_planning_context_diagnostic,
+		].map((value) => String(value || '')).join(' ')
+		if (!/(日期|时间|date|time|daterange|datetime|timerange|起止|区间|范围)/i.test(text)) return false
+		return /(诊断候选|字段外可见|字段外候选|global_popup_diagnostic|global_selectable_popup_diagnostic|未归属|候选未能与目标字段建立稳定归属|没有稳定归属|未观测到真实候选)/i.test(text)
+	}
+
+	function countProgressStages(items, group) {
+		const out = {}
+		for (const item of (Array.isArray(items) ? items : [])) {
+			if (!isProgressTraceGroup(item, group)) continue
+			const stage = String(item?.progress?.stage || '').trim()
+			if (!stage) continue
+			out[stage] = Number(out[stage] || 0) + 1
+		}
+		return out
+	}
+
+	function getLastProgressTrace(items, group) {
+		for (const item of [...(Array.isArray(items) ? items : [])].reverse()) {
+			if (!isProgressTraceGroup(item, group)) continue
+			return {
+				stage: String(item?.progress?.stage || '').trim(),
+				title: String(item?.title || ''),
+				detail: clampText(String(item?.detail || ''), 800),
+			}
+		}
+		return null
+	}
+
+	function isProgressTraceGroup(item, group) {
+		const stage = String(item?.progress?.stage || '').trim()
+		if (!stage) return false
+		if (group === 'runtime') return /_heartbeat$/.test(stage) && stage !== 'model_wait_heartbeat'
+		if (group === 'planning') return stage === 'model_wait_heartbeat' || !/_heartbeat$/.test(stage)
+		return false
 	}
 
 	function extractCandidateDiagnostics(modelItems) {
@@ -1189,14 +2215,25 @@
 			const statusCode = String(session.status || 'error')
 			const safeStatus = escapeHtml(statusCode)
 			const statusLabel = escapeHtml(STATUS_LABELS[statusCode] || statusCode)
-			const steps = Array.isArray(session.traceItems) ? session.traceItems.length : 0
+			const historyTraceItems = Array.isArray(session.traceItems) ? session.traceItems : []
+			const historyDiagnostics = buildSessionDiagnostics(historyTraceItems)
+			const historyResultSummary = resolveSessionResultSummary(
+				session,
+				historyTraceItems,
+				historyDiagnostics,
+				String(session.activityText || '')
+			)
+			const steps = historyTraceItems.length
 			const turns = Number(session.turnCount || inferTurnCount(session))
+			const resultPreview = buildHistoryResultPreview(historyResultSummary)
+			const safeResultPreview = escapeHtml(resultPreview)
 			card.innerHTML = `
 				<div class="sp-history-main" data-action="view">
 					<div class="sp-history-title" title="${safeTask}">${safeTask}</div>
 					<div class="sp-history-meta">
 						<span class="sp-badge ${safeStatus}">${statusLabel}</span>${formatDate(session.createdAt)} · ${turns} 轮 · ${steps} 条
 					</div>
+					${safeResultPreview ? `<div class="sp-history-result" title="${safeResultPreview}">${safeResultPreview}</div>` : ''}
 				</div>
 				<div class="sp-history-actions">
 					<button class="sp-btn sp-history-action" type="button" data-action="rerun" title="再次执行">再次执行</button>
@@ -1205,6 +2242,26 @@
 			`
 			el.historyList.appendChild(card)
 		})
+	}
+
+	function buildHistoryResultPreview(summary) {
+		if (!summary || typeof summary !== 'object') return ''
+		const parts = [
+			String(summary.headline || '').trim(),
+			String(summary.reason || '').trim() ? `原因：${String(summary.reason || '').trim()}` : '',
+			formatHistoryIssuePreview(summary.issues),
+		].filter(Boolean)
+		return clampText(parts.join(' '), 180)
+	}
+
+	function formatHistoryIssuePreview(issues) {
+		const items = (Array.isArray(issues) ? issues : []).filter((item) => item && (item.summary || item.label))
+		if (!items.length) return ''
+		return `重点：${items.slice(0, 2).map((item) => [
+			String(item.label || '未命名项').trim(),
+			String(item.statusLabel || item.status || '').trim(),
+			String(item.summary || '').trim(),
+		].filter(Boolean).join(' ')).join('；')}`
 	}
 
 	function renderHistoryDetail() {
@@ -1225,8 +2282,12 @@
 		el.historyDetailTaskValue.textContent = `${session.task || session.latestTask || ''}（${turns} 轮）`
 		el.historyDetailList.innerHTML = ''
 		const traceItems = Array.isArray(session.traceItems) ? session.traceItems : []
+		const resultSummary = renderResultSummaryCard(
+			resolveSessionResultSummary(session, traceItems, buildSessionDiagnostics(traceItems), String(session.activityText || ''))
+		)
+		if (resultSummary) el.historyDetailList.appendChild(resultSummary)
 		if (!traceItems.length) {
-			el.historyDetailList.innerHTML = '<div class="sp-empty">该会话没有轨迹记录。</div>'
+			if (!resultSummary) el.historyDetailList.innerHTML = '<div class="sp-empty">该会话没有轨迹记录。</div>'
 			return
 		}
 
@@ -1240,7 +2301,7 @@
 			prev === 'running' && (next === 'completed' || next === 'error' || next === 'stopped')
 		if (!completed) return
 		if (!state.currentTask) return
-		if (!Array.isArray(state.traceItems) || !state.traceItems.length) return
+		if (!hasPersistableSessionPayload()) return
 		const sessionId = String(payloadSessionId || currentSessionId || '')
 		if (sessionId && sessionId === lastPersistedSessionId) return
 
@@ -1250,6 +2311,19 @@
 		if (!currentConversationId) {
 			ensureConversation(state.currentTask)
 		}
+		const traceItems = (Array.isArray(state.traceItems) ? state.traceItems : []).slice(-600)
+		const diagnostics = buildSessionDiagnostics(traceItems)
+		const resultSummary = resolveSessionResultSummary(
+			{
+				status: state.status,
+				activityText: state.activityText,
+				resultSummary: state.resultSummary,
+				traceItems,
+			},
+			traceItems,
+			diagnostics,
+			state.activityText
+		)
 		const record = {
 			id: currentConversationId,
 			task: currentConversationTitle || state.currentTask,
@@ -1257,11 +2331,12 @@
 			status: state.status,
 			createdAt: currentConversationStartedAt || Date.now(),
 			updatedAt: Date.now(),
-			turnCount: Math.max(currentConversationTurnCount, inferTurnCount({ traceItems: state.traceItems })),
+			turnCount: Math.max(currentConversationTurnCount, inferTurnCount({ traceItems })),
 			runtimeSessionId: sessionId,
 			activityText: state.activityText,
 			planItems: cloneJson(state.planItems || []),
-			traceItems: state.traceItems.slice(-600),
+			resultSummary: cloneJson(resultSummary || null),
+			traceItems,
 		}
 		const existingIndex = state.sessions.findIndex((item) => item.id === record.id)
 		if (existingIndex >= 0) {
@@ -1275,6 +2350,13 @@
 		}
 		lastPersistedSessionId = sessionId
 		await persistSessions()
+	}
+
+	function hasPersistableSessionPayload() {
+		const hasTraceItems = Array.isArray(state.traceItems) && state.traceItems.length > 0
+		const hasResultSummary = !!state.resultSummary && typeof state.resultSummary === 'object'
+		const hasPlanItems = Array.isArray(state.planItems) && state.planItems.length > 0
+		return hasTraceItems || hasResultSummary || hasPlanItems
 	}
 
 	async function loadSessions() {
@@ -1315,6 +2397,7 @@
 		state.currentTask = ''
 		state.traceItems = []
 		state.planItems = []
+		state.resultSummary = null
 		state.status = 'idle'
 		state.activityText = '已新建会话，等待任务...'
 		state.view = { name: 'chat' }

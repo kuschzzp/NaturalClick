@@ -26,7 +26,9 @@ It observes the active page through structured DOM extraction, sends the current
 
 This is **not** a stealth automation toolkit or a CAPTCHA bypass project. The goal is transparent, debuggable, user-controlled browser automation for real web workflows.
 
-Current extension version: `0.4.51`. The source of truth is `naturalclick-extension/manifest.json`.
+Current extension version: `0.5.1`. The source of truth is `naturalclick-extension/manifest.json`.
+
+Version rule: the tail version must stay in `1-99`; after `0.X.99`, carry to `0.(X+1).1`. Every `0.X.1` release must be committed and pushed once.
 
 ## Install
 
@@ -163,7 +165,7 @@ docs/
 | Capability | Current Support |
 |---|---|
 | DOM indexing | Interactive elements, fields, labels, roles, placeholders, value state |
-| Form understanding | Username, password, confirm password, phone, OTP, invite code, nickname, email, department, role, platform, region, date |
+| Form understanding | Login fields, contact fields, structured selects, date/picker controls, native options, validation state, and labels |
 | Selection controls | Explicit open/choose tools for selects, checkbox-like options, radio-like options, tree nodes, and Element-style dropdowns |
 | Cascaders | Full-path cascader selection with parent hover, leaf click, and dialog-safe popup dismissal |
 | Deterministic workflows | Target URL, login, task navigation, search/filter testing, and constrained form-fill timeout recovery |
@@ -187,12 +189,12 @@ docs/
 | `hover_element_by_index` | Hover an observed element, mainly for menus and cascaders |
 | `scroll` | Scroll the page or a target container vertically |
 | `scroll_horizontally` | Scroll the page or a target container horizontally |
-| `keypress` | Dispatch keyboard events to the active element |
-| `open_new_tab` | Open a URL in a new Chrome tab |
-| `switch_to_tab` | Switch to an existing tab |
-| `close_tab` | Close an existing tab |
-| `wait` | Wait briefly for async page, dialog, or dropdown changes |
-| `ask_user` | Ask the user for missing credentials, CAPTCHA, or confirmation |
+| `keypress` | Dispatch keyboard events to the active element with a declared target or purpose |
+| `open_new_tab` | Open a URL in a new Chrome tab with declared target context |
+| `switch_to_tab` | Switch to an existing tab with declared target context |
+| `close_tab` | Close an existing tab with declared target and reason |
+| `wait` | Wait briefly for async page, dialog, or dropdown changes with a declared reason |
+| `ask_user` | Ask the user for missing information with a declared reason |
 | `locate_by_vision` | Trigger semantic screenshot-based targeting for a click or input |
 | `done` | End the task with a final message |
 

@@ -19,6 +19,7 @@
 
 		const viewport = effectiveObservation?.viewport || { width: 1280, height: 720 }
 		const candidateResults = []
+		const actionAttempts = []
 
 		const mmResult = await locateByVisionModel(
 			session,
@@ -31,7 +32,9 @@
 		)
 		candidateResults.push(mmResult)
 		if (mmResult.success && mmResult.confidence >= VISION_CONFIDENCE_THRESHOLD) {
-			return executeVisionLocatedAction(session, decision.action, mmResult, 'multi_modal')
+			const executed = await executeVisionLocatedAction(session, decision.action, mmResult, 'multi_modal')
+			if (executed.success) return executed
+			actionAttempts.push(executed)
 		}
 
 		if (!isSameVisionEndpoint(session.config.multiModalLLM, session.config.visionService)) {
@@ -46,14 +49,20 @@
 			)
 			candidateResults.push(visionResult)
 			if (visionResult.success && visionResult.confidence >= VISION_CONFIDENCE_THRESHOLD) {
-				return executeVisionLocatedAction(session, decision.action, visionResult, 'vision_service')
+				const executed = await executeVisionLocatedAction(session, decision.action, visionResult, 'vision_service')
+				if (executed.success) return executed
+				actionAttempts.push(executed)
 			}
 		}
 
-		const reason = candidateResults
-			.map((r) => `${r.source}: ${r.success ? `confidence=${r.confidence}` : r.message}`)
+		const reason = [
+			...candidateResults.map((r) => `${r.source}: ${r.success ? `confidence=${r.confidence}` : r.message}`),
+			...actionAttempts.map(summarizeVisionActionAttempt),
+		]
+			.filter(Boolean)
 			.join('; ')
-		return { success: false, message: reason || '视觉定位没有返回可用坐标。' }
+		const meta = buildVisionFallbackFailureMeta(actionAttempts)
+		return { success: false, message: reason || '视觉定位没有返回可用坐标。', meta }
 	}
 
 	async function getLatestObservation(session, fallback) {
@@ -71,6 +80,7 @@
 	async function executeVisionLocatedAction(session, action, located, source) {
 		const candidates = buildCandidatePoints(located)
 		const errors = []
+		const coordinateAttempts = []
 		const needEditable = ['input_text', 'type'].includes(action?.name)
 		const inputMode = session?.config?.inputMode === 'standard' ? 'standard' : 'realistic'
 
@@ -78,23 +88,33 @@
 			const point = candidates[i]
 			const hit = await hitTestPoint(session, point.x, point.y)
 			if (!hit.success) {
-				errors.push(`attempt${i + 1}: hittest failed`)
+				const message = 'hittest failed'
+				errors.push(`attempt${i + 1}: ${message}`)
+				coordinateAttempts.push(buildCoordinateAttempt(i + 1, point, 'hittest', message))
 				continue
 			}
 			if (hit.hit?.ignored) {
-				errors.push(`attempt${i + 1}: hit ignored area`)
+				const message = 'hit ignored area'
+				errors.push(`attempt${i + 1}: ${message}`)
+				coordinateAttempts.push(buildCoordinateAttempt(i + 1, point, 'hittest', message, { hitTarget: hit.hit || null }))
 				continue
 			}
 			if (needEditable && !hit.hit?.editable) {
-				errors.push(`attempt${i + 1}: target not editable`)
+				const message = 'target not editable'
+				errors.push(`attempt${i + 1}: ${message}`)
+				coordinateAttempts.push(buildCoordinateAttempt(i + 1, point, 'hittest', message, { hitTarget: hit.hit || null }))
 				continue
 			}
 			if (!needEditable && !hit.hit?.clickable && !hit.hit?.editable) {
-				errors.push(`attempt${i + 1}: target not clickable`)
+				const message = 'target not clickable'
+				errors.push(`attempt${i + 1}: ${message}`)
+				coordinateAttempts.push(buildCoordinateAttempt(i + 1, point, 'hittest', message, { hitTarget: hit.hit || null }))
 				continue
 			}
 			if (!isHitCompatibleWithVisionTarget(hit.hit, located, action)) {
-				errors.push(`attempt${i + 1}: target mismatch (${hit.hit?.text || hit.hit?.tag || 'unknown'})`)
+				const message = `target mismatch (${hit.hit?.text || hit.hit?.tag || 'unknown'})`
+				errors.push(`attempt${i + 1}: ${message}`)
+				coordinateAttempts.push(buildCoordinateAttempt(i + 1, point, 'hittest', message, { hitTarget: hit.hit || null }))
 				continue
 			}
 
@@ -107,6 +127,8 @@
 							x: point.x,
 							y: point.y,
 							text: action?.input?.text || '',
+							target_label: action?.input?.target_label || '',
+							target_description: action?.input?.target_description || action?.input?.description || '',
 						},
 						meta: { inputMode },
 					},
@@ -128,15 +150,70 @@
 						},
 					}
 				}
-				errors.push(`attempt${i + 1}: ${result?.message || 'action failed'}`)
+				const actionMeta = result?.meta && typeof result.meta === 'object' ? result.meta : {}
+				const message = result?.message || 'action failed'
+				errors.push(`attempt${i + 1}: ${message}`)
+				coordinateAttempts.push(buildCoordinateAttempt(i + 1, point, 'action', message, {
+					outcome: actionMeta.outcome || null,
+					clickTarget: actionMeta.clickTarget || null,
+					hitTarget: actionMeta.hitTarget || null,
+				}))
 			} catch (error) {
-				errors.push(`attempt${i + 1}: ${String(error)}`)
+				const message = String(error)
+				errors.push(`attempt${i + 1}: ${message}`)
+				coordinateAttempts.push(buildCoordinateAttempt(i + 1, point, 'action', message))
 			}
 		}
 
+		const lastAttempt = coordinateAttempts[coordinateAttempts.length - 1] || null
+		const outcomeAttempt = [...coordinateAttempts].reverse().find((attempt) => attempt?.outcome)
 		return {
 			success: false,
 			message: `${source} 坐标动作执行失败: ${errors.join('; ') || 'unknown reason'}`,
+			meta: {
+				point: lastAttempt?.point || null,
+				source,
+				vision: located.meta || null,
+				coordinateOutcome: outcomeAttempt?.outcome || null,
+				coordinateAttempts,
+			},
+		}
+	}
+
+	function buildCoordinateAttempt(attempt, point, stage, message, extra = {}) {
+		return {
+			attempt,
+			stage,
+			message,
+			point: { x: point.x, y: point.y },
+			...extra,
+		}
+	}
+
+	function summarizeVisionActionAttempt(result) {
+		if (!result) return ''
+		const source = result?.meta?.source || 'vision'
+		const outcome = result?.meta?.coordinateOutcome
+		const reason = outcome?.reason || outcome?.kind || ''
+		const suffix = reason ? ` outcome=${reason}` : ''
+		return `${source}: action_failed=${shortText(result.message || 'coordinate action failed', 160)}${suffix}`
+	}
+
+	function buildVisionFallbackFailureMeta(actionAttempts) {
+		const attempts = Array.isArray(actionAttempts)
+			? actionAttempts.map((attempt) => attempt?.meta).filter((meta) => meta && typeof meta === 'object')
+			: []
+		if (!attempts.length) return null
+		const last = attempts[attempts.length - 1]
+		return {
+			...last,
+			coordinateOutcome: last.coordinateOutcome || null,
+			visionAttempts: attempts.map((attempt) => ({
+				source: attempt.source || null,
+				point: attempt.point || null,
+				coordinateOutcome: attempt.coordinateOutcome || null,
+				coordinateAttempts: Array.isArray(attempt.coordinateAttempts) ? attempt.coordinateAttempts : [],
+			})),
 		}
 	}
 
@@ -570,5 +647,6 @@
 	}
 	g.NC_BG_VISION_TESTS = {
 		buildVisionCandidateSummary,
+		executeVisionLocatedAction,
 	}
 })(globalThis)

@@ -1,31 +1,25 @@
 ;(function (g) {
 	const DROPDOWN_FIELD_TYPES = new Set([
 		'select',
-		'platform',
-		'role',
-		'department',
-		'position',
-		'region',
-		'gender',
 		'date',
 		'time',
 		'daterange',
+		'datetimerange',
+		'timerange',
+		'month',
+		'monthrange',
+		'year',
+		'yearrange',
+		'week',
+		'weekrange',
 		'datetime',
 	])
 	const ALWAYS_SELECTION_FIELD_TYPES = new Set([
 		'select',
-		'platform',
-		'role',
-		'department',
-		'position',
-		'region',
-		'gender',
-		'status',
-		'state',
-		'category',
 	])
 	const DROPDOWN_ROLES = new Set(['combobox', 'listbox'])
 	const OPTION_ROLES = new Set(['option', 'treeitem'])
+	const OPTION_CONTROLS = new Set(['cascader-leaf', 'date-option'])
 	const SELECTABLE_ROLES = new Set(['checkbox', 'radio', 'switch'])
 	const DROPDOWN_CONTROLS = new Set(['dropdown', 'select', 'cascader', 'cascader-parent', 'cascader-leaf'])
 	const SELECTABLE_CONTROLS = new Set(['checkbox', 'radio', 'switch'])
@@ -39,8 +33,19 @@
 	const OPTION_ASSOCIATION_SCORES = Object.freeze({
 		controlledPopup: 0,
 		popupLabelledBy: 100,
+		expandedDatePopup: 300,
 		geometryOffset: 1000,
 		unknown: Number.MAX_SAFE_INTEGER,
+	})
+	const DATE_OPTION_ASSOCIATION = Object.freeze({
+		maxHorizontalDistancePx: 420,
+		maxHorizontalDistanceFieldWidths: 3.5,
+		maxNearbyHorizontalDistancePx: 960,
+		maxNearbyHorizontalDistanceFieldWidths: 8,
+		maxVerticalGapPx: 520,
+		maxNearbyVerticalGapPx: 680,
+		maxExpandedVerticalGapPx: 1100,
+		aboveBias: 180,
 	})
 
 	function describeObservedControl(item, source = '') {
@@ -48,13 +53,15 @@
 		const tag = normalizeToken(item?.tag)
 		const control = normalizeToken(item?.selectionControl || item?.control)
 		const fieldType = normalizeToken(item?.fieldType)
+		const compactFieldType = compactTypeToken(fieldType)
 		const sourceName = normalizeToken(source).split(':')[0]
 		const editable = item?.editable === true ? true : item?.editable === false ? false : null
 		const hasOptions = Array.isArray(item?.optionLabels) && item.optionLabels.length > 0
 		const sourceSelection = SELECTION_SOURCES.has(sourceName)
 		const fieldTypeSuggestsDropdown =
 			ALWAYS_SELECTION_FIELD_TYPES.has(fieldType) ||
-			(DROPDOWN_FIELD_TYPES.has(fieldType) &&
+			ALWAYS_SELECTION_FIELD_TYPES.has(compactFieldType) ||
+			((DROPDOWN_FIELD_TYPES.has(fieldType) || DROPDOWN_FIELD_TYPES.has(compactFieldType)) &&
 			!(editable === true && role === 'textbox' && !control && !hasOptions)
 			)
 		const dropdownLike =
@@ -69,7 +76,7 @@
 		const optionLike =
 			sourceSelection ||
 			OPTION_ROLES.has(role) ||
-			control === 'cascader-leaf'
+			OPTION_CONTROLS.has(control)
 		const selectionLike = dropdownLike || selectableLike || optionLike
 		const editableTextLike = editable === true && !selectionLike
 		return {
@@ -163,24 +170,190 @@
 			? Number.POSITIVE_INFINITY
 			: Number(options.unknownScore)
 		if (!optionItem || !targetItem) return normalizeAssociationScore(unknownScore)
+		const dateOptionScore = scoreDateOptionTargetAssociation(optionItem, targetItem)
 		const controlledIds = extractObservedHintIdRefs(targetItem?.relationHints, ['aria-controls', 'aria-owns'])
 		if (controlledIds.length) {
-			return observedOptionMatchesControlledPopup(optionItem, controlledIds)
-				? OPTION_ASSOCIATION_SCORES.controlledPopup
-				: Number.POSITIVE_INFINITY
+			if (observedOptionMatchesControlledPopup(optionItem, controlledIds)) return OPTION_ASSOCIATION_SCORES.controlledPopup
+			if (
+				Number.isFinite(dateOptionScore) &&
+				isExpandedDateLikeTargetItem(targetItem) &&
+				!dateOptionHasAuthoritativeOwnerConflict(optionItem, targetItem, controlledIds)
+			) {
+				return dateOptionScore
+			}
+			return Number.POSITIVE_INFINITY
 		}
 		const labelledByIds = extractObservedHintIdRefs(optionItem?.popupHints, ['popupLabelledBy'])
 		if (labelledByIds.length) {
 			const targetIds = getObservedTargetAssociationIds(targetItem)
-			return labelledByIds.some((id) => targetIds.includes(id))
-				? OPTION_ASSOCIATION_SCORES.popupLabelledBy
-				: Number.POSITIVE_INFINITY
+			if (targetIds.length) {
+				const matched = labelledByIds.some((id) => targetIds.includes(id))
+				if (matched) return OPTION_ASSOCIATION_SCORES.popupLabelledBy
+				if (Number.isFinite(dateOptionScore) && isExpandedDateLikeTargetItem(targetItem)) return dateOptionScore
+				return Number.POSITIVE_INFINITY
+			}
 		}
+		if (Number.isFinite(dateOptionScore)) return dateOptionScore
 		const geometryScore = scoreOptionTargetGeometry(optionItem?.rect, targetItem?.rect)
 		if (Number.isFinite(geometryScore)) {
 			return geometryScore + OPTION_ASSOCIATION_SCORES.geometryOffset
 		}
 		return normalizeAssociationScore(unknownScore)
+	}
+
+	function dateOptionHasAuthoritativeOwnerConflict(optionItem, targetItem, controlledIds = []) {
+		if (!isDatePickerOptionItem(optionItem) || !isDateLikeTargetItem(targetItem)) return false
+		const popupIds = extractObservedHintIdRefs(optionItem?.popupHints, ['popupId'])
+		if (
+			popupIds.length &&
+			Array.isArray(controlledIds) &&
+			controlledIds.length &&
+			!popupIds.some((id) => controlledIds.includes(id))
+		) {
+			return true
+		}
+		const labelledByIds = extractObservedHintIdRefs(optionItem?.popupHints, ['popupLabelledBy'])
+		if (!labelledByIds.length) return false
+		const targetIds = getObservedTargetAssociationIds(targetItem)
+		if (!targetIds.length) return false
+		return !labelledByIds.some((id) => targetIds.includes(id))
+	}
+
+	function scoreDateOptionTargetAssociation(optionItem, targetItem) {
+		if (!isDatePickerOptionItem(optionItem) || !isDateLikeTargetItem(targetItem)) return Number.POSITIVE_INFINITY
+		if (isCollapsedDateLikeTargetItem(targetItem)) return Number.POSITIVE_INFINITY
+		const option = normalizeRect(optionItem?.rect)
+		const target = normalizeRect(targetItem?.rect)
+		if (!option || !target) return Number.POSITIVE_INFINITY
+		const expandedScore = scoreExpandedDatePopupAssociation(option, target, targetItem)
+		if (Number.isFinite(expandedScore)) return expandedScore
+		const targetBottom = target.top + target.height
+		const optionBottom = option.top + option.height
+		const verticalGap = Math.min(
+			Math.abs(option.top - targetBottom),
+			Math.abs(target.top - optionBottom)
+		)
+		if (verticalGap > DATE_OPTION_ASSOCIATION.maxVerticalGapPx) return Number.POSITIVE_INFINITY
+		const fieldCenterX = target.left + target.width / 2
+		const optionCenterX = option.left + option.width / 2
+		const horizontalDistance = Math.abs(fieldCenterX - optionCenterX)
+		const maxHorizontalDistance = Math.max(
+			DATE_OPTION_ASSOCIATION.maxHorizontalDistancePx,
+			target.width * DATE_OPTION_ASSOCIATION.maxHorizontalDistanceFieldWidths
+		)
+		if (horizontalDistance > maxHorizontalDistance) {
+			return scoreNearbyDatePopupAssociation(option, target, targetItem, {
+				verticalGap,
+				horizontalDistance,
+			})
+		}
+		const aboveBias = option.top >= target.top ? 0 : DATE_OPTION_ASSOCIATION.aboveBias
+		return OPTION_ASSOCIATION_SCORES.geometryOffset + verticalGap * 1000 + horizontalDistance + aboveBias
+	}
+
+	function scoreNearbyDatePopupAssociation(option, target, targetItem, measurements = {}) {
+		if (!isDateLikeTargetItem(targetItem) || isCollapsedDateLikeTargetItem(targetItem)) {
+			return Number.POSITIVE_INFINITY
+		}
+		const verticalGap = Number(measurements.verticalGap)
+		const horizontalDistance = Number(measurements.horizontalDistance)
+		if (!Number.isFinite(verticalGap) || !Number.isFinite(horizontalDistance)) {
+			return Number.POSITIVE_INFINITY
+		}
+		if (verticalGap > DATE_OPTION_ASSOCIATION.maxNearbyVerticalGapPx) {
+			return Number.POSITIVE_INFINITY
+		}
+		const maxHorizontalDistance = Math.max(
+			DATE_OPTION_ASSOCIATION.maxNearbyHorizontalDistancePx,
+			target.width * DATE_OPTION_ASSOCIATION.maxNearbyHorizontalDistanceFieldWidths
+		)
+		if (horizontalDistance > maxHorizontalDistance) return Number.POSITIVE_INFINITY
+		const targetBottom = target.top + target.height
+		const optionBottom = option.top + option.height
+		const optionNearVerticalBand =
+			option.top >= target.top - DATE_OPTION_ASSOCIATION.maxVerticalGapPx &&
+			target.top <= optionBottom + DATE_OPTION_ASSOCIATION.maxVerticalGapPx
+		if (!optionNearVerticalBand) return Number.POSITIVE_INFINITY
+		const aboveBias = option.top >= targetBottom ? 0 : DATE_OPTION_ASSOCIATION.aboveBias
+		return OPTION_ASSOCIATION_SCORES.geometryOffset + 450 + verticalGap * 600 + horizontalDistance + aboveBias
+	}
+
+	function scoreExpandedDatePopupAssociation(option, target, targetItem) {
+		if (!isExpandedDateLikeTargetItem(targetItem)) return Number.POSITIVE_INFINITY
+		const targetBottom = target.top + target.height
+		const optionBottom = option.top + option.height
+		const verticalGap = Math.min(
+			Math.abs(option.top - targetBottom),
+			Math.abs(target.top - optionBottom)
+		)
+		if (verticalGap > DATE_OPTION_ASSOCIATION.maxExpandedVerticalGapPx) return Number.POSITIVE_INFINITY
+		const fieldCenterX = target.left + target.width / 2
+		const optionCenterX = option.left + option.width / 2
+		const horizontalDistance = Math.abs(fieldCenterX - optionCenterX)
+		return OPTION_ASSOCIATION_SCORES.expandedDatePopup +
+			Math.min(420, verticalGap / 2) +
+			Math.min(220, horizontalDistance / 3)
+	}
+
+	function isDatePickerOptionItem(item) {
+		const info = describeObservedControl(item, 'popups')
+		if (info.control === 'date-option') return true
+		const label = String(item?.label || item?.text || '').trim()
+		return info.optionLike && /^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(label)
+	}
+
+	function isDateLikeTargetItem(item) {
+		const info = describeObservedControl(item, 'forms')
+		if (isDateLikeFieldTypeToken(info.fieldType)) return true
+		const text = [
+			item?.fieldType,
+			item?.label,
+			item?.placeholder,
+			item?.name,
+			item?.text,
+			item?.semanticContainer,
+			item?.selectionControl,
+			item?.controlKind,
+		].map((value) => String(value || '')).join(' ')
+		return /日期|时间|date|time|range|picker/i.test(text)
+	}
+
+	function isDateLikeFieldTypeToken(value) {
+		const key = compactTypeToken(value)
+		return [
+			'date',
+			'time',
+			'datetime',
+			'month',
+			'year',
+			'week',
+			'daterange',
+			'datetimerange',
+			'timerange',
+			'monthrange',
+			'yearrange',
+			'weekrange',
+		].includes(key)
+	}
+
+	function isExpandedDateLikeTargetItem(item) {
+		if (!isDateLikeTargetItem(item)) return false
+		const stateText = [
+			item?.expandedState,
+			item?.stateHints,
+			item?.popupHints,
+		].map((value) => String(value || '').toLowerCase()).join(' ')
+		return /(expanded|open|opened|visible|active|弹层|展开|已展开)/i.test(stateText)
+	}
+
+	function isCollapsedDateLikeTargetItem(item) {
+		if (!isDateLikeTargetItem(item)) return false
+		const stateText = [
+			item?.expandedState,
+			item?.stateHints,
+			item?.popupHints,
+		].map((value) => String(value || '').toLowerCase()).join(' ')
+		return /(collapsed|closed|hidden|inactive|收起|关闭|未展开)/i.test(stateText)
 	}
 
 	function observedOptionMatchesControlledPopup(optionItem, controlledIds) {
@@ -247,25 +420,35 @@
 		return raw === '-' ? '' : raw
 	}
 
+	function compactTypeToken(value) {
+		return normalizeToken(value).replace(/[-_\s]+/g, '')
+	}
+
 	function escapeRegExp(value) {
 		return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 	}
 
 	g.NC_CONTROL_SEMANTICS = {
 		DROPDOWN_FIELD_TYPES,
+		DATE_OPTION_ASSOCIATION,
 		GEOMETRY_ASSOCIATION,
 		OPTION_ASSOCIATION_SCORES,
 		describeObservedControl,
 		extractObservedHintIdRefs,
 		getObservedTargetAssociationIds,
 		isOptionTargetGeometryRelated,
+		isDateLikeFieldTypeToken,
 		isObservedDropdownLike,
 		isObservedPlainEditableText,
 		isObservedSelectionLike,
 		normalizeRect,
 		normalizeToken,
+		compactTypeToken,
 		observedOptionMatchesControlledPopup,
 		observedOptionMatchesPopupLabelledByTarget,
+		scoreNearbyDatePopupAssociation,
+		scoreExpandedDatePopupAssociation,
+		scoreDateOptionTargetAssociation,
 		scoreObservedOptionAssociation,
 		scoreOptionTargetGeometry,
 	}

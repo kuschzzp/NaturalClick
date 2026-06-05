@@ -1,5 +1,11 @@
 ;(function (g) {
 	const { MAX_CONSECUTIVE_FAILURES } = g.NC_BG_CONSTANTS
+	const OBSERVATION_HEARTBEAT_INITIAL_MS = 2200
+	const OBSERVATION_HEARTBEAT_INTERVAL_MS = 4500
+	const ACTION_EXECUTION_HEARTBEAT_INITIAL_MS = 2500
+	const ACTION_EXECUTION_HEARTBEAT_INTERVAL_MS = 5000
+	const VERIFICATION_HEARTBEAT_INITIAL_MS = 1800
+	const VERIFICATION_HEARTBEAT_INTERVAL_MS = 4000
 	const sessionRecords = g.NC_BG_SESSION_RECORDS
 	if (!sessionRecords) throw new Error('NC_BG_SESSION_RECORDS 未加载。')
 	const sessionRecovery = g.NC_BG_SESSION_RECOVERY
@@ -41,6 +47,7 @@
 		finalizeIfAborted,
 		finalizeStoppedSession,
 		publishPlanningProgress,
+		publishRuntimeProgress,
 		publishSession,
 	} = sessionLifecycle
 	const {
@@ -59,13 +66,18 @@
 			session.activityText = `第 ${session.step} 步：观察页面...`
 			publishSession(session)
 
-			const observation = await g.NC_BG_EXECUTOR.requestObservation(session.currentTabId)
+			const observation = await requestObservationWithProgressHeartbeat(session, () =>
+				g.NC_BG_EXECUTOR.requestObservation(session.currentTabId)
+			)
 			if (finalizeIfAborted(session, sessions)) return
 			if (!observation?.ok) {
 				failSession(session, observation?.error || '无法读取页面状态', sessions)
 				return
 			}
+			session.observedFieldInventory = buildObservedFieldInventory(observation.data)
 
+			session.currentRuntimeProgress = null
+			session.planItems = derivePlanItems(session)
 			session.activityText = `第 ${session.step} 步：规划动作...`
 			publishSession(session)
 
@@ -87,6 +99,8 @@
 				failSession(session, '模型返回了无效动作', sessions)
 				return
 			}
+			session.currentPlanningProgress = null
+			session.planItems = derivePlanItems(session)
 
 			if (decision.action.name === 'done') {
 				const unsafeDone = getUnsafeDoneSuccessReason(session, decision)
@@ -127,8 +141,7 @@
 						outcome: doneOutcome,
 					},
 				})
-				session.planItems = derivePlanItems(session)
-				recordWorkflowOutcome(session, decision, {
+				recordWorkflowOutcomeAndRefreshPlan(session, decision, {
 					success: doneSuccess,
 					output: doneOutput,
 					outcome: doneOutcome,
@@ -146,7 +159,7 @@
 				continue
 			}
 
-			session.activityText = `第 ${session.step} 步：执行 ${decision.action.name}...`
+			session.activityText = buildDecisionActivityText(session, decision)
 			publishSession(session)
 
 			const danger = g.NC_BG_CONFIRMATION.detectDangerousAction(session, decision)
@@ -175,12 +188,17 @@
 					message: redundantInput.reason,
 				}
 			} else {
-				execution = await g.NC_BG_EXECUTOR.executeAction(session, decision.action)
+				execution = await executeActionWithProgressHeartbeat(session, decision.action, () =>
+					g.NC_BG_EXECUTOR.executeAction(session, decision.action)
+				)
 			}
+			session.currentRuntimeProgress = null
 			if (finalizeIfAborted(session, sessions)) return
 			if (shouldAttemptExecutionVisionFallback(decision.action, execution)) {
-				session.activityText = buildExecutionVisionFallbackActivityText(session, execution)
-				publishSession(session)
+				publishRuntimeProgress(session, {
+					stage: 'execution_recovery',
+					text: buildExecutionVisionFallbackActivityText(session, execution),
+				})
 				if (finalizeIfAborted(session, sessions)) return
 
 				execution = await attemptExecutionVisionFallback(
@@ -189,6 +207,7 @@
 					observation.data,
 					execution
 				)
+				session.currentRuntimeProgress = null
 				if (finalizeIfAborted(session, sessions)) return
 			}
 
@@ -201,12 +220,18 @@
 			) {
 				session.activityText = `第 ${session.step} 步：动作超时，正在观察页面状态确认是否已生效...`
 				publishSession(session)
-				const postFailureVerify = await g.NC_BG_VERIFIER.verifyExecutionOutcome(
+				const postFailureVerify = await verifyActionWithProgressHeartbeat(
 					session,
 					decision.action,
-					observation.data,
-					execution
+					() => g.NC_BG_VERIFIER.verifyExecutionOutcome(
+						session,
+						decision.action,
+						observation.data,
+						execution
+					),
+					{ failedExecution: true }
 				)
+				session.currentRuntimeProgress = null
 				if (finalizeIfAborted(session, sessions)) return
 				if (postFailureVerify?.ok) {
 					const reason = String(postFailureVerify.reason || '动作后页面状态已满足目标')
@@ -238,6 +263,7 @@
 				success: execution.success,
 				output: executionOutput,
 				outcome: executionOutcome,
+				verifiedAfterFailure: execution?.meta?.verifiedAfterFailure === true,
 			})
 			appendTrace(session, {
 				title: `步骤 ${session.step}: ${decision.action.name}`,
@@ -250,10 +276,9 @@
 					output: executionOutput,
 				},
 			})
-			session.planItems = derivePlanItems(session)
 
 			if (!execution.success) {
-				recordWorkflowOutcome(session, decision, {
+				recordWorkflowOutcomeAndRefreshPlan(session, decision, {
 					success: false,
 					output: executionOutput,
 					outcome: executionOutcome,
@@ -278,12 +303,17 @@
 				!execution?.meta?.verifiedAfterFailure
 			if (shouldVerify) {
 				if (finalizeIfAborted(session, sessions)) return
-				const verify = await g.NC_BG_VERIFIER.verifyExecutionOutcome(
+				const verify = await verifyActionWithProgressHeartbeat(
 					session,
 					decision.action,
-					observation.data,
-					execution
+					() => g.NC_BG_VERIFIER.verifyExecutionOutcome(
+						session,
+						decision.action,
+						observation.data,
+						execution
+					)
 				)
+				session.currentRuntimeProgress = null
 				if (finalizeIfAborted(session, sessions)) return
 				if (!verify.ok) {
 					const recovery = await attemptVerificationRecovery(
@@ -293,11 +323,14 @@
 						verify.reason,
 						{
 							onProgress: (text) => {
-								session.activityText = text
-								publishSession(session)
+								publishRuntimeProgress(session, {
+									stage: 'verification_recovery',
+									text,
+								})
 							},
 						}
 					)
+					session.currentRuntimeProgress = null
 					if (finalizeIfAborted(session, sessions)) return
 					if (recovery.success) {
 						const recoveryOutput = appendExecutionOutcomeSummary(recovery.message, recovery)
@@ -325,8 +358,7 @@
 								output: recoveryOutput,
 							},
 						})
-						session.planItems = derivePlanItems(session)
-						recordWorkflowOutcome(session, decision, {
+						recordWorkflowOutcomeAndRefreshPlan(session, decision, {
 							success: true,
 							output: recoveryOutput,
 							outcome: recoveryOutcome,
@@ -337,7 +369,10 @@
 						publishSession(session)
 						continue
 					}
-					const verifyMsg = appendVerificationFailureOutcome(`动作校验失败: ${verify.reason}`, verify.reason)
+					const verifyMsg = appendVerificationFailureOutcome(
+						buildVerificationFailureOutput(verify.reason, recovery),
+						verify.reason
+					)
 					const verifyOutcome = createVerificationFailureOutcome(verify.reason)
 					session.history.push({
 						stepIndex: `${session.step}.v`,
@@ -361,7 +396,7 @@
 							output: verifyMsg,
 						},
 					})
-					recordWorkflowOutcome(session, decision, {
+					recordWorkflowOutcomeAndRefreshPlan(session, decision, {
 						success: false,
 						output: verifyMsg,
 						outcome: verifyOutcome,
@@ -382,9 +417,10 @@
 					continue
 				}
 				recordVerificationSuccess(session, decision, verify)
+				session.activityText = session.history[session.history.length - 1]?.output || session.activityText
 			}
 
-			recordWorkflowOutcome(session, decision, {
+			recordWorkflowOutcomeAndRefreshPlan(session, decision, {
 				success: true,
 				output: session.history[session.history.length - 1]?.output || executionOutput,
 				outcome: session.history[session.history.length - 1]?.outcome || executionOutcome,
@@ -400,9 +436,8 @@
 		}
 
 		if (session.status === 'running') {
-			session.status = 'error'
-			session.activityText = '达到最大步数，任务未完成。'
-			publishSession(session)
+			failSession(session, '达到最大步数，任务未完成。', sessions)
+			return
 		}
 		sessions.delete(session.id)
 	}
@@ -419,6 +454,400 @@
 				kind: 'error',
 			})
 		}
+	}
+
+	function recordWorkflowOutcomeAndRefreshPlan(session, decision, outcome) {
+		recordWorkflowOutcome(session, decision, outcome)
+		session.planItems = derivePlanItems(session)
+	}
+
+	function buildDecisionActivityText(session, decision) {
+		const step = Number(session?.step) || 0
+		const input = decision?.action?.input || {}
+		const workflowStep = String(input.workflow_step || '').trim()
+		const workflowText = buildWorkflowStepActivityText(workflowStep, input)
+		if (workflowText) return `第 ${step} 步：${workflowText}...`
+		const goal = cleanActivityFragment(decision?.next_goal)
+		if (goal) return `第 ${step} 步：${goal}...`
+		const actionName = String(decision?.action?.name || '动作').trim()
+		if (actionName === 'wait') {
+			const reason = cleanActivityFragment(input.reason || input.purpose)
+			if (reason) return `第 ${step} 步：${/^等待/.test(reason) ? reason : `等待${reason}`}...`
+		}
+		const target = cleanActivityFragment(input.target_label || input.workflow_field_label || input.label || input.text)
+		return target
+			? `第 ${step} 步：执行 ${actionName}：${target}...`
+			: `第 ${step} 步：执行 ${actionName}...`
+	}
+
+	function buildWorkflowStepActivityText(workflowStep, input) {
+		const label = cleanActivityFragment(input?.target_label || input?.workflow_field_label || input?.label || input?.text)
+		const templates = {
+			fill_username: '填写登录账号',
+			fill_password: '填写登录密码',
+			submit_login: '提交登录表单',
+			navigate_to_task_target: '进入目标模块',
+			reveal_navigation_options: '展开相关导航',
+			expand_search_panel: '展开搜索区域',
+			fill_field: '填写搜索字段',
+			open_dropdown: '展开搜索字段',
+			select_option: '选择搜索候选',
+			submit_search: '提交当前搜索',
+			reset_filters: '清空当前搜索条件',
+			clear_field: '清空搜索字段',
+			skip_field: '安全跳过搜索字段',
+			view_first_record_detail: '查看列表记录详情',
+			fill_form_field_timeout_recovery: '填写表单字段',
+			open_form_dropdown_timeout_recovery: '展开表单选择字段',
+			choose_form_dropdown_timeout_recovery: '选择表单候选',
+			select_cascader_path_timeout_recovery: '选择级联路径',
+			select_visible_cascader_option_timeout_recovery: '选择可见级联候选',
+			submit_form_timeout_recovery: '提交表单',
+			resolve_duplicate_field_conflict: '替换重复字段内容',
+			resolve_field_validation_error: '修正校验失败字段',
+			open_create_form_timeout_recovery: '打开创建入口',
+		}
+		const base = templates[workflowStep] || ''
+		if (!base) return ''
+		const detail = buildWorkflowActivityDetail(workflowStep, input)
+		const title = label ? `${base}：${label}` : base
+		return `${title}${detail}`
+	}
+
+	function buildWorkflowActivityDetail(workflowStep, input) {
+		if (!workflowStep || !input || typeof input !== 'object') return ''
+		const parts = []
+		const value = cleanActivityFragment(input.workflow_test_value || input.text || input.label)
+		const source = cleanActivityFragment(input.workflow_value_source)
+		const basis = cleanActivityFragment(input.workflow_value_basis)
+		if (['fill_field', 'select_option'].includes(workflowStep) && value) {
+			parts.push(`值=${value}`)
+		}
+		if (workflowStep === 'submit_search' && value) {
+			parts.push(`验证值=${value}`)
+		}
+		if (source) parts.push(`来源=${formatWorkflowValueSource(source)}`)
+		if (basis) parts.push(`依据=${basis}`)
+		if (workflowStep === 'reset_filters' && input.workflow_baseline_reset) {
+			parts.push('恢复列表基线')
+		}
+		if (workflowStep === 'clear_field') {
+			parts.push(input.workflow_clear_context === 'baseline' ? '字段级恢复基线' : '字段级置空兜底')
+		}
+		if (workflowStep === 'skip_field') {
+			parts.push('缺少真实样本/候选证据')
+		}
+		const navTarget = cleanActivityFragment(input.workflow_nav_key || input.workflow_nav_alias)
+		if (navTarget && !parts.includes(`目标=${navTarget}`)) parts.push(`目标=${navTarget}`)
+		const region = cleanActivityFragment(input.target_region || input.region)
+		if (region) parts.push(`区域=${region}`)
+		const index = Number(input.index)
+		if (Number.isFinite(index)) parts.push(`index=${index}`)
+		const resultStatus = cleanActivityFragment(input.workflow_result_status)
+		if (resultStatus) parts.push(`结果=${resultStatus}`)
+		return parts.length ? `（${parts.join('，')}）` : ''
+	}
+
+	function formatWorkflowValueSource(source) {
+		const key = String(source || '').trim()
+		const labels = {
+			table_sample: '列表样本',
+			task_value: '任务文本',
+			visible_option: '真实候选',
+			option_candidate: '真实候选',
+			missing_sample: '缺少样本',
+		}
+		return labels[key] || key
+	}
+
+	function cleanActivityFragment(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return ''
+		return text
+			.replace(/[。；;，,.\s]+$/g, '')
+			.slice(0, 96)
+	}
+
+	async function requestObservationWithProgressHeartbeat(session, requestObservation) {
+		const startedAt = Date.now()
+		let timer = null
+		const initialMs = getObservationHeartbeatInitialMs(session)
+		const intervalMs = getObservationHeartbeatIntervalMs(session)
+		const publishHeartbeat = () => {
+			if (session && !session.aborted && session.status === 'running') {
+				const elapsedMs = Date.now() - startedAt
+				publishRuntimeProgress(session, {
+					stage: 'observation_heartbeat',
+					elapsedMs,
+					text: buildObservationHeartbeatText(session, elapsedMs),
+				})
+			}
+			timer = setTimeout(publishHeartbeat, intervalMs)
+		}
+		timer = setTimeout(publishHeartbeat, initialMs)
+		try {
+			return await requestObservation()
+		} finally {
+			if (timer) clearTimeout(timer)
+		}
+	}
+
+	function getObservationHeartbeatInitialMs(session) {
+		return normalizeObservationHeartbeatMs(
+			session?.config?.observationHeartbeatInitialMs,
+			OBSERVATION_HEARTBEAT_INITIAL_MS
+		)
+	}
+
+	function getObservationHeartbeatIntervalMs(session) {
+		return normalizeObservationHeartbeatMs(
+			session?.config?.observationHeartbeatIntervalMs,
+			OBSERVATION_HEARTBEAT_INTERVAL_MS
+		)
+	}
+
+	function normalizeObservationHeartbeatMs(value, fallback) {
+		const number = Number(value)
+		if (!Number.isFinite(number)) return fallback
+		return Math.max(0, Math.min(60000, Math.round(number)))
+	}
+
+	function buildObservationHeartbeatText(session, elapsedMs = 0) {
+		const step = Number(session?.step) || 0
+		const seconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000))
+		return `第 ${step} 步：正在读取页面结构，已等待 ${seconds} 秒；正在提取可交互元素、表单字段、按钮、表格、弹层和候选项，页面较大时会先压缩观察再规划。`
+	}
+
+	function buildObservedFieldInventory(observation) {
+		const forms = Array.isArray(observation?.forms) ? observation.forms : []
+		const items = []
+		const seen = new Set()
+		for (const form of forms) {
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
+				const item = normalizeObservedFieldInventoryItem(field, form)
+				if (!item || seen.has(item.key)) continue
+				seen.add(item.key)
+				items.push(item)
+				if (items.length >= 120) return items
+			}
+		}
+		return items
+	}
+
+	function normalizeObservedFieldInventoryItem(field, form) {
+		if (!field || typeof field !== 'object') return null
+		const role = String(field.role || '').trim().toLowerCase()
+		if (/^(button|link|menuitem|tab|option|presentation)$/i.test(role)) return null
+		const label = String(
+			field.label ||
+			field.placeholder ||
+			field.name ||
+			field.text ||
+			''
+		).trim()
+		const index = Number(field.index)
+		if (!label && !Number.isFinite(index)) return null
+		const key = Number.isFinite(index)
+			? `index:${index}`
+			: `label:${normalizeInventoryText(label)}`
+		if (!key || key === 'label:') return null
+		return {
+			key,
+			index: Number.isFinite(index) ? index : null,
+			label: label || key,
+			kind: classifyObservedFieldKind(field),
+			role: role || '',
+			type: String(field.type || '').trim().toLowerCase(),
+			fieldType: String(field.fieldType || '').trim(),
+			control: String(field.selectionControl || field.control || '').trim(),
+			region: String(field.region || form?.region || '').trim(),
+			form: String(form?.name || form?.id || '').trim(),
+			valueState: String(field.valueState || '').trim().replace(/:.+$/, ''),
+		}
+	}
+
+	function classifyObservedFieldKind(field) {
+		const role = String(field?.role || '').trim().toLowerCase()
+		const type = String(field?.type || '').trim().toLowerCase()
+		const fieldType = String(field?.fieldType || '').trim().toLowerCase()
+		const control = String(field?.selectionControl || field?.control || '').trim().toLowerCase()
+		const combined = `${role} ${type} ${fieldType} ${control}`
+		if (/(select|dropdown|combobox|listbox|option|cascader|date|time|picker|calendar|checkbox|radio|switch|multi)/i.test(combined)) {
+			return 'selection'
+		}
+		if (
+			role === 'textbox' ||
+			/^(text|search|email|tel|url|number|password|textarea)$/i.test(type) ||
+			/(input|textarea|text|name|email|phone|tel|url|number|password|account|username|comment|remark)/i.test(fieldType)
+		) {
+			return 'input'
+		}
+		return 'field'
+	}
+
+	function normalizeInventoryText(value) {
+		return String(value || '').replace(/\s+/g, '').trim().toLowerCase()
+	}
+
+	async function executeActionWithProgressHeartbeat(session, action, executeAction) {
+		const startedAt = Date.now()
+		let timer = null
+		const initialMs = getActionExecutionHeartbeatInitialMs(session)
+		const intervalMs = getActionExecutionHeartbeatIntervalMs(session)
+		const publishHeartbeat = () => {
+			if (session && !session.aborted && session.status === 'running') {
+				const elapsedMs = Date.now() - startedAt
+				publishRuntimeProgress(session, {
+					stage: 'action_execution_heartbeat',
+					elapsedMs,
+					text: buildActionExecutionHeartbeatText(session, action, elapsedMs),
+				})
+			}
+			timer = setTimeout(publishHeartbeat, intervalMs)
+		}
+		timer = setTimeout(publishHeartbeat, initialMs)
+		try {
+			return await executeAction()
+		} finally {
+			if (timer) clearTimeout(timer)
+		}
+	}
+
+	function getActionExecutionHeartbeatInitialMs(session) {
+		return normalizeActionHeartbeatMs(
+			session?.config?.actionExecutionHeartbeatInitialMs,
+			ACTION_EXECUTION_HEARTBEAT_INITIAL_MS
+		)
+	}
+
+	function getActionExecutionHeartbeatIntervalMs(session) {
+		return normalizeActionHeartbeatMs(
+			session?.config?.actionExecutionHeartbeatIntervalMs,
+			ACTION_EXECUTION_HEARTBEAT_INTERVAL_MS
+		)
+	}
+
+	function normalizeActionHeartbeatMs(value, fallback) {
+		const number = Number(value)
+		if (!Number.isFinite(number)) return fallback
+		return Math.max(0, Math.min(60000, Math.round(number)))
+	}
+
+	function buildActionExecutionHeartbeatText(session, action, elapsedMs = 0) {
+		const step = Number(session?.step) || 0
+		const base = buildDecisionActivityText({ step }, { action }).replace(/\.\.\.$/, '')
+		const seconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000))
+		return `${base}，仍在执行，已等待 ${seconds} 秒；${buildActionExecutionWaitHint(action)}`
+	}
+
+	function buildActionExecutionWaitHint(action) {
+		const name = String(action?.name || '').trim()
+		const step = String(action?.input?.workflow_step || '').trim()
+		if (name === 'locate_by_vision') return '正在等待视觉定位或截图分析结果。'
+		if (/dropdown|option|cascader|select/i.test(name) || /open_dropdown|select_option|cascader/i.test(step)) {
+			return '正在等待候选弹层、选项列表或页面联动完成。'
+		}
+		if (step === 'clear_field') return '正在等待字段置空并校验清空结果。'
+		if (name === 'input_text' || /fill|input/i.test(step)) return '正在等待输入写入和页面校验完成。'
+		if (name === 'click_element_by_index' || name === 'click') return '正在等待点击后的页面响应或 DOM 更新。'
+		if (name === 'wait') {
+			const reason = cleanActivityFragment(action?.input?.reason || action?.input?.purpose)
+			return reason ? `正在${/^等待/.test(reason) ? reason : `等待${reason}`}。` : '正在等待页面状态变化。'
+		}
+		return '页面可能正在处理动作结果。'
+	}
+
+	async function verifyActionWithProgressHeartbeat(session, action, verifyAction, options = {}) {
+		const startedAt = Date.now()
+		let timer = null
+		const initialMs = getVerificationHeartbeatInitialMs(session)
+		const intervalMs = getVerificationHeartbeatIntervalMs(session)
+		const publishHeartbeat = (elapsedMs = Date.now() - startedAt) => {
+			if (session && !session.aborted && session.status === 'running') {
+				publishRuntimeProgress(session, {
+					stage: 'verification_heartbeat',
+					elapsedMs,
+					text: buildVerificationHeartbeatText(session, action, elapsedMs, options),
+				})
+			}
+		}
+		publishHeartbeat(0)
+		timer = setTimeout(function tick() {
+			publishHeartbeat()
+			timer = setTimeout(tick, intervalMs)
+		}, initialMs)
+		try {
+			return await verifyAction()
+		} finally {
+			if (timer) clearTimeout(timer)
+		}
+	}
+
+	function getVerificationHeartbeatInitialMs(session) {
+		return normalizeVerificationHeartbeatMs(
+			session?.config?.verificationHeartbeatInitialMs,
+			VERIFICATION_HEARTBEAT_INITIAL_MS
+		)
+	}
+
+	function getVerificationHeartbeatIntervalMs(session) {
+		return normalizeVerificationHeartbeatMs(
+			session?.config?.verificationHeartbeatIntervalMs,
+			VERIFICATION_HEARTBEAT_INTERVAL_MS
+		)
+	}
+
+	function normalizeVerificationHeartbeatMs(value, fallback) {
+		const number = Number(value)
+		if (!Number.isFinite(number)) return fallback
+		return Math.max(0, Math.min(60000, Math.round(number)))
+	}
+
+	function buildVerificationHeartbeatText(session, action, elapsedMs = 0, options = {}) {
+		const step = Number(session?.step) || 0
+		const seconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000))
+		const target = cleanActivityFragment(action?.input?.target_label || action?.input?.workflow_field_label || action?.input?.label || action?.input?.text)
+		const prefix = options?.failedExecution
+			? '动作执行超时后正在复核是否已生效'
+			: '正在复核动作是否真正生效'
+		const targetText = target ? `：${target}` : ''
+		return `第 ${step} 步：${prefix}${targetText}，已等待 ${seconds} 秒；${buildVerificationWaitHint(action)}`
+	}
+
+	function buildVerificationWaitHint(action) {
+		const name = String(action?.name || '').trim()
+		const step = String(action?.input?.workflow_step || '').trim()
+		if (name === 'locate_by_vision') {
+			return '正在用动作后的页面观察确认视觉定位结果是否推动了页面状态。'
+		}
+		if (name === 'input_text' || /fill|input|clear_field/i.test(step)) {
+			return '正在重新观察目标字段，确认值是否已写入、修正或清空。'
+		}
+		if (/open_dropdown/i.test(name) || step === 'open_dropdown') {
+			return '正在检查候选弹层或选项列表是否已经出现。'
+		}
+		if (/dropdown|option|cascader|select|checkbox/i.test(name) || /select_option|cascader/i.test(step)) {
+			return '正在检查字段值、选项状态、候选弹层或级联路径是否变化。'
+		}
+		if (/submit/i.test(step)) {
+			return '正在检查 URL、DOM、表单反馈、列表刷新或弹层状态是否变化。'
+		}
+		if (/scroll/i.test(name)) {
+			return '正在检查滚动位置、可见内容或容器状态是否变化。'
+		}
+		if (name === 'click_element_by_index' || name === 'click' || name === 'keypress' || name === 'hover_element_by_index') {
+			return '正在检查 URL、DOM、按钮状态、弹层或页面反馈是否变化。'
+		}
+		return '正在重新观察页面状态，确认动作是否产生可验证进展。'
+	}
+
+	function buildVerificationFailureOutput(reason, recovery) {
+		const verifyReason = String(reason || '未知原因').trim()
+		const recoveryMessage = String(recovery?.message || '').trim()
+		const base = `动作校验失败: ${verifyReason}`
+		if (!recoveryMessage) return base
+		if (base.includes(recoveryMessage)) return base
+		return `${base} | 恢复处理: ${recoveryMessage}`
 	}
 
 	function recordLoopGuardReplan(session, decision, loopGuard, sessions) {
@@ -506,6 +935,18 @@
 		hasVerifiedProgress,
 		getExecutionOutcome,
 		summarizeExecutionOutcome,
+		buildDecisionActivityText,
+		buildObservationHeartbeatText,
+		buildActionExecutionHeartbeatText,
+		buildVerificationHeartbeatText,
+		buildActionExecutionWaitHint,
+		buildVerificationWaitHint,
+		getObservationHeartbeatInitialMs,
+		getObservationHeartbeatIntervalMs,
+		getActionExecutionHeartbeatInitialMs,
+		getActionExecutionHeartbeatIntervalMs,
+		getVerificationHeartbeatInitialMs,
+		getVerificationHeartbeatIntervalMs,
 		shouldAttemptVisionFallbackForFailure,
 		stableActionInputSignature,
 	}
