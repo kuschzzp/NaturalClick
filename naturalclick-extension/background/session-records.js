@@ -69,9 +69,7 @@
 		return createActionOutcome(kind, {
 			progress: true,
 			reason: summarizeFailureReason(reason || '动作校验通过', 100),
-			...(Array.isArray(existing?.visibleOptions) && existing.visibleOptions.length
-				? { visibleOptions: existing.visibleOptions }
-				: {}),
+			...extractStructuredOutcomeEvidence(existing),
 		})
 	}
 
@@ -139,6 +137,15 @@
 		if (Array.isArray(outcome.visibleOptions) && outcome.visibleOptions.length) {
 			parts.push(`candidates=${formatOutcomeValue(outcome.visibleOptions.slice(0, 8).join('|'), 120)}`)
 		}
+		const requestedPath = formatOutcomeList(outcome.requestedPath, 8)
+		if (requestedPath) parts.push(`requestedPath=${formatOutcomeValue(requestedPath, 120)}`)
+		const selectedPath = formatOutcomeList(outcome.selectedPath, 8)
+		if (selectedPath) {
+			parts.push(`selectedPath=${formatOutcomeValue(selectedPath, 120)}`)
+		} else {
+			const selectedLabels = formatOutcomeList(outcome.selectedLabels, 8)
+			if (selectedLabels) parts.push(`selectedLabels=${formatOutcomeValue(selectedLabels, 120)}`)
+		}
 		if (Number.isFinite(Number(outcome.moved))) parts.push(`moved=${Number(outcome.moved)}`)
 		return parts.join(' ')
 	}
@@ -188,11 +195,33 @@
 		if (typeof outcome.progress === 'boolean') normalized.progress = outcome.progress
 		if (outcome.reason) normalized.reason = String(outcome.reason)
 		if (outcome.requestedText) normalized.requestedText = String(outcome.requestedText)
-		if (Array.isArray(outcome.visibleOptions)) {
-			normalized.visibleOptions = outcome.visibleOptions.map((item) => String(item)).filter(Boolean)
-		}
+		Object.assign(normalized, extractStructuredOutcomeEvidence(outcome))
 		if (Number.isFinite(Number(outcome.moved))) normalized.moved = Number(outcome.moved)
 		return normalized
+	}
+
+	function extractStructuredOutcomeEvidence(outcome) {
+		const evidence = {}
+		for (const key of ['visibleOptions', 'requestedPath', 'selectedPath', 'selectedLabels']) {
+			const values = normalizeOutcomeStringList(outcome?.[key])
+			if (values.length) evidence[key] = values
+		}
+		return evidence
+	}
+
+	function normalizeOutcomeStringList(value) {
+		if (!Array.isArray(value)) return []
+		return value.map((item) => String(item || '').trim()).filter(Boolean)
+	}
+
+	function formatOutcomeList(value, limit) {
+		if (!Array.isArray(value)) return ''
+		const max = Math.max(1, Number(limit) || 8)
+		return value
+			.map((item) => String(item || '').trim())
+			.filter(Boolean)
+			.slice(0, max)
+			.join('|')
 	}
 
 	function formatOutcomeValue(value, maxLen) {
@@ -214,15 +243,85 @@
 			}
 		})
 		const workflowItem = buildSearchWorkflowPlanItem(session)
+		const fieldActionWorkflowItem = workflowItem ? null : buildFieldActionWorkflowPlanItem(session)
 		const planningItem = buildCurrentPlanningProgressPlanItem(session)
 		const runtimeItem = buildCurrentRuntimeProgressPlanItem(session)
-		if (runtimeItem || planningItem || workflowItem) {
-			return [runtimeItem, planningItem, workflowItem, ...historyItems].filter(Boolean)
+		if (runtimeItem || planningItem || workflowItem || fieldActionWorkflowItem) {
+			return [runtimeItem, planningItem, workflowItem, fieldActionWorkflowItem, ...historyItems].filter(Boolean)
 		}
 		if (!historyItems.length) {
 			return [{ id: 'boot', title: '解析任务与页面状态', status: 'running' }]
 		}
 		return historyItems
+	}
+
+	function buildFieldActionWorkflowPlanItem(session) {
+		const summary = buildFieldActionWorkflowPlanSummary(session)
+		if (!summary || summary.type !== 'field_actions') return null
+		const stats = summary.stats && typeof summary.stats === 'object' ? summary.stats : {}
+		const total = Math.max(0, Number(stats.total) || 0)
+		const tested = Math.max(0, Number(stats.tested) || 0)
+		const passed = Math.max(0, Number(stats.passed) || 0)
+		const failed = Math.max(0, Number(stats.failed) || 0)
+		const remaining = Math.max(0, Number(stats.remaining) || 0)
+		const recovered = Math.max(0, Number(stats.recoveredFailures) || 0)
+		const terminalFailed = Math.max(0, Number(stats.terminalFailed) || 0)
+		if (!total && !tested && !failed && !remaining && !terminalFailed) return null
+		const focus = getFieldActionPlanFocus(summary)
+		const noun = formatFieldActionPlanNoun(summary)
+		const detail = [
+			total ? `进度 ${Math.min(tested, total)}/${total}` : `已记录 ${tested}`,
+			passed ? `通过 ${passed}` : '',
+			failed ? `失败 ${failed}` : '',
+			remaining ? `未测 ${remaining}` : '',
+			recovered ? `失败后成功 ${recovered}` : '',
+			terminalFailed ? `终态异常 ${terminalFailed}` : '',
+			focus.label ? `待处理：${focus.label}` : '',
+			focus.neededEvidence ? `缺证：${focus.neededEvidence}` : '',
+			focus.summary ? `说明：${focus.summary}` : '',
+		].filter(Boolean).join('，')
+		return {
+			id: 'field_action_workflow_progress',
+			title: `${noun}${detail ? `（${detail}）` : ''}`,
+			status: formatFieldActionPlanStatus(summary.status, session?.status),
+		}
+	}
+
+	function buildFieldActionWorkflowPlanSummary(session) {
+		const builder = g.NC_BG_RESULT_SUMMARY?.buildResultSummary
+		if (typeof builder !== 'function') return null
+		try {
+			const summary = builder(session)
+			return summary && summary.type === 'field_actions' ? summary : null
+		} catch (_) {
+			return null
+		}
+	}
+
+	function getFieldActionPlanFocus(summary) {
+		const remaining = Array.isArray(summary?.remainingDetails) ? summary.remainingDetails : []
+		const issues = Array.isArray(summary?.issues) ? summary.issues : []
+		const item = remaining.find(Boolean) || issues.find((entry) => String(entry?.status || '') !== 'passed') || null
+		if (!item) return { label: '', neededEvidence: '', summary: '' }
+		return {
+			label: cleanPlanFragment(item.label || item.key || ''),
+			neededEvidence: cleanPlanFragment(item.neededEvidence || ''),
+			summary: cleanPlanFragment(item.summary || ''),
+		}
+	}
+
+	function formatFieldActionPlanNoun(summary) {
+		const title = String(summary?.title || '').replace(/结果总结\s*$/i, '').trim()
+		return cleanPlanFragment(title || '字段测试')
+	}
+
+	function formatFieldActionPlanStatus(summaryStatus, sessionStatus) {
+		const status = String(summaryStatus || '').trim()
+		if (status === 'passed') return 'done'
+		if (status === 'failed') return 'failed'
+		if (status === 'stopped') return 'stopped'
+		if (status === 'running') return 'running'
+		return String(sessionStatus || '') === 'running' ? 'running' : 'failed'
 	}
 
 	function buildCurrentPlanningProgressPlanItem(session) {
@@ -236,9 +335,10 @@
 		const prefix = formatPlanningProgressStage(stage)
 		const hint = formatPlanningProgressHint(stage)
 		const roundText = round > 0 ? `，第 ${round} 轮` : ''
+		const elapsedText = formatProgressElapsed(progress, text)
 		return {
 			id: 'current_planning_progress',
-			title: `${prefix}${hint ? `（${hint}）` : ''}${roundText}：${text}`,
+			title: `${prefix}${hint ? `（${hint}）` : ''}${roundText}${elapsedText ? `，${elapsedText}` : ''}：${text}`,
 			status: 'running',
 		}
 	}
@@ -250,11 +350,29 @@
 		const text = cleanPlanFragment(progress.text || '')
 		if (!text) return null
 		const stage = String(progress.stage || '').trim()
+		const elapsedText = formatProgressElapsed(progress, text)
 		return {
 			id: 'current_runtime_progress',
-			title: `${formatRuntimeProgressStage(stage)}：${text}`,
+			title: `${formatRuntimeProgressStage(stage)}${elapsedText ? `（${elapsedText}）` : ''}：${text}`,
 			status: 'running',
 		}
+	}
+
+	function formatProgressElapsed(progress, existingText = '') {
+		const elapsedMs = Math.max(0, Number(progress?.elapsedMs) || 0)
+		if (!elapsedMs) return ''
+		if (/(?:已等待|耗时|用时|等待了)\s*\d|距离上次[^，。；;]*\d+\s*秒/.test(String(existingText || ''))) return ''
+		const timeoutMs = Math.max(0, Number(progress?.timeoutMs) || 0)
+		if (timeoutMs) return `耗时 ${formatProgressDuration(elapsedMs)}/${formatProgressDuration(timeoutMs)}`
+		return `耗时 ${formatProgressDuration(elapsedMs)}`
+	}
+
+	function formatProgressDuration(ms) {
+		const seconds = Math.max(1, Math.round(Number(ms || 0) / 1000))
+		if (seconds < 60) return `${seconds} 秒`
+		const minutes = Math.floor(seconds / 60)
+		const rest = seconds % 60
+		return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`
 	}
 
 	function formatRuntimeProgressStage(stage) {
@@ -283,6 +401,8 @@
 			compact_retry: '压缩上下文重试',
 			planning_context_request: '请求页面上下文',
 			planning_context: '补充页面上下文',
+			invalid_model_output: '模型输出纠偏',
+			invalid_action_name: '工具名纠偏',
 			validation_feedback: '执行前校验',
 			timeout_recovery: '超时恢复分析',
 			timeout_no_recovery: '超时停止分析',
@@ -300,12 +420,15 @@
 			'model_wait_heartbeat',
 			'model_stream_delta',
 			'compact_retry',
+			'invalid_model_output',
+			'invalid_action_name',
 			'timeout_recovery',
 			'timeout_no_recovery',
 		].includes(key)) {
 			return '尚未操作页面'
 		}
 		if (key === 'planning_context_request' || key === 'planning_context') return '只补证据'
+		if (key === 'invalid_model_output' || key === 'invalid_action_name') return '已拦截待重试'
 		if (key === 'validation_feedback') return '已拦截待改选'
 		if (key === 'workflow_analysis') return '核对页面证据'
 		if (key === 'workflow_decision') return '准备执行或结束'
@@ -405,6 +528,8 @@
 		if (source) parts.push(`依据：${source}${basis ? `/${basis}` : ''}`)
 		if (result?.status) parts.push(`结果：${formatSearchWorkflowResultStatus(result.status)}`)
 		if (Array.isArray(state?.skippedKeys) && key && state.skippedKeys.includes(key)) parts.push('状态：安全跳过')
+		const neededEvidence = buildSearchWorkflowNeededEvidence(state, field, result)
+		if (neededEvidence) parts.push(`缺证：${neededEvidence}`)
 		if (phase === 'awaiting_submit') parts.push('提交：待验证')
 		else if (phase === 'awaiting_reset') parts.push('清空：待清空')
 		else if (phase === 'awaiting_option') {
@@ -416,6 +541,23 @@
 			parts.push('依据：待从列表样本或任务值确认')
 		}
 		return parts.join('，')
+	}
+
+	function buildSearchWorkflowNeededEvidence(state, field, result) {
+		const key = String(field?.key || '').trim()
+		const label = cleanPlanFragment(field?.label || field?.key || '该字段')
+		const status = String(result?.status || '').trim()
+		const source = String(result?.source || field?.lastValueSource || '').trim()
+		const skipped = Array.isArray(state?.skippedKeys) && key && state.skippedKeys.includes(key)
+		const reason = [
+			result?.summary,
+			key && String(state?.terminalFieldKey || '') === key ? state?.terminalReason || state?.failedReason : '',
+		].filter(Boolean).join(' ')
+		const missingEvidence = status === 'unknown_missing_sample' ||
+			source === 'missing_sample' ||
+			(skipped && /(缺少|没有可用|样本|候选|证据|未观测|未归属|missing|candidate|sample|evidence)/i.test(reason))
+		if (!missingEvidence) return ''
+		return `${label} 需要真实列表样本、任务显式值或目标字段范围内可归属的真实候选`
 	}
 
 	function formatSearchWorkflowValueSource(source) {

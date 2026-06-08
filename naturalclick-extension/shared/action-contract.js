@@ -114,8 +114,29 @@
 			const candidates = normalized.visibleOptions.slice(0, limit).join('|')
 			parts.push(`candidates=${formatOutcomeValue(candidates, options.candidatesMax || 120)}`)
 		}
+		const requestedPath = formatOutcomeList(normalized.requestedPath, options.pathLimit || 8)
+		if (requestedPath) {
+			parts.push(`requestedPath=${formatOutcomeValue(requestedPath, options.pathMax || 120)}`)
+		}
+		const selectedPath = formatOutcomeList(normalized.selectedPath, options.pathLimit || 8)
+		if (selectedPath) {
+			parts.push(`selectedPath=${formatOutcomeValue(selectedPath, options.pathMax || 120)}`)
+		} else {
+			const selectedLabels = formatOutcomeList(normalized.selectedLabels, options.pathLimit || 8)
+			if (selectedLabels) parts.push(`selectedLabels=${formatOutcomeValue(selectedLabels, options.pathMax || 120)}`)
+		}
 		if (Number.isFinite(Number(normalized.moved))) parts.push(`moved=${Number(normalized.moved)}`)
 		return parts.join(' ')
+	}
+
+	function formatOutcomeList(value, limit) {
+		if (!Array.isArray(value)) return ''
+		const max = Math.max(1, Number(limit) || 8)
+		return value
+			.map((item) => String(item || '').trim())
+			.filter(Boolean)
+			.slice(0, max)
+			.join('|')
 	}
 
 	function formatOutcomeValue(value, maxLen) {

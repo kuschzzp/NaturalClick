@@ -450,6 +450,7 @@
 		if (isFieldLikeControl(parent) && (isNativeTextInput(child) || isComboboxLike(child))) return false
 		if (isComboboxLike(parent) && isNativeTextInput(child)) return false
 		if (isAtomicInteractiveRoot(parent) && !hasMultipleIndependentInteractiveDescendants(parent)) return false
+		if (shouldPreferTextActionChild(parent, child)) return true
 		if (isEquivalentNestedOptionCandidate(parent, child)) return true
 		const childSpecificity = candidateSpecificity(child)
 		const parentSpecificity = candidateSpecificity(parent)
@@ -457,7 +458,8 @@
 			isNativeFormControl(child) ||
 			isOptionLike(child) ||
 			isSelectableControl(child) ||
-			isAtomicInteractiveRoot(child)
+			isAtomicInteractiveRoot(child) ||
+			isTextActionCandidate(child)
 		if (hasMultipleIndependentInteractiveDescendants(parent) && childIsControl) return true
 		if (isCollectionShellCandidate(parent) && childIsControl) return true
 		if (hasStrongNestedRectOverlap(parent, child) && childSpecificity > parentSpecificity) return true
@@ -467,6 +469,66 @@
 			return true
 		}
 		return false
+	}
+
+	function shouldPreferTextActionChild(parent, child) {
+		if (!(parent instanceof HTMLElement) || !(child instanceof HTMLElement)) return false
+		if (!parent.contains(child) || parent === child) return false
+		if (!isTextActionCandidate(child)) return false
+		if (isNativeFormControl(parent) || isFieldLikeControl(parent) || isComboboxLike(parent)) return false
+		if (isOptionLike(parent) || isSelectableControl(parent)) return false
+		const parentText = normalizeCompactText(getElementText(parent))
+		const childText = normalizeCompactText(getElementText(child))
+		if (!childText) return false
+		if (parentText === childText) return true
+		return parentText.includes(childText) && countTextActionDescendants(parent, 2) >= 2
+	}
+
+	function countTextActionDescendants(element, limit) {
+		if (!(element instanceof HTMLElement)) return 0
+		const selector = [
+			'button',
+			'a[href]',
+			'[role="button"]',
+			'[role="link"]',
+			'[role="menuitem"]',
+			'span',
+			'div',
+			'i',
+			'em',
+			'b',
+			'strong',
+			'svg',
+			'[aria-label]',
+			'[title]',
+		].join(',')
+		const seen = new Set()
+		let nodes = []
+		try {
+			nodes = Array.from(element.querySelectorAll(selector))
+		} catch (_) {
+			nodes = []
+		}
+		for (const node of nodes) {
+			if (!(node instanceof HTMLElement)) continue
+			const normalized = normalizeInteractiveElement(node) || node
+			const target = normalized instanceof HTMLElement ? normalized : node
+			if (target === element || !element.contains(target)) continue
+			if (seen.has(target)) continue
+			if (!isTextActionCandidate(target)) continue
+			seen.add(target)
+			if (seen.size >= limit) break
+		}
+		return seen.size
+	}
+
+	function isTextActionCandidate(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const text = getElementText(element)
+		if (!isCommonCrudActionText(text) || !isLikelyTextActionContext(element)) return false
+		const rect = element.getBoundingClientRect()
+		const area = Math.max(0, rect.width) * Math.max(0, rect.height)
+		return area > 8 && area <= 16000 && element.childElementCount <= 4
 	}
 
 	function isAtomicInteractiveRoot(element) {
@@ -683,6 +745,7 @@
 			'.arco-picker-cell:not(.arco-picker-cell-disabled)',
 			'.n-date-panel-date',
 			'.n-date-panel-month',
+			'.n-date-panel-year',
 			'.van-calendar__day:not(.van-calendar__day--disabled)',
 			'.layui-laydate-content td:not(.laydate-disabled)',
 			'.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled)',
@@ -719,6 +782,8 @@
 		const direct = readDateAttributeLabel(cell)
 		if (direct) return direct
 		const text = getElementText(cell)
+		const period = normalizeDatePickerPeriodLabel(cell, text)
+		if (period) return period
 		const day = parseDayCellText(text)
 		if (!Number.isFinite(day)) return text && text !== '(empty)' ? shortText(text, 36) : ''
 		const context = inferDatePickerMonthContext(cell)
@@ -731,10 +796,52 @@
 		if (!(cell instanceof HTMLElement)) return ''
 		const attrs = ['aria-label', 'title', 'data-date', 'data-day', 'data-value', 'data-time', 'datetime']
 		for (const attr of attrs) {
-			const parsed = parseDateText(cell.getAttribute(attr))
+			const parsed = parseTemporalOptionText(cell.getAttribute(attr))
 			if (parsed) return parsed
 		}
 		return ''
+	}
+
+	function normalizeDatePickerPeriodLabel(cell, text) {
+		const granularity = getDatePickerCellGranularity(cell)
+		if (granularity === 'day') return ''
+		const value = String(text || '').replace(/\s+/g, ' ').trim()
+		if (!value || value === '(empty)') return ''
+		if (granularity === 'year') {
+			const year = parseYearText(value)
+			return Number.isFinite(year) ? String(year) : ''
+		}
+		if (granularity === 'month') {
+			const explicit = parseYearMonthText(value)
+			if (explicit) return formatMonthParts(explicit.year, explicit.month)
+			const month = parseMonthCellText(value)
+			if (!Number.isFinite(month)) return ''
+			const year = inferDatePickerYearContext(cell)
+			return Number.isFinite(year) ? formatMonthParts(year, month) : ''
+		}
+		if (granularity === 'week') {
+			const explicit = parseYearWeekText(value)
+			if (explicit) return formatWeekParts(explicit.year, explicit.week)
+			const week = parseWeekCellText(value)
+			if (!Number.isFinite(week)) return ''
+			const year = inferDatePickerYearContext(cell)
+			return Number.isFinite(year) ? formatWeekParts(year, week) : ''
+		}
+		return ''
+	}
+
+	function getDatePickerCellGranularity(cell) {
+		if (!(cell instanceof HTMLElement)) return 'day'
+		const text = [
+			cell.className,
+			cell.getAttribute('data-type'),
+			cell.getAttribute('aria-label'),
+			cell.closest?.('[class*="week"],[class*="month"],[class*="year"]')?.className,
+		].map((value) => String(value || '').toLowerCase()).join(' ')
+		if (/week/.test(text) || /周/.test(text)) return 'week'
+		if (/month/.test(text) || /月份|月/.test(text)) return 'month'
+		if (/year/.test(text) || /年份|年度|年/.test(text)) return 'year'
+		return 'day'
 	}
 
 	function inferDatePickerMonthContext(cell) {
@@ -748,13 +855,30 @@
 		return parseYearMonthText(headerText)
 	}
 
+	function inferDatePickerYearContext(cell) {
+		if (!(cell instanceof HTMLElement)) return NaN
+		const scope =
+			cell.closest?.(
+				'.el-month-table,.el-year-table,.el-picker-panel__content,.ant-picker-month-panel,.ant-picker-year-panel,.arco-picker-month-panel,.arco-picker-year-panel,.n-date-panel,.ivu-date-picker-cells,.layui-laydate-main,.vxe-date-picker--content'
+			) ||
+			cell.closest?.('.el-picker-panel,.ant-picker-panel,.arco-picker-panel,.layui-laydate,.ivu-date-picker,.vxe-date-picker--panel')
+		const headerText = readDatePickerHeaderText(scope, cell)
+		const monthContext = parseYearMonthText(headerText)
+		if (monthContext) return monthContext.year
+		return parseYearText(headerText)
+	}
+
 	function readDatePickerHeaderText(scope, cell) {
 		const localSelectors = [
 			'.el-date-range-picker__header div',
+			'.el-picker-panel__header',
 			'.el-date-picker__header-label',
 			'.ant-picker-header-view',
+			'.ant-picker-header-view button',
 			'.arco-picker-header-value',
+			'.arco-picker-header-label',
 			'.n-date-panel-month__text',
+			'.n-date-panel-year__text',
 			'.ivu-date-picker-header-label',
 			'.layui-laydate-header',
 			'.vxe-date-picker--header',
@@ -763,11 +887,13 @@
 			if (!(root instanceof HTMLElement)) continue
 			for (const node of Array.from(root.querySelectorAll?.(localSelectors) || [])) {
 				if (!(node instanceof HTMLElement)) continue
-				const parsed = parseYearMonthText(getElementText(node))
-				if (parsed) return getElementText(node)
+				const header = getElementText(node)
+				const parsed = parseYearMonthText(header) || Number.isFinite(parseYearText(header))
+				if (parsed) return header
 			}
-			const parsed = parseYearMonthText(getElementText(root))
-			if (parsed) return getElementText(root)
+			const header = getElementText(root)
+			const parsed = parseYearMonthText(header) || Number.isFinite(parseYearText(header))
+			if (parsed) return header
 		}
 		return ''
 	}
@@ -794,13 +920,86 @@
 		return ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(key) + 1 || 0
 	}
 
+	function parseYearText(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return NaN
+		const match = text.match(/(?:^|[^\d])(\d{4})\s*(?:年|$)/)
+		if (!match) return NaN
+		const year = Number(match[1])
+		return Number.isFinite(year) && year >= 1 && year <= 9999 ? year : NaN
+	}
+
+	function parseMonthCellText(value) {
+		const text = String(value || '').replace(/\s+/g, '').trim()
+		if (!text) return NaN
+		const explicit = parseYearMonthText(text)
+		if (explicit) return explicit.month
+		const english = parseEnglishMonth(text)
+		if (english) return english
+		const chineseMonths = {
+			一: 1,
+			二: 2,
+			三: 3,
+			四: 4,
+			五: 5,
+			六: 6,
+			七: 7,
+			八: 8,
+			九: 9,
+			十: 10,
+			十一: 11,
+			十二: 12,
+		}
+		const chinese = text.match(/^([一二三四五六七八九十]{1,3})月$/)
+		if (chinese && chineseMonths[chinese[1]]) return chineseMonths[chinese[1]]
+		const match = text.match(/^(\d{1,2})(?:月|月份)?$/)
+		if (!match) return NaN
+		const month = Number(match[1])
+		return Number.isFinite(month) && month >= 1 && month <= 12 ? month : NaN
+	}
+
+	function parseWeekCellText(value) {
+		const text = String(value || '').replace(/\s+/g, '').trim()
+		if (!text) return NaN
+		const explicit = parseYearWeekText(text)
+		if (explicit) return explicit.week
+		const match = text.match(/^(?:第)?(\d{1,2})(?:周|week|w)?$/i)
+		if (!match) return NaN
+		const week = Number(match[1])
+		return Number.isFinite(week) && week >= 1 && week <= 53 ? week : NaN
+	}
+
+	function parseYearWeekText(value) {
+		const text = String(value || '').replace(/\s+/g, '').trim()
+		if (!text) return null
+		let match = text.match(/^(\d{4})(?:-|年)?(?:W|w|week)(\d{1,2})(?:周)?$/i)
+		if (!match) match = text.match(/^(\d{4})(?:年)?(?:第)?(\d{1,2})周$/i)
+		if (!match) return null
+		const year = Number(match[1])
+		const week = Number(match[2])
+		if (!Number.isFinite(year) || !Number.isFinite(week) || week < 1 || week > 53) return null
+		return { year, week }
+	}
+
 	function parseDateText(value) {
 		const text = String(value || '').replace(/\s+/g, ' ').trim()
 		if (!text) return ''
-		let match = text.match(/(\d{4})\s*[-/]\s*(\d{1,2})\s*[-/]\s*(\d{1,2})/)
+		let match = text.match(/(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})/)
 		if (!match) match = text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?/)
+		if (!match) match = text.match(/\b(\d{4})(\d{2})(\d{2})\b/)
 		if (!match) return ''
 		return formatDateParts(Number(match[1]), Number(match[2]), Number(match[3]))
+	}
+
+	function parseTemporalOptionText(value) {
+		const date = parseDateText(value)
+		if (date) return date
+		const month = parseYearMonthText(value)
+		if (month) return formatMonthParts(month.year, month.month)
+		const week = parseYearWeekText(value)
+		if (week) return formatWeekParts(week.year, week.week)
+		const year = parseYearText(value)
+		return Number.isFinite(year) ? String(year) : ''
 	}
 
 	function parseDayCellText(value) {
@@ -833,7 +1032,25 @@
 
 	function formatDateParts(year, month, day) {
 		if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return ''
+		const date = new Date(Date.UTC(year, month - 1, day))
+		if (
+			date.getUTCFullYear() !== year ||
+			date.getUTCMonth() + 1 !== month ||
+			date.getUTCDate() !== day
+		) {
+			return ''
+		}
 		return `${year}-${pad2(month)}-${pad2(day)}`
+	}
+
+	function formatMonthParts(year, month) {
+		if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return ''
+		return `${year}-${pad2(month)}`
+	}
+
+	function formatWeekParts(year, week) {
+		if (!Number.isFinite(year) || !Number.isFinite(week) || week < 1 || week > 53) return ''
+		return `${year}-W${pad2(week)}`
 	}
 
 	function pad2(value) {

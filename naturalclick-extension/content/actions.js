@@ -66,9 +66,11 @@
 		if (!cascaderHelpers) throw new Error('NC_CONTENT_ACTION_CASCADER 未加载。')
 		const {
 			bringCascaderOptionIntoView,
+			findCascaderOptionByCompactTarget,
 			findCascaderOptionByScrolling,
 			getCascaderLevelSignature,
 			isDomVisibleInActivePopup,
+			listCascaderLevelLabels,
 			summarizeCascaderLevel,
 			waitForCascaderMenuLevel,
 		} = cascaderHelpers
@@ -89,14 +91,17 @@
 			findDropdownOptionByScrolling,
 			listVisibleOptionLabels,
 			getVisibleOptionLabel,
+			normalizeComparableText,
 			resolveDropdownTrigger,
 			resolveNativeSelect,
 			listNativeSelectOptionLabels,
 			selectOptionByText,
 			resolveSelectableClickTarget,
+			findCascaderOptionByCompactTarget,
 			findCascaderOptionByScrolling,
 			bringCascaderOptionIntoView,
 			getCascaderLevelSignature,
+			listCascaderLevelLabels,
 			waitForCascaderMenuLevel,
 			summarizeCascaderLevel,
 		})
@@ -449,9 +454,7 @@
 		function formatOccludingElement(element) {
 			const summary = summarizeClickElement(element)
 			if (!summary) return 'unknown'
-			const text = summary.text ? ` "${summary.text}"` : ''
-			const role = summary.role ? ` role=${summary.role}` : ''
-			return `${summary.tag || 'element'}${role}${text}`
+			return formatClickElementSummary(summary)
 		}
 
 		async function hoverElement(element, inputMode) {
@@ -740,9 +743,16 @@
 			const rect = element.getBoundingClientRect()
 			return {
 				tag: String(element.tagName || '').toLowerCase(),
+				id: readElementAttribute(element, 'id', 48),
 				role: String(element.getAttribute?.('role') || ''),
+				ariaLabel: readElementAttribute(element, 'aria-label', 48),
+				title: readElementAttribute(element, 'title', 48),
+				name: readElementAttribute(element, 'name', 48),
+				type: readElementAttribute(element, 'type', 32),
+				testId: readElementTestId(element),
 				text: element instanceof HTMLElement ? observer.shortText(observer.getElementText(element), 36) : '',
 				className: observer.shortText(getElementClassText(element), 60),
+				style: summarizeClickElementStyle(element),
 				rect: {
 					left: Math.round(rect.left),
 					top: Math.round(rect.top),
@@ -755,10 +765,73 @@
 		function formatClickTargetMessage(clickInfo) {
 			const target = clickInfo?.clickTarget
 			if (!target) return ''
-			const role = target.role ? ` role=${target.role}` : ''
-			const text = target.text ? ` "${target.text}"` : ''
 			const point = clickInfo?.point ? ` @${clickInfo.point.x},${clickInfo.point.y}` : ''
-			return `，点击目标=${target.tag}${role}${text}${point}`
+			return `，点击目标=${formatClickElementSummary(target)}${point}`
+		}
+
+		function formatClickElementSummary(summary) {
+			if (!summary) return 'unknown'
+			const tag = summary.tag || 'element'
+			const id = summary.id ? `#${summary.id}` : ''
+			const role = summary.role ? ` role=${summary.role}` : ''
+			const text = summary.text ? ` "${summary.text}"` : ''
+			const ariaLabel =
+				summary.ariaLabel && summary.ariaLabel !== summary.text ? ` aria="${summary.ariaLabel}"` : ''
+			const title =
+				summary.title && summary.title !== summary.text && summary.title !== summary.ariaLabel
+					? ` title="${summary.title}"`
+					: ''
+			const name = summary.name ? ` name="${summary.name}"` : ''
+			const type = summary.type ? ` type=${summary.type}` : ''
+			const testId = summary.testId ? ` testId="${summary.testId}"` : ''
+			const style = formatClickElementStyleSummary(summary.style)
+			return `${tag}${id}${role}${type}${name}${testId}${text}${ariaLabel}${title}${style}`
+		}
+
+		function formatClickElementStyleSummary(style) {
+			if (!style || typeof style !== 'object') return ''
+			const parts = []
+			if (style.position) parts.push(`pos=${style.position}`)
+			if (style.pointerEvents) parts.push(`pointer=${style.pointerEvents}`)
+			if (style.zIndex) parts.push(`z=${style.zIndex}`)
+			if (style.opacity !== '') parts.push(`opacity=${style.opacity}`)
+			if (style.visibility) parts.push(`visibility=${style.visibility}`)
+			if (style.display) parts.push(`display=${style.display}`)
+			return parts.length ? ` style(${parts.join(',')})` : ''
+		}
+
+		function summarizeClickElementStyle(element) {
+			if (!(element instanceof Element)) return null
+			let style = null
+			try {
+				style = window.getComputedStyle(element)
+			} catch (_) {
+				return null
+			}
+			if (!style) return null
+			const opacityNumber = Number(style.opacity)
+			return {
+				position: style.position && style.position !== 'static' ? String(style.position) : '',
+				pointerEvents: String(style.pointerEvents || ''),
+				zIndex: style.zIndex && style.zIndex !== 'auto' ? String(style.zIndex) : '',
+				opacity: Number.isFinite(opacityNumber) && opacityNumber < 0.98 ? String(Number(opacityNumber.toFixed(2))) : '',
+				visibility: style.visibility && style.visibility !== 'visible' ? String(style.visibility) : '',
+				display: style.display && style.display !== 'block' && style.display !== 'inline' ? String(style.display) : '',
+			}
+		}
+
+		function readElementAttribute(element, name, maxLength = 60) {
+			const value = String(element?.getAttribute?.(name) || '').trim()
+			return value ? observer.shortText(value, maxLength) : ''
+		}
+
+		function readElementTestId(element) {
+			const names = ['data-testid', 'data-test', 'data-cy', 'data-qa']
+			for (const name of names) {
+				const value = readElementAttribute(element, name, 48)
+				if (value) return value
+			}
+			return ''
 		}
 
 		function getElementClassText(element) {

@@ -150,6 +150,44 @@
 		return count
 	}
 
+	function classifyLoopGuardReason(reason) {
+		const text = String(reason || '')
+		if (/被动等待|wait|等待目标重复|等待动作重复|等待过多/i.test(text)) {
+			return {
+				kind: 'repeated_wait',
+				guidance: '不要继续等待同一状态；先重新观察页面、inspect 当前区域，或在缺少验证码/确认信息时 ask_user。',
+			}
+		}
+		if (/滚动.*(?:未产生位移|失败|重复同一方向)|scroll/i.test(text)) {
+			return {
+				kind: 'scroll_no_progress',
+				guidance: '不要继续滚动同一容器和方向；改用相反方向、换滚动容器、inspect_region/request_context 获取当前可见内容，或说明目标不在当前页面。',
+			}
+		}
+		if (/悬浮.*(?:未产生效果|重复同一目标)|hover/i.test(text)) {
+			return {
+				kind: 'hover_no_effect',
+				guidance: '不要重复悬浮同一目标；先 inspect_index/inspect_region 确认是否已出现弹层、菜单或可点击子项，再选择真实可见动作。',
+			}
+		}
+		if (/未验证进展的同一动作重复|同一动作参数重复执行|重复动作循环/i.test(text)) {
+			return {
+				kind: 'repeated_no_progress_action',
+				guidance: '不要再次执行同一动作；先换 index、换工具、补充上下文或观察动作结果证据，只有确认产生进展后才能继续同类动作。',
+			}
+		}
+		if (/同一失败动作参数重复|重复失败动作循环/i.test(text)) {
+			return {
+				kind: 'repeated_failed_action',
+				guidance: '不要重复已失败的动作参数；根据失败原因改用其它工具、重新定位目标，或请求更多上下文后再规划。',
+			}
+		}
+		return {
+			kind: 'loop_guard',
+			guidance: '先重新观察页面状态，换证据、换目标或换工具；不要继续执行刚被循环保护拦截的动作。',
+		}
+	}
+
 	function getRepeatDetectionWindow(session, actionName, input) {
 		const recent = Array.isArray(session?.history) ? session.history.slice(-8) : []
 		if (!isFormSubmitRecoveryAction(actionName, input)) return recent
@@ -378,6 +416,7 @@
 
 	g.NC_BG_LOOP_GUARD = {
 		countRecentLoopGuardFailures,
+		classifyLoopGuardReason,
 		detectActionLoop,
 		detectRedundantInputRewrite,
 		getUnsafeDoneSuccessReason,

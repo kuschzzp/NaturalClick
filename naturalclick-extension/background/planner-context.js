@@ -642,11 +642,13 @@
 			.sort((a, b) => a.score - b.score || a.order - b.order)
 			.map((entry) => entry.item)
 		if (related.length) return { scope: 'field', items: related }
+		const active = controlSemantics?.collectActiveNewPopupItemsForTargets?.(list, [targetItem]) || []
+		if (active.length) return { scope: 'active', items: active }
 		return { scope: 'global_fallback', items: list }
 	}
 
 	function isScopedOptionContextUsable(scope) {
-		return ['explicit', 'field'].includes(String(scope || '').trim())
+		return ['explicit', 'field', 'active'].includes(String(scope || '').trim())
 	}
 
 	function formatDiagnosticOptionGuidance(scope) {
@@ -1252,6 +1254,7 @@
 		buildDuplicatePlanningContext,
 		buildInvalidActionContext,
 		buildInvalidActionInputContext,
+		classifyInvalidActionInput,
 		buildInvalidModelOutputContext,
 		buildObservationText,
 		buildSectionRows,

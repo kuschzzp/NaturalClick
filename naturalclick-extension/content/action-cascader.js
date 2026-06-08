@@ -83,6 +83,70 @@
 			return findCascaderOptionInLevel(text, levelIndex)
 		}
 
+		async function findCascaderOptionByCompactTarget(targetText, levelIndex, inputMode) {
+			const expected = normalizeComparableText(targetText)
+			if (!expected) return null
+			const menu = await waitForCascaderMenuLevel(levelIndex, inputMode)
+			if (!menu) return null
+			const immediateExact = findCascaderOptionInLevel(targetText, levelIndex)
+			if (immediateExact && normalizeComparableText(getVisibleOptionLabel(immediateExact)) === expected) {
+				return {
+					option: immediateExact,
+					label: getVisibleOptionLabel(immediateExact),
+					consumedKey: expected,
+				}
+			}
+
+			const deadline = Date.now() + 4200
+			let lastSignature = ''
+			let stagnantCount = 0
+			let resetDone = false
+
+			while (Date.now() <= deadline) {
+				const immediate = findCompactCascaderOptionInLevel(targetText, levelIndex)
+				if (immediate) return immediate
+
+				const currentMenu = getVisibleCascaderMenu(levelIndex)
+				if (!currentMenu) {
+					await waitForCascaderMenuLevel(levelIndex, inputMode)
+					continue
+				}
+				const scrollable = findVerticalScrollable(currentMenu, false)
+				if (!scrollable) {
+					await sleep(120)
+					continue
+				}
+				if (!resetDone) {
+					scrollable.scrollTop = 0
+					scrollable.dispatchEvent(new Event('scroll', { bubbles: true }))
+					resetDone = true
+					await sleep(inputMode === 'realistic' ? randomBetween(120, 200) : 100)
+					const afterReset = findCompactCascaderOptionInLevel(targetText, levelIndex)
+					if (afterReset) return afterReset
+				}
+
+				const beforeTop = Number(scrollable.scrollTop || 0)
+				const signature = getVisibleMenuSignature(scrollable)
+				if (signature === lastSignature) stagnantCount += 1
+				else stagnantCount = 0
+				lastSignature = signature
+
+				const step = Math.max(120, Math.min(320, scrollable.clientHeight * 0.82 || 220))
+				scrollable.scrollTop = beforeTop + step
+				scrollable.dispatchEvent(new Event('scroll', { bubbles: true }))
+				await sleep(inputMode === 'realistic' ? randomBetween(180, 280) : 160)
+
+				const afterScroll = findCompactCascaderOptionInLevel(targetText, levelIndex)
+				if (afterScroll) return afterScroll
+
+				const afterTop = Number(scrollable.scrollTop || 0)
+				const reachedBottom = afterTop <= beforeTop + 2 || afterTop + scrollable.clientHeight >= scrollable.scrollHeight - 3
+				if (reachedBottom && stagnantCount >= 1) break
+			}
+
+			return findCompactCascaderOptionInLevel(targetText, levelIndex)
+		}
+
 		async function waitForCascaderMenuLevel(levelIndex, inputMode) {
 			const index = Math.max(0, Number(levelIndex) || 0)
 			const timeoutMs = index === 0 ? 900 : 1800
@@ -196,10 +260,17 @@
 		}
 
 		function summarizeCascaderLevel(levelIndex) {
-			const menu = getVisibleCascaderMenu(levelIndex)
-			if (!menu) return ` 当前可见级联菜单列数: ${getVisibleCascaderMenus().length}。`
-			const labels = getVisibleCascaderLabels(menu).slice(0, 12)
+			const labels = listCascaderLevelLabels(levelIndex, 12)
+			if (!labels.length && !getVisibleCascaderMenu(levelIndex)) {
+				return ` 当前可见级联菜单列数: ${getVisibleCascaderMenus().length}。`
+			}
 			return labels.length ? ` 当前第 ${Number(levelIndex) + 1} 级可见项: ${labels.join('、')}。` : ''
+		}
+
+		function listCascaderLevelLabels(levelIndex, limit = 12) {
+			const menu = getVisibleCascaderMenu(levelIndex)
+			if (!menu) return []
+			return getVisibleCascaderLabels(menu).slice(0, Math.max(1, Number(limit) || 12))
 		}
 
 		function getVisibleCascaderLabels(menu) {
@@ -215,6 +286,73 @@
 				labels.push(label)
 			}
 			return labels
+		}
+
+		function findCompactCascaderOptionInLevel(targetText, levelIndex) {
+			const target = normalizeComparableText(targetText)
+			if (!target) return null
+			const menu = getVisibleCascaderMenu(levelIndex)
+			if (!menu && Number(levelIndex) > 0) return null
+			const scopes = menu ? [menu] : getVisibleCascaderMenus()
+			const matches = []
+			for (const scope of scopes.length ? scopes : [document]) {
+				const candidates = Array.from(scope.querySelectorAll(getCascaderOptionSelector()))
+					.filter((node) => node instanceof HTMLElement && isVisibleClickTarget(node))
+					.filter((node) => {
+						const cls = String(node.className || '')
+						const path = getElementClassPath(node)
+						return /cascader|menu|dropdown|popper|select/i.test(`${cls} ${path}`)
+					})
+				for (const node of candidates) {
+					const label = getVisibleOptionLabel(node)
+					const match = scoreCompactCascaderOption(label, target)
+					if (match) matches.push({ node, label, ...match })
+				}
+			}
+			if (!matches.length) return null
+			matches.sort((a, b) => {
+				if (b.score !== a.score) return b.score - a.score
+				const byCandidate = compareOptionCandidate(targetText)(a.node, b.node)
+				if (byCandidate) return byCandidate
+				const ar = a.node.getBoundingClientRect()
+				const br = b.node.getBoundingClientRect()
+				return ar.left - br.left || ar.top - br.top
+			})
+			const found = matches[0]
+			const runnerUp = matches[1]
+			if (runnerUp && isAmbiguousCompactCascaderMatch(found, runnerUp)) return null
+			return found ? { option: found.node, label: found.label, consumedKey: found.consumedKey } : null
+		}
+
+		function isAmbiguousCompactCascaderMatch(a, b) {
+			if (!a || !b) return false
+			return Number(a.score) === Number(b.score) &&
+				normalizeComparableText(a.consumedKey) === normalizeComparableText(b.consumedKey)
+		}
+
+		function scoreCompactCascaderOption(label, normalizedTarget) {
+			const candidate = normalizeComparableText(label)
+			const target = String(normalizedTarget || '')
+			if (!candidate || !target) return null
+			if (candidate === target) return { score: 1000 + candidate.length, consumedKey: target }
+			if (target.startsWith(candidate) && candidate.length >= 2) return { score: 900 + candidate.length, consumedKey: candidate }
+			if (candidate.startsWith(target) && target.length >= Math.min(2, candidate.length)) {
+				return { score: 760 + target.length, consumedKey: target }
+			}
+			const prefixLength = getCommonPrefixLength(candidate, target)
+			const minimumPrefix = Math.min(2, candidate.length, target.length)
+			if (prefixLength >= minimumPrefix && prefixLength >= 2 && candidate.length <= 4 && target.length > prefixLength) {
+				return { score: 620 + prefixLength * 10 - Math.max(0, candidate.length - prefixLength), consumedKey: target.slice(0, prefixLength) }
+			}
+			return null
+		}
+
+		function getCommonPrefixLength(a, b) {
+			const left = String(a || '')
+			const right = String(b || '')
+			let index = 0
+			while (index < left.length && index < right.length && left[index] === right[index]) index += 1
+			return index
 		}
 
 		function getVisibleCascaderMenus() {
@@ -316,10 +454,12 @@
 
 		return {
 			bringCascaderOptionIntoView,
+			findCascaderOptionByCompactTarget,
 			findCascaderOptionByScrolling,
 			findVerticalScrollable,
 			getCascaderLevelSignature,
 			isDomVisibleInActivePopup,
+			listCascaderLevelLabels,
 			summarizeCascaderLevel,
 			waitForCascaderMenuLevel,
 		}

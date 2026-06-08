@@ -872,6 +872,7 @@
 			.filter((part) => !/^(empty|unknown|null|undefined|-)$/.test(part))
 		if (!expected.length) return false
 		if (hasExpectedDateTokensSatisfied(item, expected)) return true
+		if (hasExpectedTimeTokensSatisfied(item, expectedParts)) return true
 		return expected.every((part) => actual.includes(part))
 	}
 
@@ -1004,6 +1005,19 @@
 		return expectedDates.every((date) => actualDates.includes(date))
 	}
 
+	function hasExpectedTimeTokensSatisfied(item, expectedParts) {
+		const expectedTimes = extractTimeTokens(expectedParts.join(' '))
+		if (!expectedTimes.length) return false
+		const actualTimes = extractTimeTokens([
+			readObservedValueSignature(item),
+			getObservedItemLabel(item),
+			item?.placeholder,
+			item?.text,
+		].filter(Boolean).join(' '))
+		if (!actualTimes.length) return false
+		return expectedTimes.every((time) => actualTimes.includes(time))
+	}
+
 	function collectSelectedChoiceText(observation) {
 		const parts = []
 		for (const item of getObservedChoiceCandidates(observation)) {
@@ -1041,6 +1055,29 @@
 			push(match[1], match[2], match[3])
 		}
 		return out
+	}
+
+	function extractTimeTokens(value) {
+		const source = String(value || '')
+		const out = []
+		const seen = new Set()
+		for (const match of source.matchAll(/(?:^|[^\d])(\d{1,2})\s*:\s*(\d{2})(?:\s*:\s*(\d{2}))?(?=$|[^\d])/g)) {
+			const normalized = normalizeTimeParts(match[1], match[2], match[3])
+			if (!normalized || seen.has(normalized)) continue
+			seen.add(normalized)
+			out.push(normalized)
+		}
+		return out
+	}
+
+	function normalizeTimeParts(hour, minute, second = '') {
+		const h = Number(hour)
+		const m = Number(minute)
+		const s = second === undefined || second === '' ? 0 : Number(second)
+		if (!Number.isFinite(h) || !Number.isFinite(m) || !Number.isFinite(s)) return ''
+		if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) return ''
+		const base = `${pad2(h)}:${pad2(m)}`
+		return s ? `${base}:${pad2(s)}` : base
 	}
 
 	function pad2(value) {

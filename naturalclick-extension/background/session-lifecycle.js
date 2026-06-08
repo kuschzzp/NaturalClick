@@ -15,6 +15,8 @@
 		'compact_retry',
 		'planning_context_request',
 		'planning_context',
+		'invalid_model_output',
+		'invalid_action_name',
 		'validation_feedback',
 		'timeout_recovery',
 		'timeout_no_recovery',
@@ -149,6 +151,10 @@
 			stage: String(event?.stage || '').trim(),
 			round: Number(event?.round) || 0,
 			text: String(text || '').trim(),
+			elapsedMs: Math.max(0, Number(event?.elapsedMs) || 0),
+			timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
+			validationKind: String(event?.validationKind || '').trim(),
+			validationGuidance: String(event?.validationGuidance || '').trim().slice(0, 600),
 			ts: Date.now(),
 		}
 	}
@@ -181,7 +187,14 @@
 			title: '规划进度',
 			detail: text,
 			kind: 'step',
-			progress: { stage, round },
+			progress: {
+				stage,
+				round,
+				elapsedMs: Math.max(0, Number(event?.elapsedMs) || 0),
+				timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
+				validationKind: String(event?.validationKind || '').trim(),
+				validationGuidance: String(event?.validationGuidance || '').trim().slice(0, 600),
+			},
 		})
 	}
 
@@ -220,6 +233,8 @@
 		const progress = {
 			stage: 'model_wait_heartbeat',
 			round,
+			elapsedMs: Math.max(0, Number(event?.elapsedMs) || 0),
+			timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
 		}
 		const existing = existingId
 			? session.traceItems.find((item) => item?.id === existingId)

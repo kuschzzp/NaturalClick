@@ -11,6 +11,9 @@ const extensionRoot = path.join(repoRoot, 'naturalclick-extension')
 const forbiddenDomainPatterns = [
 	/用户管理/,
 	/客户管理/,
+	/客户所在地/,
+	/销售订单/,
+	/CRM/i,
 	/system\/user/,
 	/已知业务路由/,
 	/业务系统/,
@@ -45,6 +48,9 @@ async function main() {
 	}
 
 	assertNoForbiddenDomainFallbacks(listFiles(extensionRoot))
+	assertForbiddenDomainGuardCoversKnownExamples()
+	assertContractFixturesStayDomainNeutral()
+	assertNoProjectSpecificHostFixtures()
 	assertNavigationAndSearchStayDomainNeutral()
 	assertPlannerFastPathBehavior()
 	assertInitialNavigationBehavior()
@@ -66,6 +72,8 @@ async function main() {
 	await assertPlannerTimeoutRecoveryRetriesFailedCascaderPathAfterReopen()
 	await assertPlannerTimeoutRecoveryFillsAssignedTextBeforeCascader()
 	await assertPlannerTimeoutRecoveryUpdatesAssignedExistingFields()
+	await assertPlannerTimeoutRecoverySelectsCompactCascaderValue()
+	await assertPlannerTimeoutRecoverySelectsSuffixlessCompactCascaderValue()
 	await assertPlannerTimeoutRecoveryCleansDanglingCascaderPunctuation()
 	await assertPlannerTimeoutRecoveryClicksVisibleCascaderCandidate()
 	await assertPlannerTimeoutRecoverySubmitsAfterFormFillRecovery()
@@ -99,6 +107,7 @@ async function main() {
 	await assertPlannerRejectsDirectCascaderCandidateClick()
 	await assertPlannerAllowsDirectPopupMenuCommandClick()
 	await assertPlannerOptionsContextUsesExplicitPopupOwner()
+	await assertPlannerOptionsContextUsesActiveNewPopupOwner()
 	await assertPlannerOptionsContextUsesPopupLabelledByOwner()
 	await assertPlannerDuplicateReactRequestWarnsAndRecovers()
 	await assertPlannerInvalidModelOutputReplansBeforeFailing()
@@ -136,6 +145,7 @@ async function main() {
 	assertVisionHitTestClickableSemantics()
 	assertVisionCandidatesUseSemanticTargetDescription()
 	assertVisionCaptureHidesNaturalClickOverlays()
+	assertConfirmationRiskDetection()
 	assertPlannerBudgetCoversInternalRounds()
 	await assertAskUserToolTimesOut()
 	await assertInputTextRetriesDirectAfterTransportTimeout()
@@ -235,13 +245,15 @@ async function main() {
 	assertActionOptionsSupportDatePickerCells()
 	assertActionOptionsRequireScopedPopupForFieldOptions()
 	assertActionCascaderExtractedFromActions()
+	await assertCompactCascaderMatchingBehavior()
 	assertActionSelectExtractedFromActions()
 	assertActionsReturnStructuredOutcomes()
-	assertSelectionFailuresUseStructuredOutcomes()
+	await assertSelectionFailuresUseStructuredOutcomes()
 	await assertVerifierUsesStructuredOutcome()
 	assertModelReasoningIsSurfaced()
 	assertSidepanelExposesPlanningContextSettings()
 	assertManifestVersion()
+	assertVersionBumpScript()
 
 	console.log(`runtime contracts ok (${checked.length} js files checked)`)
 }
@@ -285,6 +297,69 @@ function assertNoForbiddenDomainFallbacks(files) {
 		for (const pattern of forbiddenDomainPatterns) {
 			if (pattern.test(text)) {
 				throw new Error(`domain-specific fallback leaked into ${path.relative(repoRoot, file)}: ${pattern}`)
+			}
+		}
+	}
+}
+
+function assertForbiddenDomainGuardCoversKnownExamples() {
+	const examples = [
+		'用户管理',
+		'客户管理',
+		'客户所在地',
+		'销售订单',
+		'CRM 管理系统',
+		'system/user',
+		'已知业务路由',
+		'确定性兜底',
+		'findCandidateByTaskTargets',
+		'shouldClickTaskTarget',
+		'isKnownTargetPage',
+	]
+	for (const example of examples) {
+		if (!forbiddenDomainPatterns.some((pattern) => pattern.test(example))) {
+			throw new Error(`forbidden domain guard should cover example: ${example}`)
+		}
+	}
+}
+
+function assertContractFixturesStayDomainNeutral() {
+	const source = read('scripts/validate-runtime-contracts.js')
+	const fixtureStart = source.indexOf('\nfunction assertPlannerBudgetCoversInternalRounds')
+	if (fixtureStart < 0) throw new Error('contract fixture boundary not found')
+	const fixtureSource = source.slice(fixtureStart)
+	const businessFixturePatterns = [
+		/客户/,
+		/CRM/i,
+		/system\/user/,
+		/销售姓名/,
+	]
+	for (const pattern of businessFixturePatterns) {
+		if (pattern.test(fixtureSource)) {
+			throw new Error(`domain-specific contract fixture leaked outside guard tests: ${pattern}`)
+		}
+	}
+}
+
+function assertNoProjectSpecificHostFixtures() {
+	const files = [
+		...listFiles(extensionRoot),
+		...listFiles(path.join(repoRoot, 'scripts')),
+		path.join(repoRoot, 'README.md'),
+		path.join(repoRoot, 'README.zh-CN.md'),
+		path.join(repoRoot, 'docs/runtime-configuration-and-diagnostics.md'),
+		path.join(repoRoot, 'docs/runtime-configuration-and-diagnostics.zh-CN.md'),
+	]
+	const forbidden = [
+		/116\.205\.97\.39/,
+		/\b8201\b/,
+	]
+	for (const file of files) {
+		if (!/\.(js|json|html|md)$/.test(file)) continue
+		const text = fs.readFileSync(file, 'utf8')
+		for (const pattern of forbidden) {
+			if (pattern.test(text)) {
+				throw new Error(`project-specific debug host fixture leaked into ${path.relative(repoRoot, file)}: ${pattern}`)
 			}
 		}
 	}
@@ -544,6 +619,8 @@ function assertObserverDatePickerCellsAreObserved() {
 	const roleFn = extractFunctionSource(observer, 'getElementRole')
 	const controlFn = extractFunctionSource(observer, 'getSelectionControlType')
 	const labelFn = extractFunctionSource(observer, 'getDatePickerOptionLabel')
+	const parseDateTextFn = extractFunctionSource(observer, 'parseDateText')
+	const formatDatePartsFn = extractFunctionSource(observer, 'formatDateParts')
 	const refineFn = extractFunctionSource(observer, 'refineFieldTypeFromControl')
 	const temporalTextFn = extractFunctionSource(observer, 'inferTemporalFieldTypeFromText')
 	const expandedFn = extractFunctionSource(observer, 'getExpandedState')
@@ -553,6 +630,7 @@ function assertObserverDatePickerCellsAreObserved() {
 		'.ant-picker-cell:not(.ant-picker-cell-disabled)',
 		'.arco-picker-cell:not(.arco-picker-cell-disabled)',
 		'.layui-laydate-content td:not(.laydate-disabled)',
+		'.n-date-panel-year',
 		'.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled)',
 	]) {
 		if (!observer.includes(expected)) {
@@ -571,8 +649,20 @@ function assertObserverDatePickerCellsAreObserved() {
 	if (!roleFn.includes("return 'option'") || !controlFn.includes("return 'date-option'")) {
 		throw new Error('date picker cells should be exposed as option/date-option instead of generic table cells')
 	}
-	if (!labelFn.includes('formatDateParts') || !labelFn.includes('inferDatePickerMonthContext')) {
-		throw new Error('date picker option labels should include normalized full dates when the panel month is readable')
+	if (
+		!labelFn.includes('formatDateParts') ||
+		!labelFn.includes('inferDatePickerMonthContext') ||
+		!observer.includes('normalizeDatePickerPeriodLabel') ||
+		!observer.includes('formatMonthParts') ||
+		!observer.includes('formatWeekParts')
+	) {
+		throw new Error('date picker option labels should include normalized date, month, year, and week labels when panel context is readable')
+	}
+	if (!formatDatePartsFn.includes('Date.UTC') || !formatDatePartsFn.includes('getUTCFullYear')) {
+		throw new Error('observer date formatting should reject impossible dates instead of only zero-padding parsed parts')
+	}
+	if (!parseDateTextFn.includes('(\\d{4})(\\d{2})(\\d{2})')) {
+		throw new Error('observer date text parsing should normalize compact YYYYMMDD date labels')
 	}
 	if (!refineFn.includes("return 'daterange'") || !observer.includes('isDateRangeControl')) {
 		throw new Error('observer should classify range date wrappers as daterange fields')
@@ -690,6 +780,9 @@ function assertActionsPreferNestedActionClickTargets() {
 	const clickPointFn = extractFunctionSource(actions, 'clickByPoint')
 	const resolveFn = extractFunctionSource(actions, 'resolveClickElement')
 	const pointFn = extractFunctionSource(actions, 'getPreferredClickPoint')
+	const summarizeClickElementFn = extractFunctionSource(actions, 'summarizeClickElement')
+	const formatClickElementFn = extractFunctionSource(actions, 'formatClickElementSummary')
+	const summarizeClickStyleFn = extractFunctionSource(actions, 'summarizeClickElementStyle')
 	if (!/clickByIndex\(index,\s*inputMode,\s*input\)/.test(executeFn)) {
 		throw new Error('click_element_by_index should pass action input through to the click executor')
 	}
@@ -708,6 +801,21 @@ function assertActionsPreferNestedActionClickTargets() {
 	}
 	if (!clickPointFn.includes('clickTarget: clickInfo.clickTarget') || !clickPointFn.includes('hitTarget: clickInfo.hitTarget')) {
 		throw new Error('coordinate click occlusion diagnostics should include click/hit target metadata')
+	}
+	for (const expected of ['id: readElementAttribute', 'ariaLabel: readElementAttribute', 'title: readElementAttribute', 'testId: readElementTestId', 'style: summarizeClickElementStyle']) {
+		if (!summarizeClickElementFn.includes(expected)) {
+			throw new Error(`click target summaries should preserve generic locator/debug metadata: missing ${expected}`)
+		}
+	}
+	for (const expected of ['formatClickElementStyleSummary', 'aria="${summary.ariaLabel}"', 'testId="${summary.testId}"']) {
+		if (!formatClickElementFn.includes(expected)) {
+			throw new Error(`click target messages should include generic accessible/test/style details: missing ${expected}`)
+		}
+	}
+	for (const expected of ['pointerEvents', 'zIndex', 'opacity', 'position']) {
+		if (!summarizeClickStyleFn.includes(expected)) {
+			throw new Error(`click target style diagnostics should include ${expected}`)
+		}
 	}
 	if (
 		!actions.includes('resolveVisibleClickPoint(clickElement, x, y)') ||
@@ -836,6 +944,9 @@ function assertObserverPrefersSpecificNestedTargetsOverBroadContainers() {
 	const compactFn = extractFunctionSource(observer, 'compactInteractiveCandidates')
 	const preferenceFn = extractFunctionSource(observer, 'chooseNestedCandidatePreference')
 	const childPreferenceFn = extractFunctionSource(observer, 'shouldPreferChildOverContainer')
+	const textActionPreferenceFn = extractFunctionSource(observer, 'shouldPreferTextActionChild')
+	const textActionCountFn = extractFunctionSource(observer, 'countTextActionDescendants')
+	const textActionCandidateFn = extractFunctionSource(observer, 'isTextActionCandidate')
 	const shellFn = extractFunctionSource(observer, 'isCollectionShellCandidate')
 	const descendantFn = extractFunctionSource(observer, 'countIndependentInteractiveDescendants')
 	if (!compactFn.includes('chooseNestedCandidatePreference(parent, child)') || !compactFn.includes('remove.add(i)')) {
@@ -849,12 +960,27 @@ function assertObserverPrefersSpecificNestedTargetsOverBroadContainers() {
 		'shouldKeepNestedNavigationCandidate(parent, child)',
 		'isAtomicInteractiveRoot(parent)',
 		'hasMultipleIndependentInteractiveDescendants(parent)',
+		'shouldPreferTextActionChild(parent, child)',
 		'isCollectionShellCandidate(parent)',
 		'hasStrongNestedRectOverlap(parent, child)',
 	]) {
 		if (!childPreferenceFn.includes(expected)) {
 			throw new Error(`nested child preference should stay structural and generic: missing ${expected}`)
 		}
+	}
+	if (!textActionPreferenceFn.includes('isTextActionCandidate(child)') || !textActionPreferenceFn.includes('countTextActionDescendants(parent, 2)')) {
+		throw new Error('observer should prefer individual text-action children over broad operation containers')
+	}
+	if (!textActionPreferenceFn.includes('parentText === childText') || !textActionPreferenceFn.includes('parentText.includes(childText)')) {
+		throw new Error('text-action child preference should handle both single wrappers and multi-action groups')
+	}
+	for (const expected of ['button', '[role="button"]', 'span', 'svg', '[aria-label]', '[title]']) {
+		if (!textActionCountFn.includes(expected)) {
+			throw new Error(`text-action descendant counting should cover generic action markup: ${expected}`)
+		}
+	}
+	if (!textActionCandidateFn.includes('isCommonCrudActionText(text)') || !textActionCandidateFn.includes('isLikelyTextActionContext(element)')) {
+		throw new Error('text-action child detection should stay generic and scoped by action context')
 	}
 	for (const expected of ['listbox', 'toolbar', 'popup', 'dropdown', 'calendar', 'wrapper']) {
 		if (!shellFn.includes(expected)) {
@@ -1016,6 +1142,107 @@ function assertVisionCaptureHidesNaturalClickOverlays() {
 	}
 }
 
+function assertConfirmationRiskDetection() {
+	const source = read('naturalclick-extension/background/confirmation.js')
+	if (/订单|submit\s+order|post\|unsubscribe/.test(source)) {
+		throw new Error('confirmation risk detection should avoid business-object phrases and broad post matching')
+	}
+	if (/发布状态|已发布|待发布|未发布|publish\s+status|published|unpublished|pending\s+publish/i.test(source)) {
+		throw new Error('confirmation risk detection should not hard-code specific status/filter values in production logic')
+	}
+	for (const expected of ['HIGH_RISK_ACTION_PATTERNS', 'matchesHighRiskIntent', 'isCommitmentActionContext', 'isSearchOrFilterTestContext', 'isSearchOrFilterValueActionContext', 'hasSearchOrFilterValueCue', '支付', '转账', '发布']) {
+		if (!source.includes(expected)) {
+			throw new Error(`confirmation risk detection should use generic high-risk intent categories: missing ${expected}`)
+		}
+	}
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/confirmation.js', {
+		NC_BG_CONSTANTS: { TYPES: { CONFIRM_REQUEST: 'CONFIRM_REQUEST' } },
+		NC_BG_UTILS: {
+			generateId: () => 'confirm-test-id',
+			sendRuntimeMessage: async () => {},
+		},
+	})
+	const detect = sandbox.NC_BG_CONFIRMATION?.detectDangerousAction
+	if (typeof detect !== 'function') throw new Error('confirmation module should export detectDangerousAction')
+	const dangerousCases = [
+		[
+			{ task: '请删除当前记录' },
+			{ next_goal: '点击删除按钮', action: { name: 'click_element_by_index', input: { target_label: '删除' } } },
+		],
+		[
+			{ task: '确认支付当前费用' },
+			{ next_goal: '确认支付', action: { name: 'click_element_by_index', input: { target_label: '确认支付' } } },
+		],
+		[
+			{ task: '发布当前内容' },
+			{ next_goal: '点击发布', action: { name: 'click_element_by_index', input: { target_label: '发布' } } },
+		],
+		[
+			{ task: '清空所有缓存数据' },
+			{ next_goal: '执行清空数据', action: { name: 'click_element_by_index', input: { target_label: '清空数据' } } },
+		],
+		[
+			{ task: '请删除当前记录' },
+			{ next_goal: '点击确认按钮', action: { name: 'click_element_by_index', input: { target_label: '确认' } } },
+		],
+	]
+	for (const [session, decision] of dangerousCases) {
+		const result = detect(session, decision)
+		if (!result?.isDangerous) {
+			throw new Error(`confirmation should block generic high-risk intent: ${JSON.stringify({ session, decision, result })}`)
+		}
+	}
+	const safeClearFilters = detect(
+		{ task: '测试当前页面所有搜索条件' },
+		{ next_goal: '清空筛选条件后继续下一项', action: { name: 'click_element_by_index', input: { target_label: '清空筛选条件' } } }
+	)
+	if (safeClearFilters?.isDangerous) {
+		throw new Error(`confirmation should not block ordinary search/filter clearing, got ${JSON.stringify(safeClearFilters)}`)
+	}
+	const safeTyping = detect(
+		{ task: '在搜索框输入发布状态' },
+		{ next_goal: '填写筛选文本', action: { name: 'input_text', input: { target_label: '关键词', text: '发布状态' } } }
+	)
+	if (safeTyping?.isDangerous) {
+		throw new Error(`confirmation should not block ordinary text entry solely because the value mentions a risky word, got ${JSON.stringify(safeTyping)}`)
+	}
+	const safeSearchClick = detect(
+		{ task: '测试发布状态筛选项是否正常' },
+		{ next_goal: '点击搜索按钮提交筛选', action: { name: 'click_element_by_index', input: { target_label: '搜索' } } }
+	)
+	if (safeSearchClick?.isDangerous) {
+		throw new Error(`confirmation should not block search/filter submit actions because the task mentions a risky value, got ${JSON.stringify(safeSearchClick)}`)
+	}
+	const safeSearchEnter = detect(
+		{ task: '测试发布状态筛选项是否正常' },
+		{ next_goal: '按 Enter 提交当前搜索', action: { name: 'keypress', input: { key: 'Enter', target_label: '关键词', reason: '提交当前搜索' } } }
+	)
+	if (safeSearchEnter?.isDangerous) {
+		throw new Error(`confirmation should not block search keypress actions because the task mentions a risky value, got ${JSON.stringify(safeSearchEnter)}`)
+	}
+	const safePublishedStatusOption = detect(
+		{ task: '测试发布状态筛选项是否正常' },
+		{ next_goal: '选择发布状态筛选值', action: { name: 'click_element_by_index', input: { target_label: '已发布' } } }
+	)
+	if (safePublishedStatusOption?.isDangerous) {
+		throw new Error(`confirmation should not block published-status filter values during search/filter testing, got ${JSON.stringify(safePublishedStatusOption)}`)
+	}
+	const safeDeletedStatusOption = detect(
+		{ task: '测试删除状态筛选项是否正常' },
+		{ next_goal: '选择删除状态筛选值', action: { name: 'click_element_by_index', input: { target_label: '已删除' } } }
+	)
+	if (safeDeletedStatusOption?.isDangerous) {
+		throw new Error(`confirmation should not block generic risky-word status filter values during search/filter testing, got ${JSON.stringify(safeDeletedStatusOption)}`)
+	}
+	const safeApplyFilter = detect(
+		{ task: 'test whether the publish status filter works' },
+		{ next_goal: 'click Apply', action: { name: 'click_element_by_index', input: { target_label: 'Apply' } } }
+	)
+	if (safeApplyFilter?.isDangerous) {
+		throw new Error(`confirmation should not block generic Apply buttons during search/filter testing, got ${JSON.stringify(safeApplyFilter)}`)
+	}
+}
+
 function assertPlannerFastPathBehavior() {
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/planner.js', {
 		NC_BG_UTILS: {
@@ -1054,7 +1281,7 @@ function assertPlannerFastPathBehavior() {
 	if (plannerTests.extractTargetUrl('Open http://example.test/app.') !== 'http://example.test/app') {
 		throw new Error('target URL extraction should strip a trailing sentence period')
 	}
-	if (plannerTests.extractTargetUrl('进入http://116.205.97.39:8201/#/login这个网站，登录账号admin') !== 'http://116.205.97.39:8201/#/login') {
+	if (plannerTests.extractTargetUrl('进入http://example.test/#/login这个网站，登录账号admin') !== 'http://example.test/#/login') {
 		throw new Error('target URL extraction should stop before trailing Chinese task text')
 	}
 
@@ -1145,8 +1372,8 @@ function assertInitialNavigationBehavior() {
 	if (!initial?.deriveInitialAutomationTarget || !initial?.isInitialTargetLocation) {
 		throw new Error('initial-navigation test contract is not exported')
 	}
-	const explicit = initial.deriveInitialAutomationTarget('进入http://116.205.97.39:8201/#/login这个网站，登录账号admin')
-	if (explicit?.url !== 'http://116.205.97.39:8201/#/login' || explicit.source !== 'explicit-url') {
+	const explicit = initial.deriveInitialAutomationTarget('进入http://example.test/#/login这个网站，登录账号admin')
+	if (explicit?.url !== 'http://example.test/#/login' || explicit.source !== 'explicit-url') {
 		throw new Error(`initial navigation should open the explicit user URL before any fallback page, got ${JSON.stringify(explicit)}`)
 	}
 	const baiduSearch = initial.deriveInitialAutomationTarget('打开百度搜索黄金价格')
@@ -1354,7 +1581,7 @@ function assertTaskIntentBehavior() {
 	) {
 		throw new Error(`task-intent heuristic should ignore helper/count phrases in record create tasks, got intent=${JSON.stringify(recordCreate)} keys=${JSON.stringify(recordCreateKeys)}`)
 	}
-	const exportedCustomerTask = '打开这个页面 http://116.205.97.39:8201/ 账号 admin 密码 123456 找到资料管理。你现在帮我新建一条资料数据，资料名称是张三，联系方式是145555555 纳税人识别号是IOOO123456 资料等级是核心，资料性质是IT，产品类别是：民品件，资料所在地是江苏省，南京市，江宁区'
+	const exportedCustomerTask = '打开这个页面 http://example.test/ 账号 admin 密码 123456 找到资料管理。你现在帮我新建一条资料数据，资料名称是张三，联系方式是145555555 纳税人识别号是IOOO123456 资料等级是核心，资料性质是IT，产品类别是：民品件，资料所在地是江苏省，南京市，江宁区'
 	const exportedCustomer = taskIntent.deriveHeuristicTaskIntent(exportedCustomerTask)
 	const exportedCustomerSession = { task: exportedCustomerTask, latestTask: exportedCustomerTask, workflowState: {} }
 	taskIntent.storeTaskIntent(exportedCustomerSession, exportedCustomer, { model: 'local-heuristic' })
@@ -1443,6 +1670,27 @@ function assertTaskIntentBehavior() {
 		normalizedGenericRecordKeys.length !== 0
 	) {
 		throw new Error(`task-intent should drop model-provided generic record navigation targets when no page/module target is explicit, got intent=${JSON.stringify(normalizedGenericRecordDetail)} keys=${JSON.stringify(normalizedGenericRecordKeys)}`)
+	}
+	const normalizedReferentialRecordDetail = taskIntent.normalizeTaskIntent({
+		navigationTargets: [
+			{ raw: '进入资料中心页面', canonical: '资料中心', aliases: ['资料中心'] },
+			{ raw: '查看这个资料的详情', canonical: '这个资料的', aliases: ['这个资料的'] },
+		],
+		operation: 'view_first_record_detail',
+		recordSelector: { position: 'first', entity: '资料' },
+	}, '进入资料中心页面，查看列表第一条资料，然后查看这个资料的详情')
+	const normalizedReferentialRecordSession = {
+		task: '进入资料中心页面，查看列表第一条资料，然后查看这个资料的详情',
+		latestTask: '进入资料中心页面，查看列表第一条资料，然后查看这个资料的详情',
+		workflowState: {},
+	}
+	taskIntent.storeTaskIntent(normalizedReferentialRecordSession, normalizedReferentialRecordDetail, { model: 'fake-model' })
+	const normalizedReferentialRecordKeys = taskIntent.getNavigationTargetKeys(normalizedReferentialRecordSession)
+	if (
+		!normalizedReferentialRecordKeys.includes('资料中心') ||
+		normalizedReferentialRecordKeys.some((key) => /这个|资料的/.test(key))
+	) {
+		throw new Error(`task-intent should drop referential record-object navigation targets while preserving explicit page targets, got intent=${JSON.stringify(normalizedReferentialRecordDetail)} keys=${JSON.stringify(normalizedReferentialRecordKeys)}`)
 	}
 	for (const [taskText, intent] of [
 		['测试每一个搜索功能是否正常', { navigationTargets: [{ raw: '每一个搜索功能', canonical: '搜索功能', aliases: ['搜索功能', '搜索项'] }], operation: 'search' }],
@@ -2395,11 +2643,143 @@ async function assertPlannerPublishesPlanningProgress() {
 			throw new Error(`planner wait heartbeat should expose active search workflow context with ${expected}, got ${workflowHeartbeatText}`)
 		}
 	}
+	const navigationHeartbeatText = decision.sandbox.NC_BG_PLANNER_TESTS.buildModelWaitHeartbeatText(
+		{
+			step: 4,
+			workflowState: {
+				navigation: {
+					plannedKeys: ['目标页面'],
+					attemptedKeys: ['目标页面'],
+					failedKeys: [],
+					revealAttemptKeys: ['更多'],
+					visionAttemptKeys: [],
+				},
+			},
+		},
+		{
+			phase: '模型正在确认目标入口',
+			elapsedMs: 12000,
+			timeoutMs: 60000,
+			streamSeen: false,
+		}
+	)
+	for (const expected of ['当前导航工作流', '目标=目标页面', '已尝试 1 次', '已展开导航 1 次', '目标到达前不测试当前页面内搜索、表单或列表动作']) {
+		if (!navigationHeartbeatText.includes(expected)) {
+			throw new Error(`planner wait heartbeat should expose active navigation workflow context with ${expected}, got ${navigationHeartbeatText}`)
+		}
+	}
+	const navigationBeforeSearchHeartbeatText = decision.sandbox.NC_BG_PLANNER_TESTS.buildModelWaitHeartbeatText(
+		{
+			step: 4,
+			workflowState: {
+				navigation: {
+					plannedKeys: ['目标页面'],
+					attemptedKeys: ['目标页面'],
+					succeededKeys: [],
+					concreteSucceededKeys: [],
+					revealAttemptKeys: [],
+					visionAttemptKeys: [],
+				},
+				search: {
+					phase: 'awaiting_submit',
+					activeFieldKey: 'index:8',
+					fieldOrder: ['index:8'],
+					fields: {
+						'index:8': { label: '筛选项', lastTestValue: '样本值', lastValueSource: 'table_sample' },
+					},
+				},
+			},
+		},
+		{
+			phase: '模型正在确认下一步动作',
+			elapsedMs: 15000,
+			timeoutMs: 60000,
+			streamSeen: false,
+		}
+	)
+	if (
+		!navigationBeforeSearchHeartbeatText.includes('当前导航工作流') ||
+		navigationBeforeSearchHeartbeatText.includes('当前搜索工作流')
+	) {
+		throw new Error(`planner wait heartbeat should prioritize unresolved navigation over stale/active search context, got ${navigationBeforeSearchHeartbeatText}`)
+	}
+	const searchAfterReachedNavigationHeartbeatText = decision.sandbox.NC_BG_PLANNER_TESTS.buildModelWaitHeartbeatText(
+		{
+			step: 4,
+			workflowState: {
+				navigation: {
+					plannedKeys: ['目标页面'],
+					attemptedKeys: ['目标页面'],
+					succeededKeys: ['目标页面'],
+					concreteSucceededKeys: [],
+					revealAttemptKeys: [],
+					visionAttemptKeys: [],
+				},
+				search: {
+					phase: 'awaiting_submit',
+					activeFieldKey: 'index:8',
+					fieldOrder: ['index:8'],
+					fields: {
+						'index:8': { label: '筛选项', lastTestValue: '样本值', lastValueSource: 'table_sample' },
+					},
+				},
+			},
+		},
+		{
+			phase: '模型正在确认下一步动作',
+			elapsedMs: 15000,
+			timeoutMs: 60000,
+			streamSeen: false,
+		}
+	)
+	if (
+		!searchAfterReachedNavigationHeartbeatText.includes('当前搜索工作流') ||
+		searchAfterReachedNavigationHeartbeatText.includes('当前导航工作流')
+	) {
+		throw new Error(`planner wait heartbeat should resume search context after navigation target is recorded as reached, got ${searchAfterReachedNavigationHeartbeatText}`)
+	}
+	const recordViewHeartbeatText = decision.sandbox.NC_BG_PLANNER_TESTS.buildModelWaitHeartbeatText(
+		{
+			step: 5,
+			workflowState: {
+				taskIntent: {
+					intent: {
+						operation: 'view_first_record_detail',
+						recordSelector: { position: 'first', entity: '记录' },
+					},
+				},
+			},
+			history: [
+				{
+					action: 'locate_by_vision',
+					input: {
+						workflow_step: 'view_first_record_detail',
+						target_label: '详情',
+					},
+					success: false,
+				},
+			],
+		},
+		{
+			phase: '模型正在确认第一条记录入口',
+			elapsedMs: 14000,
+			timeoutMs: 60000,
+			streamSeen: false,
+		}
+	)
+	for (const expected of ['当前列表详情工作流', '位置=first', '对象=记录', '最近动作=view_first_record_detail/详情', '先确认列表/分页/第一行入口', '受限视觉定位']) {
+		if (!recordViewHeartbeatText.includes(expected)) {
+			throw new Error(`planner wait heartbeat should expose active record-view workflow context with ${expected}, got ${recordViewHeartbeatText}`)
+		}
+	}
 	const plannerSource = read('naturalclick-extension/background/planner.js')
 	if (
 		!plannerSource.includes('MODEL_WAIT_HEARTBEAT_INITIAL_MS = 2500') ||
 		!plannerSource.includes('MODEL_WAIT_HEARTBEAT_INTERVAL_MS = 5000') ||
 		!plannerSource.includes('function buildWorkflowHeartbeatCheckpoint') ||
+		!plannerSource.includes('function buildNavigationWorkflowHeartbeatCheckpoint') ||
+		!plannerSource.includes('function getHeartbeatActiveNavigationTargets') ||
+		!plannerSource.includes('function buildRecordViewWorkflowHeartbeatCheckpoint') ||
 		!plannerSource.includes('formatSearchWorkflowHeartbeatPhase')
 	) {
 		throw new Error('planner should publish model-wait heartbeat early enough that long model calls do not look silent')
@@ -3486,6 +3866,12 @@ async function assertPlannerTimeoutRecoveryOpensCreateEntry() {
 	if (!events.some((event) => event.stage === 'timeout_recovery')) {
 		throw new Error(`create-entry timeout recovery should publish timeout_recovery progress, got ${JSON.stringify(events)}`)
 	}
+	const createProgressText = String(events.find((event) => event.stage === 'workflow_decision')?.text || '')
+	for (const expected of ['创建 workflow 正在打开创建入口', '新 增', 'index=27', 'region=sidebar', '点击后会重新观察是否出现表单', '不会把创建入口当成页面导航']) {
+		if (!createProgressText.includes(expected)) {
+			throw new Error(`create-entry workflow progress should expose ${expected}, got ${JSON.stringify(events)}`)
+		}
+	}
 
 	const repeatedDecision = await runPlannerWithFakeModel({
 		fetchImpl: async () => {
@@ -3547,7 +3933,40 @@ async function assertPlannerTimeoutRecoveryOpensCreateEntry() {
 	if (modelFailedDecision.result.action.input.action_name !== 'click_element_by_index') {
 		throw new Error(`model create-entry failure should recover with executable vision click, got ${JSON.stringify(modelFailedDecision.result)}`)
 	}
+	const visionEvents = []
+	const modelFailedProgressDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: { taskIntent: intentState },
+			history: [
+				{
+					action: 'click_element_by_index',
+					input: { index: 27 },
+					output: 'create_form_not_opened: 创建入口点击后未观察到新增表单/弹层字段。',
+					success: false,
+				},
+			],
+		},
+		planOptions: {
+			onProgress: (event) => visionEvents.push(event),
+		},
+	})
+	assertAction(modelFailedProgressDecision.result, 'locate_by_vision')
+	const createVisionProgressText = String(visionEvents.find((event) => event.stage === 'workflow_decision')?.text || '')
+	for (const expected of ['创建 workflow 正在用受限视觉定位打开创建入口', '当前页面主体列表工具栏', '排除表格行和导航区域']) {
+		if (!createVisionProgressText.includes(expected)) {
+			throw new Error(`create-entry vision workflow progress should expose ${expected}, got ${JSON.stringify(visionEvents)}`)
+		}
+	}
 
+	const submitEvents = []
 	const submitThenClosedDecision = await runPlannerWithFakeModel({
 		fetchImpl: async () => {
 			const error = new Error('abort')
@@ -3573,6 +3992,9 @@ async function assertPlannerTimeoutRecoveryOpensCreateEntry() {
 				},
 			],
 		},
+		planOptions: {
+			onProgress: (event) => submitEvents.push(event),
+		},
 	})
 	assertAction(submitThenClosedDecision.result, 'done')
 	if (
@@ -3580,6 +4002,12 @@ async function assertPlannerTimeoutRecoveryOpensCreateEntry() {
 		submitThenClosedDecision.result.action.input.workflow_step !== 'finish_create_after_submit_no_form'
 	) {
 		throw new Error(`create-entry recovery should not reopen create form after submit made the form disappear, got ${JSON.stringify(submitThenClosedDecision.result)}`)
+	}
+	const createFinishProgressText = String(submitEvents.find((event) => event.stage === 'workflow_decision')?.text || '')
+	for (const expected of ['创建 workflow 已确认提交后当前观察中不再存在创建表单', '不再重新点击创建入口', '避免重复创建']) {
+		if (!createFinishProgressText.includes(expected)) {
+			throw new Error(`create finish workflow progress should expose ${expected}, got ${JSON.stringify(submitEvents)}`)
+		}
 	}
 }
 
@@ -3829,8 +4257,11 @@ async function assertPlannerTimeoutRecoveryFillsAssignedTextBeforeCascader() {
 	if (
 		decision.result.action.input.index !== 3 ||
 		decision.result.action.input.text !== 'IOOO123456' ||
+		decision.result.action.input.target_label !== '纳税人识别号' ||
 		decision.result.action.input.workflow !== 'form-fill' ||
-		decision.result.action.input.workflow_step !== 'fill_form_field_timeout_recovery'
+		decision.result.action.input.workflow_step !== 'fill_form_field_timeout_recovery' ||
+		decision.result.action.input.workflow_value_source !== 'task_value' ||
+		!String(decision.result.action.input.workflow_value_basis || '').includes('任务文本')
 	) {
 		throw new Error(`timeout recovery should fill assigned text fields before cascader recovery, got ${JSON.stringify(decision.result)}`)
 	}
@@ -3871,13 +4302,105 @@ async function assertPlannerTimeoutRecoveryUpdatesAssignedExistingFields() {
 	if (
 		textDecision.result.action.input.index !== 12 ||
 		textDecision.result.action.input.text !== '13800138000' ||
+		textDecision.result.action.input.target_label !== '联系电话' ||
 		textDecision.result.action.input.workflow !== 'form-fill' ||
-		textDecision.result.action.input.workflow_step !== 'fill_form_field_timeout_recovery'
+		textDecision.result.action.input.workflow_step !== 'fill_form_field_timeout_recovery' ||
+		textDecision.result.action.input.workflow_value_source !== 'task_value'
 	) {
 		throw new Error(`timeout recovery should update explicitly assigned existing text fields, got ${JSON.stringify(textDecision.result)}`)
 	}
 
-	const cascaderTask = '编辑当前记录，客户所在地，修改为江苏省，南京市，江宁区。'
+	const dropdownOpenTask = '编辑当前记录，状态，改为启用。'
+	const dropdownOpenDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '编辑-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '编辑弹层',
+					fields: [
+						{ index: 14, region: 'dialog', fieldType: 'status', kind: 'dropdown', label: '状态', valueState: 'selected:停用', role: 'combobox', selectionControl: 'dropdown' },
+					],
+				},
+			],
+			actions: [
+				{ index: 14, region: 'dialog', role: 'combobox', label: '状态', valueState: 'selected:停用', kind: 'dropdown', selectionControl: 'dropdown' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="14" role="combobox" region="dialog" kind="dropdown" control="dropdown" value="selected:停用">状态</field>',
+			],
+		},
+		sessionOverrides: {
+			task: dropdownOpenTask,
+			latestTask: dropdownOpenTask,
+		},
+	})
+	assertAction(dropdownOpenDecision.result, 'open_dropdown')
+	if (
+		dropdownOpenDecision.result.action.input.index !== 14 ||
+		dropdownOpenDecision.result.action.input.target_label !== '状态' ||
+		dropdownOpenDecision.result.action.input.workflow !== 'form-fill' ||
+		dropdownOpenDecision.result.action.input.workflow_step !== 'open_form_dropdown_timeout_recovery' ||
+		dropdownOpenDecision.result.action.input.workflow_value_source !== 'task_value' ||
+		!String(dropdownOpenDecision.result.action.input.workflow_value_basis || '').includes('启用')
+	) {
+		throw new Error(`timeout recovery should open assigned dropdown fields with target_label metadata, got ${JSON.stringify(dropdownOpenDecision.result)}`)
+	}
+
+	const dropdownChooseDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '编辑-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '编辑弹层',
+					fields: [
+						{ index: 14, region: 'dialog', fieldType: 'status', kind: 'dropdown', label: '状态', valueState: 'selected:停用', role: 'combobox', selectionControl: 'dropdown' },
+					],
+				},
+			],
+			actions: [
+				{ index: 14, region: 'dialog', role: 'combobox', label: '状态', valueState: 'selected:停用', kind: 'dropdown', selectionControl: 'dropdown' },
+				{ index: 22, region: 'popover', role: 'option', label: '启用', valueState: 'unknown', kind: 'option', selectionControl: 'option' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="14" role="combobox" region="dialog" kind="dropdown" control="dropdown" value="selected:停用">状态</field>',
+				'<option index="22" role="option" region="popover">启用</option>',
+			],
+		},
+		sessionOverrides: {
+			task: dropdownOpenTask,
+			latestTask: dropdownOpenTask,
+		},
+	})
+	assertAction(dropdownChooseDecision.result, 'choose_dropdown_option')
+	if (
+		dropdownChooseDecision.result.action.input.index !== 14 ||
+		dropdownChooseDecision.result.action.input.text !== '启用' ||
+		dropdownChooseDecision.result.action.input.target_label !== '状态' ||
+		dropdownChooseDecision.result.action.input.workflow !== 'form-fill' ||
+		dropdownChooseDecision.result.action.input.workflow_step !== 'choose_form_dropdown_timeout_recovery' ||
+		dropdownChooseDecision.result.action.input.workflow_value_source !== 'visible_option' ||
+		!String(dropdownChooseDecision.result.action.input.workflow_value_basis || '').includes('启用')
+	) {
+		throw new Error(`timeout recovery should choose assigned dropdown candidates with target_label metadata, got ${JSON.stringify(dropdownChooseDecision.result)}`)
+	}
+
+	const cascaderTask = '编辑当前记录，所在地，修改为江苏省，南京市，江宁区。'
 	const cascaderDecision = await runPlannerWithFakeModel({
 		fetchImpl: async () => {
 			const error = new Error('abort')
@@ -3892,16 +4415,16 @@ async function assertPlannerTimeoutRecoveryUpdatesAssignedExistingFields() {
 					id: 'dialog',
 					name: '编辑弹层',
 					fields: [
-						{ index: 10, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '客户所在地', valueState: 'selected:天津市 / 天津市 / 和平区', role: 'combobox', selectionControl: 'cascader-parent' },
+						{ index: 10, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '所在地', valueState: 'selected:天津市 / 天津市 / 和平区', role: 'combobox', selectionControl: 'cascader-parent' },
 					],
 				},
 			],
 			actions: [
-				{ index: 10, region: 'dialog', role: 'combobox', label: '客户所在地', valueState: 'selected:天津市 / 天津市 / 和平区', kind: 'cascader', selectionControl: 'cascader-parent' },
+				{ index: 10, region: 'dialog', role: 'combobox', label: '所在地', valueState: 'selected:天津市 / 天津市 / 和平区', kind: 'cascader', selectionControl: 'cascader-parent' },
 			],
 			elements: [],
 			simplifiedDom: [
-				'<field index="10" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="selected:天津市 / 天津市 / 和平区">客户所在地</field>',
+				'<field index="10" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="selected:天津市 / 天津市 / 和平区">所在地</field>',
 			],
 		},
 		sessionOverrides: {
@@ -3913,10 +4436,240 @@ async function assertPlannerTimeoutRecoveryUpdatesAssignedExistingFields() {
 	if (
 		cascaderDecision.result.action.input.index !== 10 ||
 		JSON.stringify(cascaderDecision.result.action.input.path) !== JSON.stringify(['江苏省', '南京市', '江宁区']) ||
+		cascaderDecision.result.action.input.target_label !== '所在地' ||
 		cascaderDecision.result.action.input.workflow !== 'form-fill' ||
-		cascaderDecision.result.action.input.workflow_step !== 'select_cascader_path_timeout_recovery'
+		cascaderDecision.result.action.input.workflow_step !== 'select_cascader_path_timeout_recovery' ||
+		cascaderDecision.result.action.input.workflow_value_source !== 'task_value'
 	) {
 		throw new Error(`timeout recovery should update explicitly assigned existing cascader fields, got ${JSON.stringify(cascaderDecision.result)}`)
+	}
+}
+
+async function assertPlannerTimeoutRecoverySelectsCompactCascaderValue() {
+	const task = '编辑当前记录，层级路径，修改为甲级乙级丙级。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '编辑-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '编辑弹层',
+					fields: [
+						{ index: 18, region: 'dialog', fieldType: 'hierarchy', kind: 'cascader', label: '层级路径', valueState: 'selected:旧级 / 旧段 / 旧项', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, region: 'dialog', role: 'combobox', label: '层级路径', valueState: 'selected:旧级 / 旧段 / 旧项', kind: 'cascader', selectionControl: 'cascader-parent' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="18" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="selected:旧级 / 旧段 / 旧项">层级路径</field>',
+			],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+		},
+	})
+	assertAction(decision.result, 'select_cascader_path')
+	if (
+		decision.result.action.input.index !== 18 ||
+		JSON.stringify(decision.result.action.input.path) !== JSON.stringify(['甲级乙级丙级']) ||
+		decision.result.action.input.target_label !== '层级路径' ||
+		decision.result.action.input.workflow !== 'form-fill' ||
+		decision.result.action.input.workflow_step !== 'select_cascader_path_timeout_recovery' ||
+		decision.result.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`timeout recovery should pass compact cascader values to the scoped cascader action, got ${JSON.stringify(decision.result)}`)
+	}
+
+	const dashedTask = '编辑当前记录，层级路径，修改为甲级-乙级-丙级。'
+	const dashedDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '编辑-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '编辑弹层',
+					fields: [
+						{ index: 18, region: 'dialog', fieldType: 'hierarchy', kind: 'cascader', label: '层级路径', valueState: 'selected:旧级 / 旧段 / 旧项', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, region: 'dialog', role: 'combobox', label: '层级路径', valueState: 'selected:旧级 / 旧段 / 旧项', kind: 'cascader', selectionControl: 'cascader-parent' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="18" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="selected:旧级 / 旧段 / 旧项">层级路径</field>',
+			],
+		},
+		sessionOverrides: {
+			task: dashedTask,
+			latestTask: dashedTask,
+		},
+	})
+	assertAction(dashedDecision.result, 'select_cascader_path')
+	if (
+		dashedDecision.result.action.input.index !== 18 ||
+		JSON.stringify(dashedDecision.result.action.input.path) !== JSON.stringify(['甲级', '乙级', '丙级']) ||
+		dashedDecision.result.action.input.target_label !== '层级路径' ||
+		dashedDecision.result.action.input.workflow !== 'form-fill' ||
+		dashedDecision.result.action.input.workflow_step !== 'select_cascader_path_timeout_recovery' ||
+		dashedDecision.result.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`timeout recovery should parse dashed generic cascader paths before scoped selection, got ${JSON.stringify(dashedDecision.result)}`)
+	}
+
+	const spacedCjkTask = '编辑当前记录，层级路径，修改为甲级 乙级 丙级。'
+	const spacedCjkDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '编辑-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '编辑弹层',
+					fields: [
+						{ index: 18, region: 'dialog', fieldType: 'hierarchy', kind: 'cascader', label: '层级路径', valueState: 'selected:旧级 / 旧段 / 旧项', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, region: 'dialog', role: 'combobox', label: '层级路径', valueState: 'selected:旧级 / 旧段 / 旧项', kind: 'cascader', selectionControl: 'cascader-parent' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="18" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="selected:旧级 / 旧段 / 旧项">层级路径</field>',
+			],
+		},
+		sessionOverrides: {
+			task: spacedCjkTask,
+			latestTask: spacedCjkTask,
+		},
+	})
+	assertAction(spacedCjkDecision.result, 'select_cascader_path')
+	if (
+		JSON.stringify(spacedCjkDecision.result.action.input.path) !== JSON.stringify(['甲级', '乙级', '丙级']) ||
+		spacedCjkDecision.result.action.input.target_label !== '层级路径' ||
+		spacedCjkDecision.result.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`timeout recovery should still parse CJK whitespace-separated cascader paths, got ${JSON.stringify(spacedCjkDecision.result)}`)
+	}
+
+	const latinMultiWordTask = '编辑当前记录，层级路径，修改为New York。'
+	const latinMultiWordDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '编辑-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '编辑弹层',
+					fields: [
+						{ index: 18, region: 'dialog', fieldType: 'hierarchy', kind: 'cascader', label: '层级路径', valueState: 'selected:Old / Path', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, region: 'dialog', role: 'combobox', label: '层级路径', valueState: 'selected:Old / Path', kind: 'cascader', selectionControl: 'cascader-parent' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="18" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="selected:Old / Path">层级路径</field>',
+			],
+		},
+		sessionOverrides: {
+			task: latinMultiWordTask,
+			latestTask: latinMultiWordTask,
+		},
+	})
+	assertAction(latinMultiWordDecision.result, 'select_cascader_path')
+	if (
+		JSON.stringify(latinMultiWordDecision.result.action.input.path) !== JSON.stringify(['New York']) ||
+		latinMultiWordDecision.result.action.input.target_label !== '层级路径' ||
+		latinMultiWordDecision.result.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`timeout recovery should preserve Latin multi-word cascader values instead of splitting on spaces, got ${JSON.stringify(latinMultiWordDecision.result)}`)
+	}
+}
+
+async function assertPlannerTimeoutRecoverySelectsSuffixlessCompactCascaderValue() {
+	const task = '编辑当前记录，所在地，修改为江苏南京江宁。'
+	const progressEvents = []
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...buildTestObservation(),
+			title: '编辑-示例系统',
+			forms: [
+				{
+					id: 'dialog',
+					name: '编辑弹层',
+					fields: [
+						{ index: 19, region: 'dialog', fieldType: 'region', kind: 'cascader', label: '所在地', valueState: 'selected:天津市 / 天津市 / 和平区', role: 'combobox', selectionControl: 'cascader-parent' },
+					],
+				},
+			],
+			actions: [
+				{ index: 19, region: 'dialog', role: 'combobox', label: '所在地', valueState: 'selected:天津市 / 天津市 / 和平区', kind: 'cascader', selectionControl: 'cascader-parent' },
+			],
+			elements: [],
+			simplifiedDom: [
+				'<field index="19" role="combobox" region="dialog" kind="cascader" control="cascader-parent" value="selected:天津市 / 天津市 / 和平区">所在地</field>',
+			],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+		},
+		planOptions: {
+			onProgress: (event) => progressEvents.push(event),
+		},
+	})
+	assertAction(decision.result, 'select_cascader_path')
+	if (
+		decision.result.action.input.index !== 19 ||
+		JSON.stringify(decision.result.action.input.path) !== JSON.stringify(['江苏南京江宁']) ||
+		decision.result.action.input.target_label !== '所在地' ||
+		decision.result.action.input.workflow !== 'form-fill' ||
+		decision.result.action.input.workflow_step !== 'select_cascader_path_timeout_recovery' ||
+		decision.result.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`timeout recovery should preserve suffixless compact cascader values for scoped cascader matching, got ${JSON.stringify(decision.result)}`)
+	}
+	const progressText = String(progressEvents.find((event) => event.stage === 'workflow_decision')?.text || '')
+	for (const expected of ['表单 workflow 正在选择级联路径「所在地」', 'index=19', '路径=江苏南京江宁', '任务文本、字段标签和当前页面状态限定动作范围']) {
+		if (!progressText.includes(expected)) {
+			throw new Error(`form-fill cascader progress should expose ${expected}, got ${JSON.stringify(progressEvents)}`)
+		}
 	}
 }
 
@@ -3955,7 +4708,11 @@ async function assertPlannerTimeoutRecoveryCleansDanglingCascaderPunctuation() {
 		},
 	})
 	assertAction(decision.result, 'select_cascader_path')
-	if (JSON.stringify(decision.result.action.input.path) !== JSON.stringify(['江苏省', '南京市', '江宁区'])) {
+	if (
+		JSON.stringify(decision.result.action.input.path) !== JSON.stringify(['江苏省', '南京市', '江宁区']) ||
+		decision.result.action.input.target_label !== '配送区域' ||
+		decision.result.action.input.workflow_value_source !== 'task_value'
+	) {
 		throw new Error(`timeout recovery should strip dangling punctuation from cascader path parts, got ${JSON.stringify(decision.result)}`)
 	}
 }
@@ -4013,7 +4770,9 @@ async function assertPlannerTimeoutRecoveryClicksVisibleCascaderCandidate() {
 	if (
 		decision.result.action.input.index !== 33 ||
 		decision.result.action.input.workflow !== 'form-fill' ||
-		decision.result.action.input.workflow_step !== 'select_visible_cascader_option_timeout_recovery'
+		decision.result.action.input.workflow_step !== 'select_visible_cascader_option_timeout_recovery' ||
+		decision.result.action.input.workflow_value_source !== 'visible_option' ||
+		!String(decision.result.action.input.workflow_value_basis || '').includes('江宁区')
 	) {
 		throw new Error(`timeout recovery should click the visible cleaned cascader candidate, got ${JSON.stringify(decision.result)}`)
 	}
@@ -4219,6 +4978,7 @@ async function assertPlannerTimeoutRecoverySubmitsAfterFormFillRecovery() {
 async function assertPlannerPreModelFormFillSkipsModelWhenDeterministic() {
 	let requestCount = 0
 	const task = '新建一条资料，名称是晨会，类型是会议。'
+	const progressEvents = []
 	const decision = await runPlannerWithFakeModel({
 		fetchImpl: async () => {
 			requestCount += 1
@@ -4259,6 +5019,9 @@ async function assertPlannerPreModelFormFillSkipsModelWhenDeterministic() {
 				},
 			},
 		},
+		planOptions: {
+			onProgress: (event) => progressEvents.push(event),
+		},
 	})
 	assertAction(decision.result, 'input_text')
 	if (requestCount !== 0 || decision.result.action.input.index !== 1 || decision.result.action.input.text !== '晨会') {
@@ -4266,6 +5029,12 @@ async function assertPlannerPreModelFormFillSkipsModelWhenDeterministic() {
 	}
 	if (!String(decision.result.evaluation_previous_goal || '').includes('唯一确定')) {
 		throw new Error(`pre-model form-fill decision should not claim a model timeout, got ${JSON.stringify(decision.result)}`)
+	}
+	const progressText = String(progressEvents.find((event) => event.stage === 'workflow_decision')?.text || '')
+	for (const expected of ['表单 workflow 正在根据任务文本填写字段「名称」', 'index=1', '目标值=晨会', '任务文本、字段标签和当前页面状态限定动作范围']) {
+		if (!progressText.includes(expected)) {
+			throw new Error(`form-fill workflow progress should expose ${expected}, got ${JSON.stringify(progressEvents)}`)
+		}
 	}
 }
 
@@ -4870,7 +5639,10 @@ async function assertPlannerValidationErrorCorrectsForbiddenCharacters() {
 		requestCount !== 0 ||
 		decision.result.action.input.index !== 2 ||
 		decision.result.action.input.text !== '张三ab12' ||
-		decision.result.action.input.workflow_step !== 'resolve_field_validation_error'
+		decision.result.action.input.target_label !== '主体名称' ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error' ||
+		decision.result.action.input.workflow_value_source !== 'page_validation' ||
+		!String(decision.result.action.input.workflow_value_basis || '').includes('不能包含')
 	) {
 		throw new Error(`field validation error should be corrected from page feedback, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
 	}
@@ -5471,10 +6243,10 @@ function assertPlannerObservationOmissionHints() {
 		throw new Error(`request_context should match any create-query term so the model can recover visible add buttons, got ${createActionsChunk}`)
 	}
 	const fallbackTableObservation = buildTestObservation()
-	fallbackTableObservation.tables = []
-	fallbackTableObservation.simplifiedDom = [
-		'row 1 region="content" table="list" 销售姓名=管理员 | 客户公司名称=星火科技 | 客户编号=KH_001',
-	]
+		fallbackTableObservation.tables = []
+		fallbackTableObservation.simplifiedDom = [
+			'row 1 region="content" table="list" 负责人=管理员 | 公司名称=星火科技 | 记录编号=REC_001',
+		]
 	fallbackTableObservation.rawCandidates = []
 	const fallbackTablesChunk = context.resolvePlanningContextRequest(
 		fallbackTableObservation,
@@ -6078,6 +6850,67 @@ async function assertPlannerRejectsDiagnosticOptionCandidateSelection() {
 	if (declaredDateValidationError) {
 		throw new Error(`declared date/time target labels should let date requests match day-only date cells, got: ${declaredDateValidationError}`)
 	}
+	const monthPeriodObservation = buildTestObservation()
+	const monthPeriodField = {
+		index: 39,
+		region: 'content',
+		fieldType: 'month',
+		label: '月份',
+		valueState: 'empty',
+		role: 'combobox',
+		selectionControl: 'dropdown',
+		rect: { left: 1180, top: 136, width: 131, height: 33 },
+	}
+	monthPeriodObservation.forms[0].fields.push(monthPeriodField)
+	monthPeriodObservation.elements.push(monthPeriodField)
+	monthPeriodObservation.options = [
+		{
+			index: 97,
+			region: 'popover',
+			role: 'option',
+			label: '2026-06',
+			valueState: 'unknown',
+			selectionControl: 'date-option',
+			rect: { left: 752, top: 266, width: 64, height: 39 },
+		},
+	]
+	const monthPeriodValidationError = validationSandbox.NC_BG_PLANNER_VALIDATION.validateExecutableAction(
+		{ name: 'choose_dropdown_option', input: { index: 39, text: '2026年6月', target_label: '月份' } },
+		monthPeriodObservation,
+		[]
+	)
+	if (monthPeriodValidationError) {
+		throw new Error(`month picker selection should match normalized year-month candidates, got: ${monthPeriodValidationError}`)
+	}
+	const monthRangeObservation = {
+		...monthPeriodObservation,
+		forms: [
+			{
+				...monthPeriodObservation.forms[0],
+				fields: [{ ...monthPeriodField, fieldType: 'monthrange', label: '月份范围' }],
+			},
+		],
+		elements: [{ ...monthPeriodField, fieldType: 'monthrange', label: '月份范围' }],
+		options: [
+			{
+				index: 98,
+				region: 'popover',
+				role: 'option',
+				label: '2026-07',
+				valueState: 'unknown',
+				selectionControl: 'date-option',
+				rect: { left: 820, top: 266, width: 64, height: 39 },
+			},
+		],
+	}
+	const monthRangeValidationError = validationSandbox.NC_BG_PLANNER_VALIDATION.validateExecutableAction(
+		{ name: 'choose_dropdown_option', input: { index: 39, text: '2026年6月..2026年7月', target_label: '月份范围' } },
+		monthRangeObservation,
+		[]
+	)
+	if (monthRangeValidationError) {
+		throw new Error(`month range picker selection should match either normalized boundary candidate, got: ${monthRangeValidationError}`)
+	}
 	const controlledDateObservation = buildTestObservation()
 	const controlledDateField = {
 		index: 37,
@@ -6158,11 +6991,11 @@ async function assertPlannerRejectsDiagnosticOptionCandidateSelection() {
 		throw new Error(`date picker fallback must not accept ambiguous date cells from multiple explicit popup owners, got: ${ambiguousDateValidationError}`)
 	}
 	const nonDateObservation = buildTestObservation()
-	const nonDateField = {
-		index: 29,
-		region: 'content',
-		fieldType: 'select',
-		label: '客户等级',
+		const nonDateField = {
+			index: 29,
+			region: 'content',
+			fieldType: 'select',
+			label: '等级',
 		valueState: 'empty',
 		role: 'combobox',
 		selectionControl: 'dropdown',
@@ -6171,8 +7004,8 @@ async function assertPlannerRejectsDiagnosticOptionCandidateSelection() {
 	nonDateObservation.forms[0].fields.push(nonDateField)
 	nonDateObservation.elements.push(nonDateField)
 	nonDateObservation.options = dayOnlyDateObservation.options
-	const nonDateValidationError = validationSandbox.NC_BG_PLANNER_VALIDATION.validateExecutableAction(
-		{ name: 'choose_dropdown_option', input: { index: 29, text: '2026-06-01', target_label: '客户等级' } },
+		const nonDateValidationError = validationSandbox.NC_BG_PLANNER_VALIDATION.validateExecutableAction(
+			{ name: 'choose_dropdown_option', input: { index: 29, text: '2026-06-01', target_label: '等级' } },
 		nonDateObservation,
 		[]
 	)
@@ -6667,6 +7500,94 @@ async function assertPlannerOptionsContextUsesExplicitPopupOwner() {
 	}
 }
 
+async function assertPlannerOptionsContextUsesActiveNewPopupOwner() {
+	const requestBodies = []
+	const observation = buildTestObservation()
+	const selectField = {
+		index: 4,
+		region: 'content',
+		fieldType: 'select',
+		label: '状态',
+		valueState: 'empty',
+		role: 'combobox',
+		selectionControl: 'dropdown',
+		expandedState: 'expanded',
+		rect: { left: 20, top: 80, width: 180, height: 36 },
+	}
+	observation.forms[0].fields.push(selectField)
+	observation.elements.push(selectField)
+	observation.options = [
+		{
+			index: 41,
+			region: 'popover',
+			role: 'option',
+			label: '启用',
+			valueState: 'unknown',
+			selectionControl: '',
+			popupHints: 'popupRole=listbox',
+			newSinceLastObservation: true,
+			rect: { left: 520, top: 260, width: 180, height: 32 },
+		},
+		{
+			index: 42,
+			region: 'popover',
+			role: 'option',
+			label: '禁用',
+			valueState: 'unknown',
+			selectionControl: '',
+			popupHints: 'popupRole=listbox',
+			newSinceLastObservation: true,
+			rect: { left: 520, top: 292, width: 180, height: 32 },
+		},
+		{
+			index: 43,
+			region: 'popover',
+			role: 'option',
+			label: '旧候选',
+			valueState: 'unknown',
+			selectionControl: '',
+			popupHints: 'popupRole=listbox',
+			newSinceLastObservation: false,
+			rect: { left: 20, top: 640, width: 180, height: 32 },
+		},
+	]
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async (_url, init) => {
+			const body = JSON.parse(init.body)
+			requestBodies.push(body)
+			if (requestBodies.length === 1) {
+				return fakeJsonResponse({
+					evaluation_previous_goal: '刚展开了一个 teleport 下拉弹层。',
+					memory: '弹层没有 aria owner，但候选是新出现的。',
+					thought: '先请求目标字段候选。',
+					next_goal: '查看状态候选。',
+					action: { name: 'request_options_for', input: { index: 4 } },
+				})
+			}
+			return fakeJsonResponse({
+				evaluation_previous_goal: '候选已按 active 弹层收窄。',
+				memory: '状态字段候选包含启用。',
+				thought: '选择 active 弹层候选。',
+				next_goal: '选择启用。',
+				action: { name: 'select_dropdown_option', input: { index: 4, text: '启用' } },
+			})
+		},
+		observation,
+	})
+	assertAction(decision.result, 'select_dropdown_option')
+	const secondUser = getUserMessageText(requestBodies[1])
+	const planningContext = secondUser.slice(secondUser.indexOf('<planning_context>'))
+	if (!planningContext.includes('<visible_options scoped="active"') || !planningContext.includes('new=true')) {
+		throw new Error(`request_options_for should expose newly opened ownerless popup options as active-scoped candidates, got: ${planningContext}`)
+	}
+	if (!planningContext.includes('启用') || !planningContext.includes('禁用') || planningContext.includes('旧候选')) {
+		throw new Error(`active popup ownership should include only newly observed popup candidates, got: ${planningContext}`)
+	}
+	if (planningContext.includes('diagnostic_options scoped="active"')) {
+		throw new Error(`active popup ownership should be usable rather than diagnostic, got: ${planningContext}`)
+	}
+}
+
 async function assertPlannerOptionsContextUsesPopupLabelledByOwner() {
 	const requestBodies = []
 	const observation = buildTestObservation()
@@ -6802,6 +7723,7 @@ async function assertPlannerDuplicateReactRequestWarnsAndRecovers() {
 
 async function assertPlannerInvalidActionReplansBeforeExecution() {
 	const requestBodies = []
+	const progressEvents = []
 	const decision = await runPlannerWithFakeModel({
 		fetchImpl: async (_url, init) => {
 			const body = JSON.parse(init.body)
@@ -6824,6 +7746,9 @@ async function assertPlannerInvalidActionReplansBeforeExecution() {
 			})
 		},
 		observation: buildTestObservation(),
+		planOptions: {
+			onProgress: (event) => progressEvents.push(event),
+		},
 	})
 	assertAction(decision.result, 'click_element_by_index')
 	if (requestBodies.length !== 2) {
@@ -6833,10 +7758,19 @@ async function assertPlannerInvalidActionReplansBeforeExecution() {
 	if (!secondUser.includes('invalid_action="true"') || !secondUser.includes('click_by_text')) {
 		throw new Error('invalid action feedback was not included in the follow-up planning request')
 	}
+	const invalidActionProgress = progressEvents.find((event) => event.stage === 'invalid_action_name')
+	if (
+		!invalidActionProgress ||
+		!String(invalidActionProgress.text || '').includes('不可用工具 "click_by_text"') ||
+		!String(invalidActionProgress.text || '').includes('页面尚未执行动作')
+	) {
+		throw new Error(`invalid action feedback should publish visible planning progress, got ${JSON.stringify(progressEvents)}`)
+	}
 }
 
 async function assertPlannerInvalidModelOutputReplansBeforeFailing() {
 	const requestBodies = []
+	const progressEvents = []
 	const decision = await runPlannerWithFakeModel({
 		fetchImpl: async (_url, init) => {
 			const body = JSON.parse(init.body)
@@ -6861,6 +7795,9 @@ async function assertPlannerInvalidModelOutputReplansBeforeFailing() {
 			})
 		},
 		observation: buildTestObservation(),
+		planOptions: {
+			onProgress: (event) => progressEvents.push(event),
+		},
 	})
 	assertAction(decision.result, 'input_text')
 	if (decision.result.action.input.text !== 'json-recovered') {
@@ -6872,6 +7809,14 @@ async function assertPlannerInvalidModelOutputReplansBeforeFailing() {
 	const secondUser = getUserMessageText(requestBodies[1])
 	if (!secondUser.includes('invalid_model_output="true"') || !secondUser.includes('只输出 JSON 对象')) {
 		throw new Error('invalid model output feedback was not included in the follow-up planning request')
+	}
+	const invalidModelOutputProgress = progressEvents.find((event) => event.stage === 'invalid_model_output')
+	if (
+		!invalidModelOutputProgress ||
+		!String(invalidModelOutputProgress.text || '').includes('模型输出不是可执行 JSON') ||
+		!String(invalidModelOutputProgress.text || '').includes('页面尚未执行动作')
+	) {
+		throw new Error(`invalid model output feedback should publish visible planning progress, got ${JSON.stringify(progressEvents)}`)
 	}
 }
 
@@ -7102,10 +8047,16 @@ async function assertPlannerPublishesValidationFeedbackForCoveredTargets() {
 		throw new Error(`covered target validation should trigger one replan, got ${requestBodies.length}`)
 	}
 	const validationEvent = progressEvents.find((event) => event.stage === 'validation_feedback')
+	const validationText = String(validationEvent?.text || '')
 	if (
 		!validationEvent ||
-		!String(validationEvent.text || '').includes('执行前校验拦截 input_text') ||
-		!String(validationEvent.text || '').includes('当前被遮挡')
+		!validationText.includes('执行前校验拦截 input_text') ||
+		!validationText.includes('当前被遮挡') ||
+		!validationText.includes('类型=covered_target') ||
+		!validationText.includes('建议=不要直接操作被遮挡 index') ||
+		!validationText.includes('已把原因和建议补给模型') ||
+		validationEvent.validationKind !== 'covered_target' ||
+		!String(validationEvent.validationGuidance || '').includes('不要直接操作被遮挡 index')
 	) {
 		throw new Error(`covered target validation should publish visible progress, got ${JSON.stringify(progressEvents)}`)
 	}
@@ -7786,6 +8737,9 @@ async function assertExplicitDropdownToolsAreRegisteredAndRouted() {
 	}
 	if (!actionSelect.includes('openDropdownAction') || !actionSelect.includes('chooseDropdownOptionAction')) {
 		throw new Error('content dropdown implementation should expose explicit open/select wrappers')
+	}
+	if (!actionSelect.includes('attachVisibleOptionEvidence') || !actionSelect.includes('visibleOptions: merged')) {
+		throw new Error('successful direct dropdown/selectable selections should return visible option evidence in the structured outcome')
 	}
 	const plannerSandbox = loadBackgroundModule('naturalclick-extension/background/planner.js', {
 		NC_BG_UTILS: {
@@ -8943,12 +9897,22 @@ async function assertSessionLoopGuardReplansToCompletion() {
 	if (
 		loopGuardHistory.outcome?.kind !== 'no_effect' ||
 		loopGuardHistory.outcome?.progress !== false ||
-		!String(loopGuardHistory.output || '').includes('动作结果: no_effect')
+		!String(loopGuardHistory.output || '').includes('动作结果: no_effect') ||
+		loopGuardHistory.loopGuardKind !== 'repeated_no_progress_action' ||
+		!String(loopGuardHistory.loopGuardGuidance || '').includes('不要再次执行同一动作')
 	) {
 		throw new Error(`loop guard history should carry a structured no_effect outcome, got ${JSON.stringify(loopGuardHistory)}`)
 	}
-	if (!session.traceItems.some((item) => String(item.title || '').includes('循环保护'))) {
+	const loopGuardTrace = session.traceItems.find((item) => String(item.title || '').includes('循环保护'))
+	if (!loopGuardTrace) {
 		throw new Error('loop guard recovery did not add a visible trace item')
+	}
+	if (
+		loopGuardTrace.action?.loopGuardKind !== 'repeated_no_progress_action' ||
+		!String(loopGuardTrace.action?.loopGuardGuidance || '').includes('不要再次执行同一动作') ||
+		!String(loopGuardTrace.detail || '').includes('类型=repeated_no_progress_action')
+	) {
+		throw new Error(`loop guard trace should preserve structured kind and guidance, got ${JSON.stringify(loopGuardTrace)}`)
 	}
 }
 
@@ -9102,6 +10066,30 @@ async function assertSessionPublishesPlanningProgress() {
 			throw new Error(`session engine should expose search workflow value details with ${expected}, got ${searchActivityText}`)
 		}
 	}
+	const searchCascaderActivityText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildDecisionActivityText(
+		{ step: 9 },
+		{
+			next_goal: '选择搜索级联路径：所在地',
+			action: {
+				name: 'select_cascader_path',
+				input: {
+					workflow_step: 'select_option',
+					workflow_field_label: '所在地',
+					workflow_test_value: '江苏省 / 南京市 / 江宁区',
+					path: ['江苏省', '南京市', '江宁区'],
+					workflow_value_source: 'table_sample',
+					workflow_value_basis: '当前列表对应列已有级联路径',
+					index: 32,
+					target_region: 'content',
+				},
+			},
+		}
+	)
+	for (const expected of ['选择搜索候选：所在地', '值=江苏省 / 南京市 / 江宁区', '路径=江苏省 / 南京市 / 江宁区', '来源=列表样本', '依据=当前列表对应列已有级联路径', '区域=content', 'index=32']) {
+		if (!searchCascaderActivityText.includes(expected)) {
+			throw new Error(`session engine should expose search cascader path progress with ${expected}, got ${searchCascaderActivityText}`)
+		}
+	}
 	const navigationActivityText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildDecisionActivityText(
 		{ step: 9 },
 		{
@@ -9124,6 +10112,72 @@ async function assertSessionPublishesPlanningProgress() {
 			throw new Error(`session engine should expose generic navigation diagnostics with ${expected}, got ${navigationActivityText}`)
 		}
 	}
+	const visibleCascaderActivityText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildDecisionActivityText(
+		{ step: 10 },
+		{
+			next_goal: '选择级联候选：江宁区',
+			action: {
+				name: 'click_element_by_index',
+				input: {
+					workflow_step: 'select_visible_cascader_option_timeout_recovery',
+					workflow_field_label: '所在地',
+					target_label: '江宁区',
+					workflow_requested_text: '江宁区',
+					workflow_value_source: 'visible_option',
+					workflow_value_basis: '可见级联候选与请求值匹配：江宁区',
+					index: 33,
+				},
+			},
+		}
+	)
+	for (const expected of ['选择可见级联候选：所在地', '值=江宁区', '来源=真实候选', '依据=可见级联候选与请求值匹配', 'index=33']) {
+		if (!visibleCascaderActivityText.includes(expected)) {
+			throw new Error(`session engine should expose field-scoped visible cascader candidate progress with ${expected}, got ${visibleCascaderActivityText}`)
+		}
+	}
+	if (visibleCascaderActivityText.includes('选择可见级联候选：江宁区')) {
+		throw new Error(`visible cascader candidate progress should title the target field, not only the candidate value, got ${visibleCascaderActivityText}`)
+	}
+	const createEntryActivityText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildDecisionActivityText(
+		{ step: 11 },
+		{
+			next_goal: '打开新增表单',
+			action: {
+				name: 'click_element_by_index',
+				input: {
+					workflow: 'create-task',
+					workflow_step: 'open_create_form_timeout_recovery',
+					workflow_create_label: '新增',
+					target_region: 'content',
+					index: 27,
+				},
+			},
+		}
+	)
+	for (const expected of ['打开创建入口：新增', '点击后复核表单是否出现', '区域=content', 'index=27']) {
+		if (!createEntryActivityText.includes(expected)) {
+			throw new Error(`session engine should expose create-entry workflow activity with ${expected}, got ${createEntryActivityText}`)
+		}
+	}
+	const createFinishActivityText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildDecisionActivityText(
+		{ step: 12 },
+		{
+			next_goal: '结束创建任务',
+			action: {
+				name: 'done',
+				input: {
+					success: true,
+					workflow: 'create-task',
+					workflow_step: 'finish_create_after_submit_no_form',
+				},
+			},
+		}
+	)
+	for (const expected of ['确认创建提交完成', '提交后表单已消失', '避免重复创建']) {
+		if (!createFinishActivityText.includes(expected)) {
+			throw new Error(`session engine should expose create-finish workflow activity with ${expected}, got ${createFinishActivityText}`)
+		}
+	}
 	const heartbeatText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildActionExecutionHeartbeatText(
 		{ step: 9 },
 		{
@@ -9131,18 +10185,82 @@ async function assertSessionPublishesPlanningProgress() {
 			input: {
 				workflow_step: 'select_option',
 				workflow_field_label: '资料等级',
+				index: 41,
 				text: '核心',
 			},
 		},
 		6200
 	)
-	for (const expected of ['第 9 步：选择搜索候选：资料等级', '已等待 6 秒', '候选弹层']) {
+	for (const expected of ['第 9 步：选择搜索候选：资料等级', '目标细节：index=41，字段=资料等级，值=核心', '已等待 6 秒', '目标字段范围内的候选匹配', '归属确认']) {
 		if (!heartbeatText.includes(expected)) {
 			throw new Error(`session engine should explain long-running action execution with ${expected}, got ${heartbeatText}`)
 		}
 	}
-	const waitHeartbeatText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildActionExecutionHeartbeatText(
+	const candidatePreviewHeartbeatText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildActionExecutionHeartbeatText(
+		{
+			step: 9,
+			workflowState: {
+				search: {
+					activeFieldKey: 'index:41',
+					pendingDropdownCandidates: ['核心', '重要', '潜力', '一般', '停用'],
+				},
+			},
+		},
+		{
+			name: 'choose_dropdown_option',
+			input: {
+				workflow_step: 'select_option',
+				workflow_field_label: '等级',
+				index: 41,
+				text: '核心',
+			},
+		},
+		3200
+	)
+	for (const expected of ['目标细节：index=41，字段=等级，值=核心，候选=核心|重要|潜力|一般', '目标字段范围内的候选匹配', '滚动查找']) {
+		if (!candidatePreviewHeartbeatText.includes(expected)) {
+			throw new Error(`selection heartbeat should expose field-scoped candidate preview with ${expected}, got ${candidatePreviewHeartbeatText}`)
+		}
+	}
+	const cascaderHeartbeatText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildActionExecutionHeartbeatText(
 		{ step: 10 },
+		{
+			name: 'select_cascader_path',
+			input: {
+				workflow_step: 'select_cascader_path_timeout_recovery',
+				index: 10,
+				target_label: '所在地',
+				path: ['江苏省', '南京市', '江宁区'],
+			},
+		},
+		5400
+	)
+	for (const expected of ['第 10 步：选择级联路径：所在地', '目标细节：index=10，字段=所在地，路径=江苏省 / 南京市 / 江宁区', '已等待 5 秒', '级联菜单逐级展开', '滚动定位真实候选']) {
+		if (!cascaderHeartbeatText.includes(expected)) {
+			throw new Error(`session engine should expose cascader path details during long-running execution with ${expected}, got ${cascaderHeartbeatText}`)
+		}
+	}
+	const sensitiveHeartbeatText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildActionExecutionHeartbeatText(
+		{ step: 11 },
+		{
+			name: 'input_text',
+			input: {
+				index: 2,
+				target_label: '登录密码',
+				type: 'password',
+				text: 'Secret987!',
+			},
+		},
+		2200
+	)
+	if (
+		!sensitiveHeartbeatText.includes('目标细节：index=2，字段=登录密码，值=已隐藏') ||
+		sensitiveHeartbeatText.includes('Secret987')
+	) {
+		throw new Error(`session engine should hide sensitive action heartbeat values while preserving target details, got ${sensitiveHeartbeatText}`)
+	}
+	const waitHeartbeatText = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildActionExecutionHeartbeatText(
+		{ step: 12 },
 		{
 			name: 'wait',
 			input: {
@@ -9152,7 +10270,7 @@ async function assertSessionPublishesPlanningProgress() {
 		},
 		4100
 	)
-	for (const expected of ['第 10 步：等待候选弹层出现', '已等待 4 秒', '正在等待候选弹层出现']) {
+	for (const expected of ['第 12 步：等待候选弹层出现', '已等待 4 秒', '正在等待候选弹层出现']) {
 		if (!waitHeartbeatText.includes(expected)) {
 			throw new Error(`wait heartbeat should surface the declared wait reason with ${expected}, got ${waitHeartbeatText}`)
 		}
@@ -9695,6 +10813,38 @@ function assertRuntimeProgressTraceDedupes() {
 			text: '仍在等待模型响应。',
 			round: 1,
 		},
+	}
+	sandbox.NC_BG_SESSION_LIFECYCLE.publishPlanningProgress(session, {
+		stage: 'model_wait_heartbeat',
+		round: 1,
+		elapsedMs: 3400,
+		timeoutMs: 60000,
+		text: '第 4 步：模型正在规划下一步动作。',
+	})
+	const planningTrace = session.traceItems.find((item) => item?.progress?.stage === 'model_wait_heartbeat')
+	if (
+		session.currentPlanningProgress?.elapsedMs !== 3400 ||
+		session.currentPlanningProgress?.timeoutMs !== 60000 ||
+		planningTrace?.progress?.elapsedMs !== 3400 ||
+		planningTrace?.progress?.timeoutMs !== 60000
+	) {
+		throw new Error(`planning progress should preserve structured elapsed time in live state and trace cards, got session=${JSON.stringify(session)}`)
+	}
+	sandbox.NC_BG_SESSION_LIFECYCLE.publishPlanningProgress(session, {
+		stage: 'validation_feedback',
+		round: 2,
+		validationKind: 'covered_target',
+		validationGuidance: '不要直接操作被遮挡 index；先处理当前弹层候选。',
+		text: '第 4 步：执行前校验拦截 input_text；类型=covered_target。',
+	})
+	const validationTrace = session.traceItems.find((item) => item?.progress?.stage === 'validation_feedback')
+	if (
+		session.currentPlanningProgress?.validationKind !== 'covered_target' ||
+		!String(session.currentPlanningProgress?.validationGuidance || '').includes('不要直接操作被遮挡 index') ||
+		validationTrace?.progress?.validationKind !== 'covered_target' ||
+		!String(validationTrace?.progress?.validationGuidance || '').includes('不要直接操作被遮挡 index')
+	) {
+		throw new Error(`planning validation feedback should preserve structured kind/guidance, got session=${JSON.stringify(session)}`)
 	}
 	sandbox.NC_BG_SESSION_LIFECYCLE.publishRuntimeProgress(session, {
 		stage: 'observation_heartbeat',
@@ -10837,8 +11987,13 @@ function assertSharedControlSemanticsLoadedEverywhere() {
 	if (!shared.includes('function describeObservedControl') || !shared.includes('DROPDOWN_FIELD_TYPES')) {
 		throw new Error('shared control semantics should expose observed-control classification')
 	}
-	if (!shared.includes('function scoreObservedOptionAssociation') || !shared.includes('observedOptionMatchesControlledPopup')) {
-		throw new Error('shared control semantics should expose observed option-field association')
+	if (
+		!shared.includes('function scoreObservedOptionAssociation') ||
+		!shared.includes('observedOptionMatchesControlledPopup') ||
+		!shared.includes('function collectActiveNewPopupItemsForTargets') ||
+		!shared.includes('function isActiveNewPopupItemForTargets')
+	) {
+		throw new Error('shared control semantics should expose observed option-field association and active popup ownership helpers')
 	}
 	if (!shared.includes("'select'") || !shared.includes("'date'")) {
 		throw new Error('shared control semantics should classify structural select and picker field types')
@@ -10861,6 +12016,26 @@ function assertSharedControlSemanticsLoadedEverywhere() {
 	}
 	if (!plannerContext.includes('scoreObservedOptionAssociation') || plannerContext.includes('function fallbackScoreOptionTargetAssociation')) {
 		throw new Error('planner context should reuse shared observed option association instead of duplicating geometry heuristics')
+	}
+	for (const [name, source] of [
+		['planner context', plannerContext],
+		['planner validation', validation],
+		['search workflow', searchWorkflow],
+	]) {
+		if (!source.includes('collectActiveNewPopupItemsForTargets')) {
+			throw new Error(`${name} should reuse shared active popup ownership semantics`)
+		}
+	}
+	for (const [name, source] of [
+		['planner context', plannerContext],
+		['planner validation', validation],
+		['search workflow', searchWorkflow],
+	]) {
+		for (const forbidden of ['function isExpandedOptionTarget', 'function isPopupOptionItem', 'function hasPopupLabelOwnerConflict']) {
+			if (source.includes(forbidden)) {
+				throw new Error(`${name} should not duplicate shared active popup helper ${forbidden}`)
+			}
+		}
 	}
 }
 
@@ -10920,6 +12095,59 @@ function assertSharedControlSemanticsBehavior() {
 	)
 	if (!Number.isFinite(nearbyScore) || Number.isFinite(farScore)) {
 		throw new Error('shared control semantics should provide deterministic option-field geometry scoring')
+	}
+	const activePopupOptions = [
+		{
+			label: '启用',
+			role: 'option',
+			region: 'popover',
+			newSinceLastObservation: true,
+			popupHints: 'popupRole=listbox',
+			rect: { left: 760, top: 260, width: 180, height: 32 },
+		},
+		{
+			label: '禁用',
+			role: 'option',
+			region: 'popover',
+			newSinceLastObservation: true,
+			popupHints: 'popupRole=listbox',
+			rect: { left: 760, top: 292, width: 180, height: 32 },
+		},
+		{
+			label: '旧候选',
+			role: 'option',
+			region: 'popover',
+			newSinceLastObservation: false,
+			popupHints: 'popupRole=listbox',
+			rect: { left: 20, top: 640, width: 180, height: 32 },
+		},
+	]
+	const activeTarget = { label: '状态', role: 'combobox', expandedState: 'expanded' }
+	const activeOwned = semantics.collectActiveNewPopupItemsForTargets(activePopupOptions, [activeTarget])
+	if (
+		activeOwned.length !== 2 ||
+		activeOwned.map((item) => item.label).join('|') !== '启用|禁用' ||
+		!semantics.isActiveNewPopupItemForTargets(activePopupOptions[0], [activeTarget])
+	) {
+		throw new Error(`shared active popup ownership should use only newly observed items from one popup group, got ${JSON.stringify(activeOwned)}`)
+	}
+	const collapsedActive = semantics.collectActiveNewPopupItemsForTargets(activePopupOptions, [{ label: '状态', role: 'combobox', expandedState: 'collapsed' }])
+	if (collapsedActive.length) {
+		throw new Error(`shared active popup ownership should require an expanded/open target, got ${JSON.stringify(collapsedActive)}`)
+	}
+	const ambiguousActive = semantics.collectActiveNewPopupItemsForTargets([
+		...activePopupOptions.slice(0, 2),
+		{
+			label: '其他',
+			role: 'option',
+			region: 'popover',
+			newSinceLastObservation: true,
+			popupHints: 'popupRole=listbox',
+			rect: { left: 260, top: 260, width: 180, height: 32 },
+		},
+	], [activeTarget])
+	if (ambiguousActive.length) {
+		throw new Error(`shared active popup ownership should reject multiple new ownerless popup groups, got ${JSON.stringify(ambiguousActive)}`)
 	}
 	const controlledScore = semantics.scoreObservedOptionAssociation(
 		{ label: '企业端', popupHints: 'popupId=user-platform-list' },
@@ -11006,10 +12234,10 @@ function assertSharedControlSemanticsBehavior() {
 			role: 'option',
 			selectionControl: 'date-option',
 			rect: { left: 752, top: 266, width: 41, height: 39 },
-		},
-		{
-			label: '客户等级',
-			fieldType: 'select',
+			},
+			{
+				label: '等级',
+				fieldType: 'select',
 			role: 'combobox',
 			selectionControl: 'dropdown',
 			rect: { left: 396, top: 191, width: 131, height: 32 },
@@ -11207,6 +12435,11 @@ function assertSessionRecordsExtractedFromSessionEngine() {
 		'appendVerificationFailureOutcome',
 		'getExecutionOutcome',
 		'derivePlanItems',
+		'buildFieldActionWorkflowPlanItem',
+		'buildFieldActionWorkflowPlanSummary',
+		'buildSearchWorkflowNeededEvidence',
+		'formatProgressElapsed',
+		'formatProgressDuration',
 		'summarizeFailureReason',
 	]) {
 		if (!sessionRecords.includes(`function ${fn}`)) {
@@ -11217,10 +12450,96 @@ function assertSessionRecordsExtractedFromSessionEngine() {
 			throw new Error(`session engine should not define ${fn}; keep record formatting in background/session-records.js`)
 		}
 	}
+	const sandbox = { console }
+	sandbox.globalThis = sandbox
+	vm.runInNewContext(read('naturalclick-extension/shared/action-contract.js'), sandbox, {
+		filename: 'naturalclick-extension/shared/action-contract.js',
+	})
+	vm.runInNewContext(sessionRecords, sandbox, {
+		filename: 'naturalclick-extension/background/session-records.js',
+	})
+	const outcome = sandbox.NC_BG_SESSION_RECORDS.getExecutionOutcome({
+		success: true,
+		meta: {
+			outcome: {
+				kind: 'value_changed',
+				progress: true,
+				visibleOptions: ['Alpha'],
+				requestedPath: ['A'],
+				selectedPath: ['A', 'B'],
+				selectedLabels: ['A', 'B'],
+			},
+		},
+	})
+	if (
+		outcome?.kind !== 'value_changed' ||
+		outcome.visibleOptions?.join('|') !== 'Alpha' ||
+		outcome.requestedPath?.join('|') !== 'A' ||
+		outcome.selectedPath?.join('|') !== 'A|B' ||
+		outcome.selectedLabels?.join('|') !== 'A|B'
+	) {
+		throw new Error(`session records should preserve structured selection evidence while normalizing outcomes, got ${JSON.stringify(outcome)}`)
+	}
+	if (
+		!sessionRecords.includes('invalid_model_output') ||
+		!sessionRecords.includes('模型输出纠偏') ||
+		!sessionRecords.includes('invalid_action_name') ||
+		!sessionRecords.includes('工具名纠偏') ||
+		!sessionRecords.includes('已拦截待重试')
+	) {
+		throw new Error('session records should label invalid model output/action-name progress in live plan items')
+	}
+	const session = {
+		step: 3,
+		history: [
+			{
+				stepIndex: 3,
+				action: 'select_cascader_path',
+				success: true,
+				output: '已选择路径。',
+				outcome: {
+					kind: 'value_changed',
+					progress: true,
+					requestedPath: ['A'],
+					selectedPath: ['A', 'B'],
+					selectedLabels: ['A', 'B'],
+				},
+			},
+		],
+		traceItems: [
+			{
+				kind: 'step',
+				action: { name: 'select_cascader_path', output: '已选择路径。' },
+				detail: '已选择路径。',
+			},
+		],
+	}
+	sandbox.NC_BG_SESSION_RECORDS.recordVerificationSuccess(
+		session,
+		{ action: { name: 'select_cascader_path' } },
+		{ reason: '字段值已更新。' }
+	)
+	const recorded = session.history[0]
+	if (
+		recorded.outcome?.selectedPath?.join('|') !== 'A|B' ||
+		recorded.outcome?.selectedLabels?.join('|') !== 'A|B' ||
+		recorded.outcome?.requestedPath?.join('|') !== 'A'
+	) {
+		throw new Error(`verification success should not erase structured cascader evidence, got ${JSON.stringify(recorded.outcome)}`)
+	}
+	if (!String(recorded.output || '').includes('selectedPath="A|B"')) {
+		throw new Error(`verification success output should surface selected path evidence, got ${recorded.output}`)
+	}
+	if (!String(session.traceItems?.[0]?.detail || '').includes('selectedPath="A|B"')) {
+		throw new Error(`verification success trace should surface selected path evidence, got ${JSON.stringify(session.traceItems)}`)
+	}
 }
 
 function assertSessionPlanItemsExposeSearchWorkflowProgress() {
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/session-records.js', {})
+	vm.runInNewContext(read('naturalclick-extension/background/result-summary.js'), sandbox, {
+		filename: 'naturalclick-extension/background/result-summary.js',
+	})
 	const planningPlanItems = sandbox.NC_BG_SESSION_RECORDS.derivePlanItems({
 		status: 'running',
 		history: [],
@@ -11256,6 +12575,7 @@ function assertSessionPlanItemsExposeSearchWorkflowProgress() {
 		currentPlanningProgress: {
 			stage: 'planning_context_request',
 			round: 1,
+			elapsedMs: 4500,
 			text: '第 4 步：模型准备请求内部上下文 request_context（source=tables）；正在查找表格/列表摘要，这一步只补充上下文，不操作页面。',
 		},
 	})
@@ -11263,9 +12583,27 @@ function assertSessionPlanItemsExposeSearchWorkflowProgress() {
 		contextRequestPlanItems[0]?.id !== 'current_planning_progress' ||
 		!String(contextRequestPlanItems[0]?.title || '').includes('请求页面上下文') ||
 		!String(contextRequestPlanItems[0]?.title || '').includes('只补证据') ||
+		!String(contextRequestPlanItems[0]?.title || '').includes('耗时 5 秒') ||
 		!String(contextRequestPlanItems[0]?.title || '').includes('不操作页面')
 	) {
 		throw new Error(`session planItems should expose planning-context request progress, got ${JSON.stringify(contextRequestPlanItems)}`)
+	}
+	const runtimePlanItems = sandbox.NC_BG_SESSION_RECORDS.derivePlanItems({
+		status: 'running',
+		history: [],
+		currentRuntimeProgress: {
+			stage: 'observation_heartbeat',
+			elapsedMs: 4300,
+			text: '第 4 步：正在读取页面结构。',
+		},
+	})
+	if (
+		runtimePlanItems[0]?.id !== 'current_runtime_progress' ||
+		!String(runtimePlanItems[0]?.title || '').includes('页面观察进度') ||
+		!String(runtimePlanItems[0]?.title || '').includes('耗时 4 秒') ||
+		!String(runtimePlanItems[0]?.title || '').includes('正在读取页面结构')
+	) {
+		throw new Error(`session planItems should expose runtime progress elapsed time, got ${JSON.stringify(runtimePlanItems)}`)
 	}
 	const planItems = sandbox.NC_BG_SESSION_RECORDS.derivePlanItems({
 		status: 'running',
@@ -11312,6 +12650,79 @@ function assertSessionPlanItemsExposeSearchWorkflowProgress() {
 	}
 	if (!planItems.some((item) => item.id === 'p_1' && item.title === '填写搜索字段：登录账号')) {
 		throw new Error(`search workflow progress should preserve existing history plan rows, got ${JSON.stringify(planItems)}`)
+	}
+	const skippedSearchPlanItems = sandbox.NC_BG_SESSION_RECORDS.derivePlanItems({
+		status: 'running',
+		history: [],
+		workflowState: {
+			search: {
+				phase: 'select_field',
+				activeFieldKey: 'index:5',
+				terminalFieldKey: 'index:5',
+				terminalReason: '该字段缺少真实列表样本和目标字段范围内可归属的候选。',
+				fieldOrder: ['index:5'],
+				completedKeys: [],
+				skippedKeys: ['index:5'],
+				fields: {
+					'index:5': { label: '等级', lastValueSource: 'missing_sample' },
+				},
+				resultsByKey: {
+					'index:5': {
+						label: '等级',
+						source: 'missing_sample',
+						status: 'unknown_missing_sample',
+						summary: '没有可用列表样本，已安全跳过。',
+					},
+				},
+			},
+		},
+	})
+	const skippedSearchItem = skippedSearchPlanItems[0]
+	if (
+		skippedSearchItem?.id !== 'search_workflow_progress' ||
+		!String(skippedSearchItem.title || '').includes('状态：安全跳过') ||
+		!String(skippedSearchItem.title || '').includes('缺证：等级 需要真实列表样本、任务显式值或目标字段范围内可归属的真实候选')
+	) {
+		throw new Error(`search workflow plan item should explain missing evidence for safely skipped fields, got ${JSON.stringify(skippedSearchPlanItems)}`)
+	}
+	const fieldActionPlanItems = sandbox.NC_BG_SESSION_RECORDS.derivePlanItems({
+		status: 'running',
+		task: '测试页面每一个输入框是否正常',
+		latestTask: '测试页面每一个输入框是否正常',
+		observedFieldInventory: [
+			{ key: 'index:11', index: 11, label: '用户名', kind: 'input', fieldType: 'text' },
+			{ key: 'index:12', index: 12, label: '登录密码', kind: 'input', fieldType: 'password' },
+			{ key: 'index:13', index: 13, label: '联系邮箱', kind: 'input', fieldType: 'email' },
+			{ key: 'index:14', index: 14, label: '状态', kind: 'selection', fieldType: 'select' },
+		],
+		history: [
+			{
+				stepIndex: 1,
+				action: 'input_text',
+				input: { index: 11, target_label: '用户名', text: 'admin' },
+				success: true,
+				output: '已输入 admin。 | 动作结果: input_verified',
+				outcome: { kind: 'input_verified', reason: '字段值已更新。' },
+				nextGoal: '测试用户名输入框',
+			},
+		],
+	})
+	const fieldActionItem = fieldActionPlanItems[0]
+	if (
+		fieldActionItem?.id !== 'field_action_workflow_progress' ||
+		fieldActionItem.status !== 'running' ||
+		!String(fieldActionItem.title || '').includes('输入框测试') ||
+		!String(fieldActionItem.title || '').includes('进度 1/3') ||
+		!String(fieldActionItem.title || '').includes('通过 1') ||
+		!String(fieldActionItem.title || '').includes('未测 2') ||
+		!String(fieldActionItem.title || '').includes('待处理：登录密码') ||
+		!String(fieldActionItem.title || '').includes('缺证：') ||
+		!String(fieldActionItem.title || '').includes('输入/选择测试动作记录')
+	) {
+		throw new Error(`session planItems should expose aggregate field-action workflow progress, got ${JSON.stringify(fieldActionPlanItems)}`)
+	}
+	if (!fieldActionPlanItems.some((item) => item.id === 'p_1' && item.title === '测试用户名输入框')) {
+		throw new Error(`field action workflow progress should preserve existing history plan rows, got ${JSON.stringify(fieldActionPlanItems)}`)
 	}
 	const completedPlanItems = sandbox.NC_BG_SESSION_RECORDS.derivePlanItems({
 		status: 'completed',
@@ -11499,7 +12910,11 @@ function assertSessionLifecycleExtractedFromSessionEngine() {
 		!sessionLifecycle.includes('timeout_no_recovery') ||
 		!sessionLifecycle.includes('planning_context_request') ||
 		!sessionLifecycle.includes('planning_context') ||
-		!sessionLifecycle.includes('validation_feedback')
+		!sessionLifecycle.includes('invalid_model_output') ||
+		!sessionLifecycle.includes('invalid_action_name') ||
+		!sessionLifecycle.includes('validation_feedback') ||
+		!sessionLifecycle.includes('validationKind') ||
+		!sessionLifecycle.includes('validationGuidance')
 	) {
 		throw new Error('planning progress trace should include timeout and ReAct context-request stages')
 	}
@@ -11611,6 +13026,101 @@ function assertResultSummaryBehavior() {
 	if (!sessionEngine.includes('session.observedFieldInventory = buildObservedFieldInventory(observation.data)') || !sessionEngine.includes('function buildObservedFieldInventory')) {
 		throw new Error('session engine should keep a compact field inventory so all-field test summaries can report untested observed controls')
 	}
+	if (
+		!sessionEngine.includes('collectStandaloneObservedFieldInventorySources(observation)') ||
+		!sessionEngine.includes('hasObservedFieldInventorySignal') ||
+		!sessionEngine.includes('buildObservedFieldInventory,')
+	) {
+		throw new Error('session engine field inventory should include standalone field-like element/action snapshots, not only form groups')
+	}
+	{
+		const sandbox = loadBackgroundModule('naturalclick-extension/background/session-engine.js', {
+			NC_BG_CONSTANTS: {
+				MAX_CONSECUTIVE_FAILURES: 3,
+				MAX_TRACE_ITEMS: 80,
+				TYPES: { SESSION_UPDATE: 'NC_SESSION_UPDATE' },
+			},
+			NC_BG_UTILS: {
+				generateId: () => 'trace-test-id',
+			},
+			NC_BG_SESSION_RECORDS: {
+				appendExecutionOutcomeSummary: (message) => message,
+				appendOutcomeSummary: (message) => message,
+				appendVerificationFailureOutcome: (message) => message,
+				buildReflection: () => '',
+				createActionOutcome: (kind, extra = {}) => ({ kind, ...extra }),
+				createVerificationFailureOutcome: (reason) => ({ kind: 'failed', reason }),
+				derivePlanItems: () => [],
+				getExecutionOutcome: () => null,
+				recordVerificationSuccess: () => {},
+				summarizeExecutionOutcome: () => '',
+			},
+			NC_BG_SESSION_RECOVERY: {
+				attemptExecutionVisionFallback: async () => ({ success: false }),
+				attemptVerificationRecovery: async () => ({ success: false }),
+				buildExecutionVisionFallbackActivityText: () => '',
+				shouldAttemptExecutionVisionFallback: () => false,
+				shouldAttemptVisionFallbackForFailure: () => false,
+			},
+			NC_BG_SESSION_TIMING: {
+				getEffectiveModelRoundTimeoutMs: () => 1000,
+				getPlanningTimeoutMs: () => 1000,
+				settleAfterAction: async () => {},
+				withTimeout: (promise) => promise,
+			},
+			NC_BG_SESSION_LIFECYCLE: {
+				appendTrace: () => {},
+				failSession: () => {},
+				finalizeIfAborted: () => false,
+				finalizeStoppedSession: () => {},
+				publishPlanningProgress: () => {},
+				publishRuntimeProgress: () => {},
+				publishSession: () => {},
+			},
+			NC_BG_LOOP_GUARD: {
+				countRecentLoopGuardFailures: () => 0,
+				detectActionLoop: () => ({ blocked: false }),
+				detectRedundantInputRewrite: () => ({ blocked: false }),
+				getUnsafeDoneSuccessReason: () => '',
+				hasVerifiedProgress: () => false,
+				stableActionInputSignature: () => '',
+			},
+		})
+		const inventory = sandbox.NC_BG_SESSION_ENGINE_TESTS.buildObservedFieldInventory({
+			forms: [
+				{
+					name: '筛选区域',
+					fields: [
+						{ index: 1, label: '关键词', role: 'textbox', tag: 'input', type: 'text', region: 'content' },
+					],
+				},
+			],
+			elements: [
+				{ index: 2, label: '所在地', role: 'combobox', controlKind: 'cascader', fieldType: 'cascader', region: 'dialog' },
+				{ index: 3, label: '启用通知', role: 'switch', controlKind: 'switch', region: 'content' },
+				{ index: 4, label: '保存', actionIntent: 'submit', clickable: true, region: 'dialog' },
+			],
+			actions: [
+				{ index: 5, label: '状态', role: 'combobox', kind: 'dropdown', region: 'content' },
+				{ index: 6, label: '删除', actionIntent: 'delete', clickable: true, region: 'content' },
+			],
+		})
+		const labels = inventory.map((item) => item.label).join('|')
+		for (const expected of ['关键词', '所在地', '启用通知', '状态']) {
+			if (!labels.includes(expected)) {
+				throw new Error(`field inventory should include standalone observed field ${expected}, got ${JSON.stringify(inventory)}`)
+			}
+		}
+		for (const forbidden of ['保存', '删除']) {
+			if (labels.includes(forbidden)) {
+				throw new Error(`field inventory should exclude command action ${forbidden}, got ${JSON.stringify(inventory)}`)
+			}
+		}
+		const switchItem = inventory.find((item) => item.label === '启用通知')
+		if (switchItem?.kind !== 'switch') {
+			throw new Error(`field inventory should preserve standalone switch controls as switch kind, got ${JSON.stringify(switchItem)}`)
+		}
+	}
 	for (const expected of [
 		'resultSummary: null',
 		'payload.resultSummary',
@@ -11621,6 +13131,7 @@ function assertResultSummaryBehavior() {
 		'renderResultDiagnostics',
 		'renderResultDiagnosticGroup',
 		'renderResultIssueLine',
+		'buildResultRemainingDetails',
 		'groupResultDiagnostics',
 		'isResultRecommendation',
 		'buildHistoryResultPreview',
@@ -11645,15 +13156,20 @@ function assertResultSummaryBehavior() {
 		'sp-result-issue-summary',
 		'sp-history-result',
 			'resultSummary: cloneJson',
+			'cleanupPassed',
 			'cleanupFailed',
 			'cleanupUnverified',
+			'recent_model_analysis',
 			'verificationRecoveryIncomplete',
 			'verificationRecoveryIncompleteCount',
 			'contextRequestLimitCount',
-			'isVerificationRecoveryIncompleteTrace',
-			'isContextRequestLimitTrace',
-			'isDateCandidateOwnershipTrace',
+				'isVerificationRecoveryIncompleteTrace',
+				'isContextRequestLimitTrace',
+				'isUserInputRequiredTrace',
+				'isDateCandidateOwnershipTrace',
+			"'cleanupPassed', '清空完成'",
 			"'cleanupUnverified', '清空未确认'",
+			"'candidateDiagnostics', '候选诊断'",
 			"'verificationRecoveryIncomplete', '校验恢复未完成'",
 			"'terminalFailed', '终态异常'",
 		"'modelErrors', '模型错误'",
@@ -11667,6 +13183,8 @@ function assertResultSummaryBehavior() {
 		"'retried', '重试'",
 		'formatSessionExportText(payload)',
 		'appendResultSummaryExport',
+		'appendCandidateDiagnosticsToSummaryHeadline',
+		'appendMergedDiagnosticsToSummaryText',
 		'appendPlanItemsExport',
 		'当前进度',
 		'hasPersistableSessionPayload',
@@ -11717,22 +13235,183 @@ function assertResultSummaryBehavior() {
 			'isLikelyUnseparatedSecretToken',
 			'escapeRegExp',
 			'clampText',
+			'appendResultSummaryExport',
+			'formatResultSummaryStatus',
+			'formatResultSummaryStats',
+			'getResultSummaryStatEntries',
+			'shouldShowResultStat',
+			'groupResultDiagnostics',
+			'isResultRecommendation',
+			'buildConfirmationActivityText',
+			'getConfirmationReason',
+			'upsertConfirmationPlanItem',
+			'completeConfirmationPlanItem',
+			'mergeSessionDiagnosticsIntoResultSummary',
+			'buildCandidateDiagnosticResultItems',
+			'mergeCandidateDiagnosticsStats',
+			'appendCandidateDiagnosticsToSummaryHeadline',
+			'getMergedCandidateDiagnosticCount',
+			'appendMergedDiagnosticsToSummaryText',
+			'formatCandidateDiagnosticSnippet',
 			'buildFallbackResultSummary',
 			'pickFallbackResultIssue',
 			'buildFallbackResultHeadline',
 			'buildFallbackResultDiagnostics',
+			'formatStageCountMap',
+			'formatPlannerCorrectionSummary',
+			'countMapValues',
+			'countPlannerCorrectionStages',
+			'getLastPlannerCorrectionTrace',
+			'countValidationFeedbackKinds',
+			'getLastValidationFeedbackTrace',
+			'countLoopGuardKinds',
+			'getLastLoopGuardTrace',
 			'isVerificationRecoveryIncompleteTrace',
 			'isContextRequestLimitTrace',
+			'isUserInputRequiredTrace',
 			'isDateCandidateOwnershipTrace',
 			'getResultSummarySourceLabel',
 			'getResultSummaryExportSourceLine',
 			'formatResultSummaryItemExport',
+			'formatResultIssueExport',
+			'formatResultSkippedDetailExport',
+			'buildResultRemainingDetails',
+			'normalizeResultRemainingDetail',
+			'formatResultRemainingDetailExport',
 			'buildExportFileName',
 			'sanitizeFileName',
 		]) {
 			vm.runInNewContext(`${extractFunctionSource(sidepanel, fn)}\nglobalThis.${fn} = ${fn};`, exportSandbox)
 		}
 		exportSandbox.state = { status: 'error' }
+		const confirmPayload = {
+			title: '危险动作确认',
+			description: [
+				'任务: 执行当前页面任务',
+				'步骤: 4',
+				'动作: click_element_by_index',
+				'原因: 检测到删除/支付/发布/转账等高风险意图',
+				'是否继续执行？',
+			].join('\n'),
+		}
+		const confirmActivity = exportSandbox.buildConfirmationActivityText(confirmPayload)
+		const confirmPlan = exportSandbox.upsertConfirmationPlanItem(
+			[{ id: 'existing', title: '正在准备执行动作', status: 'running' }],
+			confirmPayload
+		)
+		const approvedConfirmPlan = exportSandbox.completeConfirmationPlanItem(confirmPlan, true)
+		const rejectedConfirmPlan = exportSandbox.completeConfirmationPlanItem(confirmPlan, false)
+		if (
+			!confirmActivity.includes('等待用户确认：危险动作确认') ||
+			!confirmActivity.includes('高风险意图') ||
+			confirmPlan[0]?.id !== 'pending_user_confirmation' ||
+			confirmPlan[0]?.status !== 'pending' ||
+			!String(confirmPlan[0]?.title || '').includes('高风险意图') ||
+			confirmPlan[1]?.id !== 'existing' ||
+			approvedConfirmPlan[0]?.status !== 'done' ||
+			!String(approvedConfirmPlan[0]?.title || '').includes('已确认') ||
+			rejectedConfirmPlan[0]?.status !== 'stopped' ||
+			!String(rejectedConfirmPlan[0]?.title || '').includes('已拒绝')
+		) {
+			throw new Error(`confirmation prompts should surface waiting state and plan progress, got ${JSON.stringify({ confirmActivity, confirmPlan, approvedConfirmPlan, rejectedConfirmPlan })}`)
+		}
+		const validationFeedbackTrace = [
+			{
+				title: '规划进度',
+				detail: '第 3 步：执行前校验拦截 input_text；类型=covered_target。',
+				progress: {
+					stage: 'validation_feedback',
+					validationKind: 'covered_target',
+					validationGuidance: '不要直接操作被遮挡 index；先处理当前弹层候选。',
+				},
+			},
+			{
+				title: '规划进度',
+				detail: '第 4 步：执行前校验拦截 choose_dropdown_option；类型=unowned_selection_candidate。',
+				progress: {
+					stage: 'validation_feedback',
+					validationKind: 'unowned_selection_candidate',
+					validationGuidance: '候选还没有稳定归属到目标字段。',
+				},
+			},
+		]
+		const validationCounts = exportSandbox.countValidationFeedbackKinds(validationFeedbackTrace)
+		const lastValidationFeedback = exportSandbox.getLastValidationFeedbackTrace(validationFeedbackTrace)
+		if (
+			validationCounts.covered_target !== 1 ||
+			validationCounts.unowned_selection_candidate !== 1 ||
+			exportSandbox.countMapValues(validationCounts) !== 2 ||
+			lastValidationFeedback?.kind !== 'unowned_selection_candidate' ||
+			!String(lastValidationFeedback?.guidance || '').includes('稳定归属')
+		) {
+			throw new Error(`sidepanel diagnostics should aggregate structured validation feedback, got ${JSON.stringify({ validationCounts, lastValidationFeedback })}`)
+		}
+		const loopGuardTrace = [
+			{
+				title: '循环保护',
+				detail: '检测到未验证进展的同一动作重复。',
+				action: {
+					name: 'click_element_by_index.loop_guard',
+					loopGuardKind: 'repeated_no_progress_action',
+					loopGuardGuidance: '不要再次执行同一动作；先换 index、换工具、补充上下文或观察动作结果证据。',
+				},
+			},
+			{
+				title: '循环保护',
+				detail: '检测到被动等待动作重复。',
+				action: {
+					name: 'wait.loop_guard',
+					loopGuardKind: 'repeated_wait',
+					loopGuardGuidance: '不要继续等待同一状态；先重新观察页面。',
+				},
+			},
+		]
+		const loopGuardCounts = exportSandbox.countLoopGuardKinds(loopGuardTrace)
+		const lastLoopGuard = exportSandbox.getLastLoopGuardTrace(loopGuardTrace)
+		if (
+			loopGuardCounts.repeated_no_progress_action !== 1 ||
+			loopGuardCounts.repeated_wait !== 1 ||
+			lastLoopGuard?.kind !== 'repeated_wait' ||
+			!String(lastLoopGuard?.guidance || '').includes('不要继续等待')
+		) {
+			throw new Error(`sidepanel diagnostics should aggregate structured loop-guard feedback, got ${JSON.stringify({ loopGuardCounts, lastLoopGuard })}`)
+		}
+		const plannerCorrectionTrace = [
+			{
+				title: '规划进度',
+				detail: '模型输出不是可执行 JSON，对页面动作未执行，已要求按 JSON 契约重试。',
+				progress: {
+					stage: 'invalid_model_output',
+					elapsedMs: 1200,
+					timeoutMs: 60000,
+				},
+			},
+			{
+				title: '规划进度',
+				detail: '模型选择了不可用工具名，对页面动作未执行，已要求从可用工具中选择。',
+				progress: {
+					stage: 'invalid_action_name',
+					elapsedMs: 1800,
+					timeoutMs: 60000,
+				},
+			},
+		]
+		const plannerCorrectionCounts = exportSandbox.countPlannerCorrectionStages(plannerCorrectionTrace)
+		const lastPlannerCorrection = exportSandbox.getLastPlannerCorrectionTrace(plannerCorrectionTrace)
+		const plannerCorrectionSummary = exportSandbox.formatPlannerCorrectionSummary({
+			plannerCorrectionCounts,
+		})
+		if (
+			plannerCorrectionCounts.invalid_model_output !== 1 ||
+			plannerCorrectionCounts.invalid_action_name !== 1 ||
+			exportSandbox.countMapValues(plannerCorrectionCounts) !== 2 ||
+			lastPlannerCorrection?.stage !== 'invalid_action_name' ||
+			!String(lastPlannerCorrection?.detail || '').includes('不可用工具名') ||
+			!plannerCorrectionSummary.includes('模型输出格式 1') ||
+			!plannerCorrectionSummary.includes('工具名 1')
+		) {
+			throw new Error(`sidepanel diagnostics should aggregate planner-output corrections, got ${JSON.stringify({ plannerCorrectionCounts, lastPlannerCorrection, plannerCorrectionSummary })}`)
+		}
 		const rawPayload = {
 			type: 'naturalclick_session_export',
 			exportedAt: '2026-06-04T00:00:00.000Z',
@@ -11806,6 +13485,12 @@ function assertResultSummaryBehavior() {
 			{
 				modelErrorCount: 1,
 				lastError: { detail: 'password field inspected；密码 Secret987! 导致提交失败。' },
+				modelThoughts: [
+					{
+						title: '模型调用: 动作规划',
+						thought: '正在分析页面输入字段归属，验证码 246810 仍需要用户确认。',
+					},
+				],
 			},
 			'验证码 246810 已过期。'
 		)
@@ -11815,11 +13500,36 @@ function assertResultSummaryBehavior() {
 		}
 			if (
 				!fallbackText.includes('password field inspected') ||
+				!fallbackText.includes('页面输入字段归属') ||
+				!fallbackSummary.diagnostics?.some((item) => item.kind === 'recent_model_analysis') ||
 				!fallbackText.includes('已隐藏') ||
 				fallbackSummary.status !== 'failed' ||
 				!fallbackSummary.fallback
 			) {
 				throw new Error(`fallback result summaries should preserve useful context while redacting secrets, got ${fallbackText}`)
+			}
+			const plannerCorrectionFallback = exportSandbox.buildFallbackResultSummary(
+				{
+					status: 'error',
+					task: '执行通用页面任务',
+					activityText: '模型输出需要纠偏后重试。',
+				},
+				plannerCorrectionTrace,
+				{
+					plannerCorrectionCount: 2,
+					plannerCorrectionCounts,
+					lastPlannerCorrection,
+				},
+				'模型输出需要纠偏后重试。'
+			)
+			if (
+				plannerCorrectionFallback.stats?.plannerCorrections !== 2 ||
+				!String(plannerCorrectionFallback.headline || '').includes('规划纠偏 2 次') ||
+				!plannerCorrectionFallback.diagnostics?.some((item) => item.kind === 'planner_correction' && String(item.text || '').includes('模型输出格式 1') && String(item.text || '').includes('工具名 1')) ||
+				!plannerCorrectionFallback.diagnostics?.some((item) => item.kind === 'planner_correction_detail' && String(item.text || '').includes('不可用工具名')) ||
+				!plannerCorrectionFallback.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('工具 schema'))
+			) {
+				throw new Error(`fallback result summaries should expose planner-output correction diagnostics, got ${JSON.stringify(plannerCorrectionFallback)}`)
 			}
 			const recoveryTrace = {
 				title: '步骤 3: 校验失败',
@@ -11915,22 +13625,141 @@ function assertResultSummaryBehavior() {
 					},
 					'日期候选未归属目标字段。'
 				)
+					if (
+						dateOwnershipFallback.stats?.dateCandidateOwnership !== 1 ||
+						!String(dateOwnershipFallback.headline || '').includes('日期候选归属 1 次') ||
+						!dateOwnershipFallback.diagnostics?.some((item) => item.kind === 'date_candidate_ownership') ||
+						!dateOwnershipFallback.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('日期/时间选择器的弹层归属'))
+					) {
+						throw new Error(`fallback result summaries should preserve date candidate ownership diagnostics, got ${JSON.stringify(dateOwnershipFallback)}`)
+					}
+					const userInputTrace = {
+						title: '步骤 4: ask_user',
+						detail: '询问用户失败: 等待用户回答超时。',
+						action: {
+							name: 'ask_user',
+							input: {
+								question: '请输入验证码',
+								reason: '当前页面要求验证码后才能继续。',
+							},
+							output: '询问用户失败: 等待用户回答超时。',
+						},
+					}
+					if (!exportSandbox.isUserInputRequiredTrace(userInputTrace)) {
+						throw new Error('fallback result diagnostics should recognize ask_user/user-input-required traces')
+					}
+					const userInputFallback = exportSandbox.buildFallbackResultSummary(
+						{
+							status: 'error',
+							task: '继续执行通用页面任务',
+							activityText: '询问用户失败: 等待用户回答超时。',
+						},
+						[userInputTrace],
+						{
+							userInputRequiredCount: 1,
+						},
+						'询问用户失败: 等待用户回答超时。'
+					)
+					if (
+						userInputFallback.status !== 'inconclusive' ||
+						userInputFallback.stats?.userInputRequired !== 1 ||
+						userInputFallback.stats?.terminalFailed !== 0 ||
+						!String(userInputFallback.headline || '').includes('需要用户补充 1 次') ||
+						!userInputFallback.diagnostics?.some((item) => item.kind === 'user_input_required') ||
+						!userInputFallback.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('等待用户回答前的步骤')) ||
+						userInputFallback.diagnostics?.some((item) => item.kind === 'task_terminal_failure')
+					) {
+						throw new Error(`fallback result summaries should classify user input requirements separately from terminal failures, got ${JSON.stringify(userInputFallback)}`)
+					}
+					const userInputExportLines = []
+					exportSandbox.appendResultSummaryExport(userInputExportLines, {
+						type: 'search_test',
+						title: '搜索测试结果总结',
+						status: 'inconclusive',
+						headline: '搜索测试未完全确认：共 1 项，需要用户补充 1 项。',
+						stats: { total: 1, failed: 0, cleanupFailed: 0, userInputRequired: 1, remaining: 1 },
+						diagnostics: [
+							{
+								kind: 'user_input_required',
+								severity: 'warning',
+								count: 1,
+								text: '需要用户补充信息：搜索测试过程中需要用户确认。',
+							},
+							{
+								kind: 'next_step_recommendation',
+								severity: 'info',
+								count: 1,
+								text: '建议：先补充 Agent 请求的信息，再从等待用户回答前的搜索步骤继续。',
+							},
+						],
+						remainingDetails: [{
+							label: '动态验证码',
+							status: 'unknown',
+							statusLabel: '未完成',
+							neededEvidence: '动态验证码 需要用户补充后再继续搜索测试。',
+							summary: '搜索测试等待用户补充信息。',
+						}],
+					})
+					const userInputExportText = userInputExportLines.join('\n')
+					if (
+						!userInputExportText.includes('统计：总数 1，需要用户补充 1，未完成 1') ||
+						!userInputExportText.includes('诊断：') ||
+						!userInputExportText.includes('需要用户补充信息') ||
+						!userInputExportText.includes('建议：') ||
+						!userInputExportText.includes('等待用户回答前的搜索步骤') ||
+						!userInputExportText.includes('未完成明细') ||
+						!userInputExportText.includes('动态验证码') ||
+						userInputExportText.includes('异常 0') ||
+						userInputExportText.includes('清空异常 0')
+					) {
+						throw new Error(`result summary exports should include user-input-required search diagnostics and next steps, got ${JSON.stringify(userInputExportText)}`)
+					}
+					const candidateMergedSummary = exportSandbox.mergeSessionDiagnosticsIntoResultSummary(
+						{
+							type: 'general_fallback',
+							title: '结果总结',
+							status: 'failed',
+							headline: '任务未完成。',
+							diagnostics: [],
+						},
+						{
+							candidateDiagnostics: [
+								'<candidate_diagnostics>text_action_probes total=4 indexed=1 unindexed=3 probe label="保存" hit=occluded popup="浮层"</candidate_diagnostics>',
+							],
+						},
+						{ sensitiveValues: [] }
+					)
+					if (
+						!candidateMergedSummary.diagnostics?.some((item) => item.kind === 'candidate_diagnostics' && String(item.text || '').includes('候选定位诊断') && String(item.text || '').includes('text_action_probes')) ||
+						!candidateMergedSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('目标候选') && String(item.text || '').includes('对应区域/候选上下文')) ||
+						candidateMergedSummary.stats?.candidateDiagnostics !== 1 ||
+						!String(candidateMergedSummary.headline || '').includes('候选诊断：候选定位 1 条') ||
+						!String(candidateMergedSummary.text || '').includes('诊断：候选定位诊断') ||
+						!String(candidateMergedSummary.text || '').includes('诊断：建议：复查目标候选')
+					) {
+						throw new Error(`sidepanel result summary should merge candidate diagnostics into visible diagnostics, got ${JSON.stringify(candidateMergedSummary)}`)
+					}
+					const candidateExportLines = []
+					exportSandbox.appendResultSummaryExport(candidateExportLines, candidateMergedSummary)
+					const candidateExportText = candidateExportLines.join('\n')
+					if (
+						!candidateExportText.includes('候选定位诊断') ||
+						!candidateExportText.includes('text_action_probes') ||
+						!candidateExportText.includes('对应区域/候选上下文')
+					) {
+						throw new Error(`merged candidate diagnostics should be visible in result summary exports, got ${JSON.stringify(candidateExportText)}`)
+					}
 				if (
-					dateOwnershipFallback.stats?.dateCandidateOwnership !== 1 ||
-					!String(dateOwnershipFallback.headline || '').includes('日期候选归属 1 次') ||
-					!dateOwnershipFallback.diagnostics?.some((item) => item.kind === 'date_candidate_ownership') ||
-					!dateOwnershipFallback.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('日期/时间选择器的弹层归属'))
-				) {
-					throw new Error(`fallback result summaries should preserve date candidate ownership diagnostics, got ${JSON.stringify(dateOwnershipFallback)}`)
-				}
-			if (
-				exportSandbox.getResultSummarySourceLabel({ type: 'summary_error', fallback: true }) !== '总结异常' ||
+					exportSandbox.getResultSummarySourceLabel({ type: 'summary_error', fallback: true }) !== '总结异常' ||
 				exportSandbox.getResultSummarySourceLabel({ type: 'general_fallback', fallback: true }) !== '轨迹摘要' ||
 				exportSandbox.getResultSummarySourceLabel({ type: 'search_test', fallback: false }) !== '' ||
 				!exportSandbox.getResultSummaryExportSourceLine({ type: 'summary_error', fallback: true }).includes('总结异常兜底') ||
 				!exportSandbox.getResultSummaryExportSourceLine({ type: 'general_fallback', fallback: true }).includes('轨迹兜底摘要') ||
 				!exportSandbox.formatResultSummaryItemExport({ label: '邮政编码', value: '111111', valueSourceLabel: '字段约束', basis: 'maxLength=6 pattern=\\d{6}' }).includes('取值=字段约束') ||
-				!exportSandbox.formatResultSummaryItemExport({ label: '邮政编码', value: '111111', valueSourceLabel: '字段约束', basis: 'maxLength=6 pattern=\\d{6}' }).includes('依据说明=maxLength=6')
+				!exportSandbox.formatResultSummaryItemExport({ label: '邮政编码', value: '111111', valueSourceLabel: '字段约束', basis: 'maxLength=6 pattern=\\d{6}' }).includes('依据说明=maxLength=6') ||
+				!exportSandbox.formatResultSummaryItemExport({ label: '搜索条件', value: 'Alpha', sourceTitle: '取值来源', sourceLabel: '列表样本', basis: '当前列表已有数据' }).includes('取值来源=列表样本') ||
+				!exportSandbox.formatResultSummaryItemExport({ label: '登录密码', statusLabel: '未测试', neededEvidence: '登录密码 需要形成一次输入/选择测试动作记录。' }).includes('需要补充=登录密码 需要形成一次输入/选择测试动作记录。') ||
+				!exportSandbox.formatResultIssueExport({ label: '登录密码', statusLabel: '未测试', neededEvidence: '登录密码 需要形成一次输入/选择测试动作记录。', summary: '缺少测试动作。' }).includes('需要补充=登录密码 需要形成一次输入/选择测试动作记录。')
 			) {
 				throw new Error('result summary helpers should distinguish fallback sources and export field value evidence')
 			}
@@ -11943,7 +13772,7 @@ function assertResultSummaryBehavior() {
 		throw new Error('sidepanel should persist terminal sessions with real or fallback result summaries even if traceItems are empty')
 	}
 	if (
-			!/function normalizeSessionSnapshot\(session, meta = \{\}\)[\s\S]*const diagnostics = buildSessionDiagnostics\(traceItems\)[\s\S]*const resultSummary = resolveSessionResultSummary\(session, traceItems, diagnostics, activityText\)[\s\S]*resultSummary,\s*diagnostics,/m.test(sidepanel) ||
+			!/function normalizeSessionSnapshot\(session, meta = \{\}\)[\s\S]*const diagnostics = buildSessionDiagnostics\(traceItems\)[\s\S]*const sensitiveValues = collectExportSensitiveValues\(\{ session, traceItems, diagnostics, activityText \}\)[\s\S]*const resultSummary = resolveSessionResultSummary\(session, traceItems, diagnostics, activityText, \{ sensitiveValues \}\)[\s\S]*resultSummary,\s*diagnostics,/m.test(sidepanel) ||
 			!/function buildFallbackResultSummary\(session, traceItems, diagnostics, activityText = ''\)[\s\S]*status === 'completed'[\s\S]*\? 'inconclusive'[\s\S]*type: 'general_fallback'[\s\S]*fallback: true/m.test(sidepanel) ||
 			!/function appendResultSummaryExport[\s\S]*getResultSummaryExportSourceLine\(summary\)/.test(sidepanel)
 		) {
@@ -11968,40 +13797,405 @@ function assertResultSummaryBehavior() {
 	if (
 		!/const resultPreview = buildHistoryResultPreview\(historyResultSummary\)/.test(sidepanel) ||
 		!/const historyResultSummary = resolveSessionResultSummary\(/.test(sidepanel) ||
-		!/renderResultSummaryCard\(\s*resolveSessionResultSummary\(session, traceItems, buildSessionDiagnostics\(traceItems\), String\(session\.activityText \|\| ''\)\)\s*\)/.test(sidepanel) ||
+		!/const historyDiagnostics = buildSessionDiagnostics\(traceItems\)[\s\S]*const historyActivityText = String\(session\.activityText \|\| ''\)[\s\S]*renderResultSummaryCard\(\s*resolveSessionResultSummary\(session, traceItems, historyDiagnostics, historyActivityText, \{[\s\S]*sensitiveValues: collectExportSensitiveValues/.test(sidepanel) ||
 		!/function buildHistoryResultPreview\(summary\)[\s\S]*summary\.headline[\s\S]*summary\.reason[\s\S]*formatHistoryIssuePreview\(summary\.issues\)/.test(sidepanel) ||
 		!/function formatHistoryIssuePreview\(issues\)[\s\S]*item\.summary/.test(sidepanel)
 	) {
 		throw new Error('history list/detail should show compact result previews from real or fallback summaries')
 	}
 	if (
-		!/function renderResultIssueLine[\s\S]*issue\?\.summary[\s\S]*sp-result-issue-summary[\s\S]*clampText\(summary, 220\)/.test(sidepanel) ||
+		!/function renderResultIssueLine[\s\S]*issue\?\.summary[\s\S]*issue\?\.neededEvidence[\s\S]*需要补充：\$\{neededEvidence\}[\s\S]*sp-result-issue-summary[\s\S]*clampText\(detail, 320\)/.test(sidepanel) ||
 		!/issues\.slice\(0, 3\)\.forEach\(\(item\) => issueWrap\.appendChild\(renderResultIssueLine\(item\)\)\)/.test(sidepanel)
 	) {
-		throw new Error('sidepanel result summary cards should show each key issue summary, not only label and status')
+		throw new Error('sidepanel result summary cards should show each key issue summary and needed evidence, not only label and status')
 	}
 	if (
 		!/summary\.skippedDetails[\s\S]*安全跳过明细[\s\S]*renderResultIssueLine/.test(sidepanel) ||
+		!/if \(skippedDetails\.length\)/.test(sidepanel) ||
+		/skippedDetails\.length > 3/.test(sidepanel) ||
 		!/function appendResultSummaryExport[\s\S]*summary\.skippedDetails[\s\S]*安全跳过明细/.test(sidepanel) ||
-		!/function formatResultSkippedDetailExport[\s\S]*sourceLabel[\s\S]*basis[\s\S]*summary/.test(sidepanel)
+		!/function formatResultSkippedDetailExport[\s\S]*sourceLabel[\s\S]*basis[\s\S]*neededEvidence[\s\S]*summary/.test(sidepanel)
 	) {
-		throw new Error('sidepanel result summary cards and exports should expose safe-skip details with reasons')
+		throw new Error('sidepanel result summary cards and exports should expose every safe-skip detail with reasons, even when only one field is skipped')
 	}
-		if (
-			!/function renderResultStats[\s\S]*\['cleanupUnverified', '清空未确认'\][\s\S]*\['dateCandidateOwnership', '日期候选归属'\][\s\S]*\['contextRequestLimit', '上下文补证上限'\][\s\S]*\['verificationRecoveryIncomplete', '校验恢复未完成'\][\s\S]*\['terminalFailed', '终态异常'\]/.test(sidepanel) ||
-			!/function formatResultSummaryStats[\s\S]*\['cleanupUnverified', '清空未确认'\][\s\S]*\['dateCandidateOwnership', '日期候选归属'\][\s\S]*\['contextRequestLimit', '上下文补证上限'\][\s\S]*\['verificationRecoveryIncomplete', '校验恢复未完成'\][\s\S]*\['terminalFailed', '终态异常'\][\s\S]*\['modelErrors', '模型错误'\][\s\S]*\['timeouts', '超时'\][\s\S]*\['loopGuards', '循环保护'\][\s\S]*\['verificationFailures', '校验失败'\]/.test(sidepanel)
-		) {
-			throw new Error('exported result summary stats should include terminal failure and fallback diagnostic counts')
+	if (
+		!/summary\?\.remainingDetails/.test(sidepanel) ||
+		!/function buildResultRemainingDetails\(summary\)[\s\S]*normalizeResultRemainingDetail/.test(sidepanel) ||
+		!/function appendResultSummaryExport\(lines, summary\)[\s\S]*buildResultRemainingDetails\(summary\)[\s\S]*未完成明细[\s\S]*formatResultRemainingDetailExport/.test(sidepanel) ||
+		!/function formatResultRemainingDetailExport[\s\S]*neededEvidence[\s\S]*summary/.test(sidepanel)
+	) {
+		throw new Error('sidepanel result summary cards and exports should use structured remaining details with reasons and needed evidence')
+	}
+	{
+		class FakeElement {
+			constructor(tagName) {
+				this.tagName = tagName
+				this.className = ''
+				this.textContent = ''
+				this.children = []
+			}
+			appendChild(child) {
+				this.children.push(child)
+				return child
+			}
 		}
-	if (!/function appendPlanItemsExport\(lines, planItems\)[\s\S]*normalizePlanItems\(planItems\)[\s\S]*当前进度[\s\S]*formatPlanStatus\(item\.status\)/.test(sidepanel)) {
+		const renderSandbox = {
+			document: {
+				createElement: (tagName) => new FakeElement(tagName),
+			},
+		}
+		for (const fn of [
+			'renderResultSummaryCard',
+			'renderResultStats',
+			'renderResultDiagnostics',
+			'renderResultDiagnosticGroup',
+			'renderResultSummaryItem',
+			'renderResultIssueLine',
+			'getResultSummaryStatEntries',
+			'shouldShowResultStat',
+			'buildResultRemainingDetails',
+			'normalizeResultRemainingDetail',
+			'formatResultSummaryStatus',
+			'getResultSummarySourceLabel',
+			'groupResultDiagnostics',
+			'isResultRecommendation',
+			'clampText',
+		]) {
+			vm.runInNewContext(`${extractFunctionSource(sidepanel, fn)}\nglobalThis.${fn} = ${fn};`, renderSandbox)
+		}
+		const card = renderSandbox.renderResultSummaryCard({
+			type: 'search_test',
+			title: '搜索测试结果总结',
+			status: 'inconclusive',
+			headline: '搜索/筛选区域测试未完全确认：共 1 项，安全跳过 1 项。',
+			stats: { total: 1, skipped: 1 },
+			issues: [],
+			skippedDetails: [{
+				label: '资料名称',
+				status: 'unknown_missing_sample',
+				statusLabel: '未确认：缺少真实样本/候选证据',
+				summary: '没有可用列表样本，已安全跳过。',
+				neededEvidence: '需要真实列表样本、任务显式值，或目标字段范围内可归属的真实候选。',
+			}],
+		})
+		const collectText = (node) => [
+			String(node?.textContent || ''),
+			...(Array.isArray(node?.children) ? node.children.map(collectText) : []),
+		].filter(Boolean).join('\n')
+		const renderedText = collectText(card)
+		if (
+			!renderedText.includes('安全跳过明细') ||
+			!renderedText.includes('资料名称') ||
+			!renderedText.includes('没有可用列表样本') ||
+			!renderedText.includes('需要补充') ||
+			!renderedText.includes('真实列表样本') ||
+			renderedText.includes('重点问题')
+		) {
+			throw new Error(`sidepanel result summary card should render single safe-skip details without key issues, got ${JSON.stringify(renderedText)}`)
+		}
+		const remainingCard = renderSandbox.renderResultSummaryCard({
+			type: 'field_actions',
+			title: '输入框测试结果总结',
+			status: 'inconclusive',
+			headline: '输入框测试未完全确认：共 2 项，未测试 1 项。',
+			stats: { total: 2, tested: 1, remaining: 1 },
+			items: [
+				{ order: 1, label: '用户名', status: 'passed', statusLabel: '通过', recorded: true },
+				{
+					order: 2,
+					label: '登录密码',
+					status: 'unknown',
+					statusLabel: '未测试',
+					recorded: false,
+					summary: '该字段在最近页面观察中可见，但尚未记录输入/选择测试动作。',
+					neededEvidence: '登录密码 需要形成一次输入/选择测试动作记录。',
+				},
+			],
+			remaining: ['登录密码'],
+		})
+		const remainingText = collectText(remainingCard)
+		if (
+			!remainingText.includes('未完成明细') ||
+			!remainingText.includes('登录密码') ||
+			!remainingText.includes('需要补充') ||
+			!remainingText.includes('输入/选择测试动作记录')
+		) {
+			throw new Error(`sidepanel result summary card should show visible remaining field details with next evidence, got ${JSON.stringify(remainingText)}`)
+		}
+		const userInputCard = renderSandbox.renderResultSummaryCard({
+			type: 'search_test',
+			title: '搜索测试结果总结',
+			status: 'inconclusive',
+			headline: '搜索测试未完全确认：共 1 项，需要用户补充 1 项。',
+			stats: { total: 1, failed: 0, cleanupFailed: 0, userInputRequired: 1, remaining: 1 },
+			diagnostics: [
+				{
+					kind: 'user_input_required',
+					severity: 'warning',
+					count: 1,
+					text: '需要用户补充信息：搜索测试过程中需要用户确认。',
+				},
+				{
+					kind: 'next_step_recommendation',
+					severity: 'info',
+					count: 1,
+					text: '建议：先补充 Agent 请求的信息，再从等待用户回答前的搜索步骤继续。',
+				},
+			],
+		})
+		const userInputText = collectText(userInputCard)
+		if (
+			!userInputText.includes('需要用户补充 1') ||
+			!userInputText.includes('诊断') ||
+			!userInputText.includes('建议') ||
+			!userInputText.includes('等待用户回答前的搜索步骤') ||
+			userInputText.includes('异常 0') ||
+			userInputText.includes('清空异常 0')
+		) {
+			throw new Error(`sidepanel result summary card should expose user-input-required search summaries, got ${JSON.stringify(userInputText)}`)
+		}
+	}
+	if (
+		!/function renderResultStats[\s\S]*getResultSummaryStatEntries\(\)[\s\S]*shouldShowResultStat/.test(sidepanel) ||
+		!/function formatResultSummaryStats[\s\S]*getResultSummaryStatEntries\(\)[\s\S]*shouldShowResultStat/.test(sidepanel) ||
+		!/function getResultSummaryStatEntries[\s\S]*\['reached', '已到达'\][\s\S]*\['clickedUnverified', '点击未确认'\][\s\S]*\['cleanupPassed', '清空完成'\][\s\S]*\['cleanupUnverified', '清空未确认'\][\s\S]*\['dateCandidateOwnership', '日期候选归属'\][\s\S]*\['contextRequestLimit', '上下文补证上限'\][\s\S]*\['verificationRecoveryIncomplete', '校验恢复未完成'\][\s\S]*\['userInputRequired', '需要用户补充'\][\s\S]*\['terminalFailed', '终态异常'\][\s\S]*\['submitted', '已提交'\][\s\S]*\['revealAttempts', '展开导航'\][\s\S]*\['visionAttempts', '视觉导航'\][\s\S]*\['modelErrors', '模型错误'\][\s\S]*\['timeouts', '超时'\][\s\S]*\['loopGuards', '循环保护'\][\s\S]*\['verificationFailures', '校验失败'\]/.test(sidepanel)
+	) {
+		throw new Error('result summary cards and exports should share terminal failure, user-input-required, and fallback diagnostic stat definitions')
+	}
+	if (!/function appendPlanItemsExport\(lines, planItems\)[\s\S]*normalizePlanItems\(planItems, \{ maxTitleLength: 1200 \}\)[\s\S]*当前进度[\s\S]*formatPlanStatus\(item\.status\)/.test(sidepanel)) {
 		throw new Error('session exports should include persisted live plan/progress items for post-run debugging')
 	}
-	for (const expected of ['buildSearchResultSummary', 'buildFieldActionResultSummary', 'collectFieldActionSummaryItems', 'collectExpectedFieldActionCoverage', 'mergeFieldActionCoverageItems', 'field_action_coverage_incomplete', 'buildSearchSkippedDetails', 'resultsByKey', 'unknown_not_recorded', 'unknown_missing_sample', 'failed_terminal', 'missing_sample_evidence', 'date_candidate_ownership', 'dateCandidateOwnership', 'context_request_limit', 'contextRequestLimit', 'countGenericContextRequestLimit', 'isContextRequestLimitReason', 'verification_recovery_incomplete', 'verificationRecoveryIncomplete', 'countSearchVerificationRecoveryIncomplete', 'countFieldActionVerificationRecoveryIncomplete', 'hasVerificationRecoveryIncompleteDetail', 'task_terminal_failure', 'cleanup_unverified', 'field_action_failed', 'field_action_recovered_failure', 'next_step_recommendation', 'appendNextStepRecommendations', 'diagnostics', 'issues', 'skippedDetails', '搜索测试结果总结', '输入框测试结果总结', 'isSensitiveSearchSummaryField', 'collectSensitiveSearchSummaryValues', 'maskSensitiveValuesInText', 'maskSensitiveSearchSummaryText']) {
+	if (
+		!/function renderPlanItemsCard\(planItems\)[\s\S]*normalizePlanItems\(planItems, \{ maxTitleLength: 360 \}\)/.test(sidepanel) ||
+		!/function normalizePlanItems\(planItems, options = \{\}\)[\s\S]*maxTitleLength[\s\S]*clampText\([\s\S]*maxTitleLength\)/.test(sidepanel) ||
+		!/function appendPlanItemsExport\(lines, planItems\)[\s\S]*normalizePlanItems\(planItems, \{ maxTitleLength: 1200 \}\)/.test(sidepanel)
+	) {
+		throw new Error('live plan/progress items should keep enough explanatory text on screen and export longer details')
+	}
+	for (const expected of ['buildSearchResultSummary', 'buildNavigationResultSummary', 'buildLoginResultSummary', 'buildFieldActionResultSummary', 'collectFieldActionSummaryItems', 'collectExpectedFieldActionCoverage', 'getFieldActionCoverageMode', 'getFieldActionCoverageScope', 'isFieldExplicitlyMentionedInTask', 'getFieldCoverageLabelKeys', 'matchesFieldActionCoverageMode', 'isDropdownCoverageField', 'isSelectableCoverageField', 'getFieldActionSelectedPathValue', 'isFieldSelectionFailureItem', 'formatDiagnosticFieldList', 'mergeFieldActionCoverageItems', 'field_action_coverage_incomplete', 'buildSearchSkippedDetails', 'buildSummaryRemainingDetails', 'buildSearchUntestedNeededEvidence', 'resultsByKey', 'unknown_not_recorded', 'unknown_missing_sample', 'failed_terminal', 'missing_sample_evidence', 'date_candidate_ownership', 'dateCandidateOwnership', 'context_request_limit', 'contextRequestLimit', 'countGenericContextRequestLimit', 'isContextRequestLimitReason', 'user_input_required', 'userInputRequired', 'countGenericUserInputRequired', 'isUserInputRequiredReason', 'verification_recovery_incomplete', 'verificationRecoveryIncomplete', 'countSearchVerificationRecoveryIncomplete', 'countFieldActionVerificationRecoveryIncomplete', 'hasVerificationRecoveryIncompleteDetail', 'task_terminal_failure', 'buildGenericFailedActionIssues', 'collectGenericSensitiveValues', 'isLikelyGenericSecretToken', '失败动作', 'cleanup_unverified', 'navigation_failed', 'navigation_unconfirmed', 'navigation_reached', 'navigation_reveal_attempt', 'navigation_vision_attempt', '导航结果总结', '导航到达未确认', 'login_step_failed', 'login_incomplete', 'login_submitted', '登录结果总结', '登录步骤失败', 'field_action_failed', 'field_selection_failed', 'field_action_recovered_failure', 'enrichResultSummaryWithOperationalDiagnostics', 'collectOperationalResultSignals', 'appendOperationalSignalsToHeadline', '运行诊断', 'model_error', 'timeout', 'planner_correction', 'loop_guard', 'verification_failure', 'next_step_recommendation', 'appendNextStepRecommendations', 'diagnostics', 'issues', 'skippedDetails', 'remainingDetails', '搜索测试结果总结', '输入框测试结果总结', 'isSensitiveSearchSummaryField', 'collectSensitiveSearchSummaryValues', 'collectSensitiveLoginValues', 'maskSensitiveValuesInText', 'maskSensitiveSearchSummaryText']) {
 		if (!resultSummary.includes(expected)) {
 			throw new Error(`result summary module should build structured search reports: missing ${expected}`)
 		}
 	}
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/result-summary.js')
+	const unconfirmedNavigationSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '进入目标模块并测试页面',
+		latestTask: '进入目标模块并测试页面',
+		workflowState: {
+			navigation: {
+				plannedKeys: ['目标模块'],
+				attemptedKeys: ['目标模块'],
+				succeededKeys: ['目标模块'],
+				failedKeys: [],
+				concreteSucceededKeys: [],
+				revealAttemptKeys: ['更多:sidebar'],
+				visionAttemptKeys: ['目标模块:子菜单'],
+			},
+		},
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: {
+					workflow: 'task-navigation',
+					workflow_step: 'navigate_to_task_target',
+					workflow_nav_key: '目标模块',
+					target_label: '目标模块',
+				},
+				success: true,
+				output: '已点击目标模块。',
+				outcome: { kind: 'dom_changed', reason: '页面有变化。' },
+			},
+		],
+	})
+	if (
+		unconfirmedNavigationSummary?.type !== 'navigation' ||
+		unconfirmedNavigationSummary.title !== '导航结果总结' ||
+		unconfirmedNavigationSummary.status !== 'inconclusive' ||
+		unconfirmedNavigationSummary.stats?.reached !== 0 ||
+		unconfirmedNavigationSummary.stats?.clickedUnverified !== 1 ||
+		unconfirmedNavigationSummary.stats?.revealAttempts !== 1 ||
+		unconfirmedNavigationSummary.stats?.visionAttempts !== 1 ||
+		unconfirmedNavigationSummary.items?.[0]?.statusLabel !== '已点击待确认' ||
+		!String(unconfirmedNavigationSummary.headline || '').includes('点击未确认 1 项') ||
+		!String(unconfirmedNavigationSummary.text || '').includes('不能直接开始目标页测试') ||
+		!unconfirmedNavigationSummary.diagnostics?.some((item) => item.kind === 'navigation_unconfirmed') ||
+		!unconfirmedNavigationSummary.diagnostics?.some((item) => item.kind === 'navigation_reveal_attempt') ||
+		!unconfirmedNavigationSummary.diagnostics?.some((item) => item.kind === 'navigation_vision_attempt') ||
+		!unconfirmedNavigationSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('确认到达目标页'))
+	) {
+		throw new Error(`navigation result summaries should distinguish clicks from proven arrival, got ${JSON.stringify(unconfirmedNavigationSummary)}`)
+	}
+	const reachedNavigationSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		workflowState: {
+			navigation: {
+				plannedKeys: ['目标模块'],
+				attemptedKeys: ['目标模块'],
+				succeededKeys: ['目标模块'],
+				failedKeys: [],
+				concreteSucceededKeys: ['目标模块'],
+			},
+		},
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: {
+					workflow: 'task-navigation',
+					workflow_step: 'navigate_to_task_target',
+					workflow_nav_key: '目标模块',
+					target_label: '目标模块',
+				},
+				success: true,
+				output: '已点击目标模块。',
+				outcome: { kind: 'navigated', reason: '目标页面已激活。' },
+			},
+		],
+	})
+	if (
+		reachedNavigationSummary?.type !== 'navigation' ||
+		reachedNavigationSummary.status !== 'passed' ||
+		reachedNavigationSummary.stats?.reached !== 1 ||
+		reachedNavigationSummary.items?.[0]?.statusLabel !== '已到达' ||
+		!String(reachedNavigationSummary.headline || '').includes('导航目标已到达') ||
+		!reachedNavigationSummary.diagnostics?.some((item) => item.kind === 'navigation_reached') ||
+		reachedNavigationSummary.diagnostics?.some((item) => item.kind === 'navigation_unconfirmed')
+	) {
+		throw new Error(`navigation result summaries should mark concrete navigation evidence as reached, got ${JSON.stringify(reachedNavigationSummary)}`)
+	}
+	const loginSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '打开系统并登录，账号 admin 密码 Secret987!',
+		latestTask: '打开系统并登录，账号 admin 密码 Secret987!',
+		workflowState: {
+			login: {
+				phase: 'submitted',
+				usernameDone: true,
+				passwordDone: true,
+				submitted: true,
+				usernameIndex: 1,
+				passwordIndex: 2,
+			},
+		},
+		history: [
+			{
+				action: 'input_text',
+				input: { workflow: 'login', workflow_step: 'fill_username', index: 1, target_label: '登录账号', text: 'admin' },
+				success: true,
+				output: '已输入 admin。 | 动作结果: input_verified',
+				outcome: { kind: 'input_verified', reason: '账号字段值已写入。' },
+			},
+			{
+				action: 'input_text',
+				input: { workflow: 'login', workflow_step: 'fill_password', index: 2, target_label: '登录密码', text: 'Secret987!' },
+				success: true,
+				output: '已输入 Secret987!。 | 动作结果: input_verified',
+				outcome: { kind: 'input_verified', reason: '密码 Secret987! 已写入。' },
+			},
+			{
+				action: 'click_element_by_index',
+				input: { workflow: 'login', workflow_step: 'submit_login', index: 3, target_label: '登录' },
+				success: true,
+				output: '已点击登录。 | 动作结果: url_changed',
+				outcome: { kind: 'url_changed', reason: '提交后页面跳转。' },
+			},
+		],
+	})
+	if (
+		loginSummary?.type !== 'login' ||
+		loginSummary.title !== '登录结果总结' ||
+		loginSummary.status !== 'passed' ||
+		loginSummary.stats?.total !== 3 ||
+		loginSummary.stats?.tested !== 3 ||
+		loginSummary.stats?.passed !== 3 ||
+		loginSummary.stats?.submitted !== 1 ||
+		loginSummary.items?.find((item) => item.label === '密码填写')?.value !== '已隐藏' ||
+		!String(loginSummary.headline || '').includes('登录流程已提交') ||
+		!String(loginSummary.headline || '').includes('已提交 1 项') ||
+		!String(loginSummary.text || '').includes('账号填写：通过') ||
+		!String(loginSummary.text || '').includes('密码填写：通过') ||
+		!String(loginSummary.text || '').includes('登录提交：通过') ||
+		!loginSummary.diagnostics?.some((item) => item.kind === 'login_submitted') ||
+		!loginSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('登录态')) ||
+		JSON.stringify(loginSummary).includes('Secret987')
+	) {
+		throw new Error(`login result summaries should show submitted login steps while redacting passwords, got ${JSON.stringify(loginSummary)}`)
+	}
+	const failedLoginSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'error',
+		activityText: '账号未写入。',
+		task: '登录系统 账号 admin 密码 Secret987!',
+		latestTask: '登录系统 账号 admin 密码 Secret987!',
+		workflowState: {
+			login: {
+				phase: 'failed',
+				usernameDone: false,
+				passwordDone: false,
+				submitted: false,
+				usernameIndex: 1,
+				passwordIndex: 2,
+				failedReason: '账号未写入。',
+			},
+		},
+		history: [
+			{
+				action: 'input_text',
+				input: { workflow: 'login', workflow_step: 'fill_username', index: 1, target_label: '登录账号', text: 'admin' },
+				success: false,
+				output: '账号未写入。',
+				outcome: { kind: 'no_effect', reason: '账号未写入。' },
+			},
+		],
+	})
+	if (
+		failedLoginSummary?.type !== 'login' ||
+		failedLoginSummary.status !== 'failed' ||
+		failedLoginSummary.stats?.failed !== 1 ||
+		failedLoginSummary.stats?.unknown !== 1 ||
+		failedLoginSummary.stats?.terminalFailed !== 1 ||
+		!failedLoginSummary.diagnostics?.some((item) => item.kind === 'login_step_failed' && String(item.text || '').includes('账号填写')) ||
+		!failedLoginSummary.diagnostics?.some((item) => item.kind === 'login_incomplete') ||
+		!failedLoginSummary.diagnostics?.some((item) => item.kind === 'task_terminal_failure') ||
+		!failedLoginSummary.issues?.some((item) => item.label === '账号填写' && String(item.neededEvidence || '').includes('账号输入动作')) ||
+		!String(failedLoginSummary.text || '').includes('登录发现异常')
+	) {
+		throw new Error(`login result summaries should explain failed credential fill steps, got ${JSON.stringify(failedLoginSummary)}`)
+	}
+	const loginUserInputSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'error',
+		activityText: '询问用户失败: 等待用户回答超时。',
+		workflowState: {
+			login: {
+				phase: 'failed',
+				usernameDone: true,
+				passwordDone: true,
+				submitted: false,
+				usernameIndex: 1,
+				passwordIndex: 2,
+				failedReason: '需要验证码后才能登录。',
+			},
+		},
+		history: [
+			{
+				action: 'ask_user',
+				input: { question: '请输入验证码', reason: '当前页面要求验证码后才能继续登录。' },
+				success: false,
+				output: '询问用户失败: 等待用户回答超时。',
+				outcome: { kind: 'no_effect', reason: '等待用户回答超时。' },
+			},
+		],
+	})
+	if (
+		loginUserInputSummary?.type !== 'login' ||
+		loginUserInputSummary.status !== 'inconclusive' ||
+		loginUserInputSummary.stats?.userInputRequired !== 1 ||
+		loginUserInputSummary.stats?.terminalFailed !== 0 ||
+		!loginUserInputSummary.diagnostics?.some((item) => item.kind === 'user_input_required' && String(item.text || '').includes('验证码')) ||
+		!loginUserInputSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('等待用户回答前的登录步骤')) ||
+		loginUserInputSummary.diagnostics?.some((item) => item.kind === 'task_terminal_failure')
+	) {
+		throw new Error(`login result summaries should classify captcha/user input interruptions separately from terminal failures, got ${JSON.stringify(loginUserInputSummary)}`)
+	}
 	const summary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'error',
 		activityText: '日期候选未归属目标字段。',
@@ -12011,18 +14205,18 @@ function assertResultSummaryBehavior() {
 				phase: 'completed',
 				terminalSuccess: false,
 				terminalReason: '日期候选未归属目标字段。',
-				fieldOrder: ['index:25', 'index:27', 'index:29'],
-				completedKeys: ['index:25'],
-				fields: {
-					'index:25': { label: '销售姓名', lastTestValue: '管理员', lastValueSource: 'table_sample', lastValueBasis: '当前列表已有数据' },
-					'index:27': { label: '创建时间', lastTestValue: '2026-06-01', lastValueSource: 'table_sample' },
-					'index:29': { label: '客户等级' },
-				},
-				resultsByKey: {
-					'index:25': {
-						label: '销售姓名',
-						value: '管理员',
-						source: 'table_sample',
+					fieldOrder: ['index:25', 'index:27', 'index:29'],
+					completedKeys: ['index:25'],
+					fields: {
+						'index:25': { label: '负责人', lastTestValue: '管理员', lastValueSource: 'table_sample', lastValueBasis: '当前列表已有数据' },
+						'index:27': { label: '创建时间', lastTestValue: '2026-06-01', lastValueSource: 'table_sample' },
+						'index:29': { label: '等级' },
+					},
+					resultsByKey: {
+						'index:25': {
+							label: '负责人',
+							value: '管理员',
+							source: 'table_sample',
 						status: 'passed_match',
 						summary: '搜索结果观察：结果列表中仍能看到测试值 "管理员"。',
 					},
@@ -12046,15 +14240,29 @@ function assertResultSummaryBehavior() {
 		summary.stats?.passed !== 1 ||
 		summary.stats?.failed !== 1 ||
 		summary.stats?.unknown !== 0 ||
-		summary.stats?.remaining !== 1
+		summary.stats?.remaining !== 1 ||
+		summary.stats?.cleanupPassed !== 1
 	) {
 		throw new Error(`search result summary should expose aggregate counts, got ${JSON.stringify(summary)}`)
 	}
 	if (
 		!String(summary.headline || '').includes('搜索测试发现异常') ||
-		!String(summary.text || '').includes('销售姓名：通过') ||
+		!String(summary.headline || '').includes('清空完成 1 项') ||
+			summary.items?.[0]?.sourceTitle !== '取值来源' ||
+			summary.items?.[0]?.sourceLabel !== '列表样本' ||
+			!String(summary.items?.[0]?.basis || '').includes('当前列表已有数据') ||
+			summary.items?.find((item) => item.label === '等级')?.statusCode !== 'unknown_not_recorded' ||
+			!String(summary.items?.find((item) => item.label === '等级')?.neededEvidence || '').includes('填值') ||
+			!String(summary.items?.find((item) => item.label === '等级')?.neededEvidence || '').includes('提交搜索') ||
+			!String(summary.items?.find((item) => item.label === '等级')?.neededEvidence || '').includes('清空复核') ||
+			!String(summary.issues?.find((item) => item.label === '等级')?.neededEvidence || '').includes('提交搜索') ||
+			!summary.remainingDetails?.some((item) => item.label === '等级' && String(item.neededEvidence || '').includes('清空复核')) ||
+			!String(summary.text || '').includes('负责人：通过') ||
+		!String(summary.text || '').includes('取值来源=列表样本') ||
+		!String(summary.text || '').includes('依据说明=当前列表已有数据') ||
+		!String(summary.text || '').includes('清空=已清空') ||
 		!String(summary.text || '').includes('创建时间：失败：结果未包含测试值') ||
-		!String(summary.text || '').includes('客户等级：未确认：缺少结果记录') ||
+			!String(summary.text || '').includes('等级：未确认：缺少结果记录') ||
 		!String(summary.text || '').includes('诊断：结果不匹配') ||
 		!String(summary.text || '').includes('诊断：覆盖未完成') ||
 		!String(summary.text || '').includes('建议：核对测试值来源') ||
@@ -12062,7 +14270,7 @@ function assertResultSummaryBehavior() {
 		!summary.diagnostics?.some((item) => item.kind === 'value_missing') ||
 		!summary.diagnostics?.some((item) => item.kind === 'coverage_incomplete') ||
 		!summary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('搜索实现')) ||
-		!summary.remaining.includes('客户等级')
+			!summary.remaining.includes('等级')
 	) {
 		throw new Error(`search result summary should include user-readable field outcomes and issues, got ${JSON.stringify(summary)}`)
 	}
@@ -12149,6 +14357,51 @@ function assertResultSummaryBehavior() {
 	) {
 		throw new Error(`search result summary should mask sensitive values in terminal reasons and diagnostics, got ${JSON.stringify(sensitiveTerminalSummary)}`)
 	}
+	const searchUserInputSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'error',
+		activityText: '询问用户失败: 等待用户回答超时。',
+		history: [
+			{
+				action: 'ask_user',
+				input: {
+					question: '请输入验证码',
+					reason: '当前页面要求验证码后才能继续搜索测试。',
+				},
+				success: false,
+				output: '询问用户失败: 等待用户回答超时。',
+				outcome: { kind: 'no_effect', progress: false, reason: '等待用户回答超时。' },
+			},
+		],
+		workflowState: {
+			search: {
+				phase: 'failed',
+				terminalFieldKey: 'index:37',
+				terminalReason: '询问用户失败: 等待用户回答超时。',
+				fieldOrder: ['index:37'],
+				completedKeys: [],
+				fields: {
+					'index:37': {
+						label: '动态验证码',
+						lastValueSource: 'user_input_required',
+					},
+				},
+				resultsByKey: {},
+			},
+		},
+	})
+	if (
+		searchUserInputSummary.type !== 'search_test' ||
+		searchUserInputSummary.status !== 'inconclusive' ||
+		searchUserInputSummary.stats?.userInputRequired !== 1 ||
+		searchUserInputSummary.stats?.failed !== 0 ||
+		searchUserInputSummary.stats?.remaining !== 1 ||
+		!String(searchUserInputSummary.headline || '').includes('需要用户补充 1 项') ||
+		!searchUserInputSummary.diagnostics?.some((item) => item.kind === 'user_input_required') ||
+		!searchUserInputSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('等待用户回答前的搜索步骤')) ||
+		searchUserInputSummary.diagnostics?.some((item) => item.kind === 'task_terminal_failure')
+	) {
+		throw new Error(`search result summaries should classify ask_user/user-input-required interruptions separately from terminal field failures, got ${JSON.stringify(searchUserInputSummary)}`)
+	}
 	const cleanupSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'error',
 		history: [],
@@ -12198,16 +14451,16 @@ function assertResultSummaryBehavior() {
 			search: {
 				phase: 'completed',
 				terminalSuccess: true,
-				fieldOrder: ['index:25'],
-				completedKeys: ['index:25'],
-				resetCompletedKeys: [],
-				fields: {
-					'index:25': { label: '销售姓名', lastTestValue: '管理员', lastValueSource: 'table_sample' },
-				},
-				resultsByKey: {
-					'index:25': {
-						label: '销售姓名',
-						value: '管理员',
+					fieldOrder: ['index:25'],
+					completedKeys: ['index:25'],
+					resetCompletedKeys: [],
+					fields: {
+						'index:25': { label: '负责人', lastTestValue: '管理员', lastValueSource: 'table_sample' },
+					},
+					resultsByKey: {
+						'index:25': {
+							label: '负责人',
+							value: '管理员',
 						source: 'table_sample',
 						status: 'passed_match',
 						summary: '搜索结果观察：结果列表中仍能看到测试值 "管理员"。',
@@ -12292,7 +14545,11 @@ function assertResultSummaryBehavior() {
 		!missingEvidenceSummary.skipped?.includes('资料名称') ||
 		missingEvidenceSummary.skippedDetails?.[0]?.label !== '资料名称' ||
 		!String(missingEvidenceSummary.skippedDetails?.[0]?.summary || '').includes('没有可用列表样本') ||
+		!String(missingEvidenceSummary.skippedDetails?.[0]?.neededEvidence || '').includes('真实列表样本') ||
+		!String(missingEvidenceSummary.skippedDetails?.[0]?.neededEvidence || '').includes('任务显式值') ||
+		!String(missingEvidenceSummary.skippedDetails?.[0]?.neededEvidence || '').includes('可归属的真实候选') ||
 		missingEvidenceSummary.skippedDetails?.[0]?.statusLabel !== '未确认：缺少真实样本/候选证据' ||
+		missingEvidenceSummary.issues?.some((item) => item.label === '资料名称') ||
 		missingEvidenceSummary.remaining?.includes('资料名称') ||
 		!missingEvidenceSummary.diagnostics?.some((item) => item.kind === 'missing_sample_evidence') ||
 		!missingEvidenceSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('不随机填写')) ||
@@ -12416,17 +14673,17 @@ function assertResultSummaryBehavior() {
 		workflowState: {
 			search: {
 				phase: 'select_field',
-				activeFieldKey: 'index:27',
-				fieldOrder: ['index:25', 'index:27'],
-				completedKeys: ['index:25'],
-				fields: {
-					'index:25': { label: '销售姓名', lastTestValue: '管理员', lastValueSource: 'table_sample' },
-					'index:27': { label: '创建时间', lastTestValue: '2026-06-01', lastValueSource: 'table_sample' },
-				},
-				resultsByKey: {
-					'index:25': {
-						label: '销售姓名',
-						value: '管理员',
+					activeFieldKey: 'index:27',
+					fieldOrder: ['index:25', 'index:27'],
+					completedKeys: ['index:25'],
+					fields: {
+						'index:25': { label: '负责人', lastTestValue: '管理员', lastValueSource: 'table_sample' },
+						'index:27': { label: '创建时间', lastTestValue: '2026-06-01', lastValueSource: 'table_sample' },
+					},
+					resultsByKey: {
+						'index:25': {
+							label: '负责人',
+							value: '管理员',
 						source: 'table_sample',
 						status: 'passed_match',
 						summary: '搜索结果观察：结果列表中仍能看到测试值 "管理员"。',
@@ -12554,6 +14811,188 @@ function assertResultSummaryBehavior() {
 		) {
 			throw new Error(`field action summaries should preserve constraint-aware value evidence, got ${JSON.stringify(constrainedFieldActionSummary)}`)
 		}
+		const formRecoverySourceSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+			status: 'completed',
+			task: '编辑当前记录，状态改为启用，名称改为张三。',
+			latestTask: '编辑当前记录，状态改为启用，名称改为张三。',
+			history: [
+				{
+					action: 'input_text',
+					input: {
+						index: 21,
+						target_label: '名称',
+						text: '张三',
+						workflow: 'form-fill',
+						workflow_step: 'fill_form_field_timeout_recovery',
+						workflow_field_label: '名称',
+						workflow_value_source: 'task_value',
+						workflow_value_basis: '字段标签与任务文本匹配',
+					},
+					success: true,
+					output: '已输入 张三。 | 动作结果: input_verified',
+					outcome: { kind: 'input_verified', reason: '字段值已更新。' },
+				},
+				{
+					action: 'choose_dropdown_option',
+					input: {
+						index: 22,
+						target_label: '状态',
+						text: '启用',
+						workflow: 'form-fill',
+						workflow_step: 'choose_form_dropdown_timeout_recovery',
+						workflow_field_label: '状态',
+						workflow_value_source: 'visible_option',
+						workflow_value_basis: '可见候选与任务目标值匹配：启用',
+					},
+					success: true,
+					output: '已选择下拉选项 "启用"。 | 动作结果: value_changed',
+					outcome: { kind: 'value_changed', reason: '字段值已更新。' },
+				},
+				{
+					action: 'input_text',
+					input: {
+						index: 23,
+						target_label: '编码',
+						text: 'A123',
+						workflow: 'form-fill',
+						workflow_step: 'resolve_field_validation_error',
+						workflow_field_label: '编码',
+						workflow_value_source: 'page_validation',
+						workflow_value_basis: '编码不能包含空格',
+					},
+					success: true,
+					output: '已输入 A123。 | 动作结果: input_verified',
+					outcome: { kind: 'input_verified', reason: '字段值已更新。' },
+				},
+			],
+		})
+		if (
+			formRecoverySourceSummary?.type !== 'form_task' ||
+			formRecoverySourceSummary.status !== 'inconclusive' ||
+			formRecoverySourceSummary.stats?.submitMissing !== 1 ||
+			formRecoverySourceSummary.items?.find((item) => item.label === '名称')?.valueSourceLabel !== '任务文本' ||
+			formRecoverySourceSummary.items?.find((item) => item.label === '状态')?.valueSourceLabel !== '真实候选' ||
+			formRecoverySourceSummary.items?.find((item) => item.label === '编码')?.valueSourceLabel !== '页面校验' ||
+			!String(formRecoverySourceSummary.text || '').includes('名称：通过') ||
+			!String(formRecoverySourceSummary.text || '').includes('依据=任务文本/字段标签与任务文本匹配') ||
+			!String(formRecoverySourceSummary.text || '').includes('依据=真实候选/可见候选与任务目标值匹配') ||
+			!String(formRecoverySourceSummary.text || '').includes('依据=页面校验/编码不能包含空格') ||
+			!String(formRecoverySourceSummary.text || '').includes('表单完成：未提交') ||
+			!formRecoverySourceSummary.diagnostics?.some((item) => item.kind === 'form_submit_missing') ||
+			!formRecoverySourceSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('不要重新点击创建入口'))
+		) {
+			throw new Error(`form task summaries should expose form-recovery value sources and avoid reporting completion before submit, got ${JSON.stringify(formRecoverySourceSummary)}`)
+		}
+		const formSubmitCompletedSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+			status: 'completed',
+			task: '新建一条记录，名称为张三。',
+			latestTask: '新建一条记录，名称为张三。',
+			history: [
+				{
+					action: 'input_text',
+					input: {
+						index: 21,
+						target_label: '名称',
+						text: '张三',
+						workflow: 'form-fill',
+						workflow_step: 'fill_form_field_timeout_recovery',
+						workflow_field_label: '名称',
+						workflow_value_source: 'task_value',
+						workflow_value_basis: '字段标签与任务文本匹配',
+					},
+					success: true,
+					output: '已输入 张三。 | 动作结果: input_verified',
+					outcome: { kind: 'input_verified', reason: '字段值已更新。' },
+				},
+				{
+					action: 'click_element_by_index',
+					input: {
+						index: 30,
+						workflow: 'form-fill',
+						workflow_step: 'submit_form_timeout_recovery',
+						workflow_submit_label: '保存',
+					},
+					success: true,
+					output: '已点击保存。 | 动作结果: dom_changed',
+					outcome: { kind: 'dom_changed', reason: '表单已提交。' },
+				},
+				{
+					action: 'done',
+					input: {
+						success: true,
+						text: '表单已提交且当前未再观察到新增表单，已停止以避免重复创建。',
+						workflow: 'create-task',
+						workflow_step: 'finish_create_after_submit_no_form',
+					},
+					success: true,
+					output: '表单已提交且当前未再观察到新增表单，已停止以避免重复创建。',
+				},
+			],
+		})
+		if (
+			formSubmitCompletedSummary?.type !== 'form_task' ||
+			formSubmitCompletedSummary.status !== 'passed' ||
+			formSubmitCompletedSummary.stats?.submitted !== 1 ||
+			formSubmitCompletedSummary.stats?.formCompleted !== 1 ||
+			formSubmitCompletedSummary.stats?.submitMissing !== 0 ||
+			!String(formSubmitCompletedSummary.headline || '').includes('表单任务完成') ||
+			!String(formSubmitCompletedSummary.text || '').includes('保存：已提交') ||
+			!String(formSubmitCompletedSummary.text || '').includes('表单完成：已完成') ||
+			!formSubmitCompletedSummary.diagnostics?.some((item) => item.kind === 'form_task_completed') ||
+			formSubmitCompletedSummary.diagnostics?.some((item) => item.kind === 'form_submit_missing')
+		) {
+			throw new Error(`form task summaries should report a submitted-and-closed form as completed, got ${JSON.stringify(formSubmitCompletedSummary)}`)
+		}
+		const formSubmitFailureSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+			status: 'error',
+			task: '编辑当前记录，名称改为张三。',
+			latestTask: '编辑当前记录，名称改为张三。',
+			activityText: '表单提交失败：名称不能为空。',
+			history: [
+				{
+					action: 'input_text',
+					input: {
+						index: 21,
+						target_label: '名称',
+						text: '张三',
+						workflow: 'form-fill',
+						workflow_step: 'fill_form_field_timeout_recovery',
+						workflow_field_label: '名称',
+						workflow_value_source: 'task_value',
+						workflow_value_basis: '字段标签与任务文本匹配',
+					},
+					success: true,
+					output: '已输入 张三。 | 动作结果: input_verified',
+					outcome: { kind: 'input_verified', reason: '字段值已更新。' },
+				},
+				{
+					action: 'click_element_by_index',
+					input: {
+						index: 30,
+						workflow: 'form-fill',
+						workflow_step: 'submit_form_timeout_recovery',
+						workflow_submit_label: '保存',
+					},
+					success: false,
+					output: '表单提交失败：名称不能为空。',
+					outcome: { kind: 'failed', reason: '名称不能为空。' },
+				},
+			],
+		})
+		if (
+			formSubmitFailureSummary?.type !== 'form_task' ||
+			formSubmitFailureSummary.status !== 'failed' ||
+			formSubmitFailureSummary.stats?.submitFailed !== 1 ||
+			formSubmitFailureSummary.stats?.terminalFailed !== 1 ||
+			!String(formSubmitFailureSummary.headline || '').includes('表单任务发现异常') ||
+			!String(formSubmitFailureSummary.text || '').includes('保存：提交失败') ||
+			!String(formSubmitFailureSummary.text || '').includes('表单完成：完成失败') ||
+			!formSubmitFailureSummary.diagnostics?.some((item) => item.kind === 'form_submit_failed') ||
+			!formSubmitFailureSummary.diagnostics?.some((item) => item.kind === 'task_terminal_failure') ||
+			!formSubmitFailureSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('不要重复同一提交按钮'))
+		) {
+			throw new Error(`form task summaries should report submit failures and terminal reasons, got ${JSON.stringify(formSubmitFailureSummary)}`)
+		}
 		const fieldCoverageSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'completed',
 		task: '测试页面每一个输入框是否正常',
@@ -12590,16 +15029,151 @@ function assertResultSummaryBehavior() {
 		fieldCoverageSummary.items?.[1]?.label !== '登录密码' ||
 		fieldCoverageSummary.items?.[1]?.recorded !== false ||
 		fieldCoverageSummary.items?.[1]?.statusLabel !== '未测试' ||
+		!String(fieldCoverageSummary.items?.[1]?.neededEvidence || '').includes('输入/选择测试动作记录') ||
+		!String(fieldCoverageSummary.items?.[1]?.neededEvidence || '').includes('输入类字段') ||
+		!String(fieldCoverageSummary.items?.[1]?.neededEvidence || '').includes('字段值复核') ||
+		!String(fieldCoverageSummary.issues?.find((item) => item.label === '登录密码')?.neededEvidence || '').includes('输入/选择测试动作记录') ||
 		fieldCoverageSummary.remaining?.join('|') !== '登录密码|联系邮箱' ||
+		fieldCoverageSummary.remainingDetails?.map((item) => item.label).join('|') !== '登录密码|联系邮箱' ||
+		!String(fieldCoverageSummary.remainingDetails?.[0]?.neededEvidence || '').includes('输入/选择测试动作记录') ||
 		!String(fieldCoverageSummary.headline || '').includes('未测试 2 项') ||
 		!String(fieldCoverageSummary.text || '').includes('登录密码：未测试') ||
-		!String(fieldCoverageSummary.text || '').includes('联系邮箱：未测试') ||
+			!String(fieldCoverageSummary.text || '').includes('联系邮箱：未测试') ||
 			!String(fieldCoverageSummary.text || '').includes('字段覆盖未完成') ||
 			!fieldCoverageSummary.diagnostics?.some((item) => item.kind === 'field_action_coverage_incomplete') ||
 			!fieldCoverageSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('未测试字段')) ||
 			fieldCoverageSummary.items?.some((item) => ['状态', '验证码', '请输入搜索内容', '前往页码'].includes(item.label))
 		) {
 		throw new Error(`input-box result summary should use observed field inventory to report untested inputs, got ${JSON.stringify(fieldCoverageSummary)}`)
+	}
+	const dropdownCoverageSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '测试页面每一个下拉选择器是否正常',
+		latestTask: '测试页面每一个下拉选择器是否正常',
+			observedFieldInventory: [
+				{ key: 'index:20', index: 20, label: '用户名', kind: 'input', fieldType: 'text' },
+				{ key: 'index:21', index: 21, label: '状态', kind: 'selection', fieldType: 'select' },
+				{ key: 'index:22', index: 22, label: '等级', kind: 'dropdown', fieldType: 'select' },
+				{ key: 'index:23', index: 23, label: '所在地', kind: 'cascader', fieldType: 'cascader' },
+			{ key: 'index:24', index: 24, label: '启用通知', kind: 'switch', fieldType: 'switch' },
+			{ key: 'index:26', index: 26, label: '允许营销', kind: 'selection', fieldType: 'checkbox' },
+			{ key: 'index:25', index: 25, label: '提交', kind: 'button', fieldType: 'button' },
+		],
+		history: [
+			{
+				action: 'open_dropdown',
+				input: { index: 21, target_label: '状态' },
+				success: true,
+				output: '已展开下拉框索引 21。 当前候选: 启用、禁用 | 动作结果: options_visible progress=true candidates="启用|禁用"',
+				outcome: { kind: 'options_visible', visibleOptions: ['启用', '禁用'], reason: '候选已显示。' },
+			},
+		],
+	})
+	if (
+		dropdownCoverageSummary?.type !== 'field_actions' ||
+		dropdownCoverageSummary.status !== 'inconclusive' ||
+			dropdownCoverageSummary.stats?.total !== 3 ||
+			dropdownCoverageSummary.stats?.tested !== 1 ||
+			dropdownCoverageSummary.stats?.remaining !== 2 ||
+			dropdownCoverageSummary.remaining?.join('|') !== '等级|所在地' ||
+			!String(dropdownCoverageSummary.text || '').includes('状态：通过') ||
+			!String(dropdownCoverageSummary.text || '').includes('等级：未测试') ||
+		!String(dropdownCoverageSummary.text || '').includes('所在地：未测试') ||
+		dropdownCoverageSummary.items?.some((item) => ['用户名', '启用通知', '允许营销', '提交'].includes(item.label))
+	) {
+		throw new Error(`dropdown result summary should scope expected coverage to dropdown-like controls, got ${JSON.stringify(dropdownCoverageSummary)}`)
+	}
+	const targetedDropdownSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '测试状态下拉是否正常',
+		latestTask: '测试状态下拉是否正常',
+		observedFieldInventory: [
+			{ key: 'index:41', index: 41, label: '状态', kind: 'selection', fieldType: 'select' },
+			{ key: 'index:42', index: 42, label: '等级', kind: 'dropdown', fieldType: 'select' },
+			{ key: 'index:43', index: 43, label: '所在地', kind: 'cascader', fieldType: 'cascader' },
+		],
+		history: [
+			{
+				action: 'open_dropdown',
+				input: { index: 41, target_label: '状态' },
+				success: true,
+				output: '已展开下拉框索引 41。 当前候选: 启用、禁用 | 动作结果: options_visible progress=true candidates="启用|禁用"',
+				outcome: { kind: 'options_visible', visibleOptions: ['启用', '禁用'], reason: '候选已显示。' },
+			},
+		],
+	})
+	if (
+		targetedDropdownSummary?.type !== 'field_actions' ||
+		targetedDropdownSummary.status !== 'passed' ||
+		targetedDropdownSummary.stats?.total !== 1 ||
+		targetedDropdownSummary.stats?.remaining !== 0 ||
+		targetedDropdownSummary.remaining?.length !== 0 ||
+		!String(targetedDropdownSummary.text || '').includes('状态：通过') ||
+		String(targetedDropdownSummary.text || '').includes('等级：未测试') ||
+		String(targetedDropdownSummary.text || '').includes('所在地：未测试') ||
+		targetedDropdownSummary.diagnostics?.some((item) => item.kind === 'field_action_coverage_incomplete')
+	) {
+		throw new Error(`single-target dropdown tests should not expand coverage to every dropdown on the page, got ${JSON.stringify(targetedDropdownSummary)}`)
+	}
+	const targetedUntestedDropdownSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '测试等级下拉是否正常',
+		latestTask: '测试等级下拉是否正常',
+		observedFieldInventory: [
+			{ key: 'index:51', index: 51, label: '状态', kind: 'selection', fieldType: 'select' },
+			{ key: 'index:52', index: 52, label: '等级', kind: 'dropdown', fieldType: 'select' },
+			{ key: 'index:53', index: 53, label: '所在地', kind: 'cascader', fieldType: 'cascader' },
+		],
+		history: [],
+	})
+	if (
+		targetedUntestedDropdownSummary?.type !== 'field_actions' ||
+		targetedUntestedDropdownSummary.status !== 'inconclusive' ||
+		targetedUntestedDropdownSummary.stats?.total !== 1 ||
+			targetedUntestedDropdownSummary.stats?.remaining !== 1 ||
+			targetedUntestedDropdownSummary.remaining?.join('|') !== '等级' ||
+			!String(targetedUntestedDropdownSummary.remainingDetails?.[0]?.neededEvidence || '').includes('真实候选') ||
+			!String(targetedUntestedDropdownSummary.remainingDetails?.[0]?.neededEvidence || '').includes('归属当前字段') ||
+		!String(targetedUntestedDropdownSummary.text || '').includes('等级：未测试') ||
+		String(targetedUntestedDropdownSummary.text || '').includes('状态：未测试') ||
+		String(targetedUntestedDropdownSummary.text || '').includes('所在地：未测试')
+	) {
+		throw new Error(`single-target dropdown coverage should report only the mentioned untested field, got ${JSON.stringify(targetedUntestedDropdownSummary)}`)
+	}
+	const selectableCoverageSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '测试页面每一个开关和单选控件是否正常',
+		latestTask: '测试页面每一个开关和单选控件是否正常',
+		observedFieldInventory: [
+			{ key: 'index:30', index: 30, label: '用户名', kind: 'input', fieldType: 'text' },
+			{ key: 'index:31', index: 31, label: '启用通知', kind: 'switch', fieldType: 'switch' },
+			{ key: 'index:32', index: 32, label: '性别', kind: 'radio', fieldType: 'radio' },
+			{ key: 'index:33', index: 33, label: '状态', kind: 'selection', fieldType: 'select' },
+			{ key: 'index:34', index: 34, label: '保存', kind: 'button', fieldType: 'button' },
+		],
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: { index: 31, target_label: '启用通知' },
+				success: true,
+				output: '已点击启用通知。 | 动作结果: state_changed',
+				outcome: { kind: 'state_changed', reason: '开关状态已改变。' },
+			},
+		],
+	})
+	if (
+		selectableCoverageSummary?.type !== 'field_actions' ||
+		selectableCoverageSummary.status !== 'inconclusive' ||
+		selectableCoverageSummary.stats?.total !== 2 ||
+		selectableCoverageSummary.stats?.tested !== 1 ||
+		selectableCoverageSummary.stats?.remaining !== 1 ||
+		selectableCoverageSummary.remaining?.join('|') !== '性别' ||
+		!String(selectableCoverageSummary.remainingDetails?.[0]?.neededEvidence || '').includes('状态变化') ||
+		!String(selectableCoverageSummary.text || '').includes('启用通知：通过') ||
+		!String(selectableCoverageSummary.text || '').includes('性别：未测试') ||
+		selectableCoverageSummary.items?.some((item) => ['用户名', '状态', '保存'].includes(item.label))
+	) {
+		throw new Error(`selectable result summary should scope expected coverage to radio/checkbox/switch-like controls, got ${JSON.stringify(selectableCoverageSummary)}`)
 	}
 	const sensitiveTerminalFieldActionSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'error',
@@ -12722,6 +15296,37 @@ function assertResultSummaryBehavior() {
 		) {
 			throw new Error(`field action summaries should promote skipped/failed verification recovery into diagnostics, got ${JSON.stringify(fieldVerificationRecoverySummary)}`)
 		}
+		const fieldUserInputRequiredSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+			status: 'error',
+			activityText: '询问用户失败: 等待用户回答超时。',
+			task: '测试页面每一个输入框是否正常',
+			latestTask: '测试页面每一个输入框是否正常',
+			history: [
+				{
+					action: 'ask_user',
+					input: {
+						question: '请输入验证码',
+						reason: '当前页面要求验证码后才能继续。',
+					},
+					success: false,
+					output: '询问用户失败: 等待用户回答超时。',
+					outcome: { kind: 'no_effect', progress: false, reason: '等待用户回答超时。' },
+				},
+			],
+		})
+		if (
+			fieldUserInputRequiredSummary?.type !== 'field_actions' ||
+			fieldUserInputRequiredSummary.status !== 'inconclusive' ||
+			fieldUserInputRequiredSummary.stats?.userInputRequired !== 1 ||
+			fieldUserInputRequiredSummary.stats?.terminalFailed !== 0 ||
+			!String(fieldUserInputRequiredSummary.headline || '').includes('需要用户补充 1 项') ||
+			!fieldUserInputRequiredSummary.diagnostics?.some((item) => item.kind === 'user_input_required') ||
+			!fieldUserInputRequiredSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('等待用户回答前的字段测试步骤')) ||
+			fieldUserInputRequiredSummary.diagnostics?.some((item) => item.kind === 'task_terminal_failure' && item.severity === 'error') ||
+			fieldUserInputRequiredSummary.issues?.[0]?.label !== '需要用户补充'
+		) {
+			throw new Error(`field action summaries should classify required user input separately from ordinary terminal failures, got ${JSON.stringify(fieldUserInputRequiredSummary)}`)
+		}
 		const genericNavigationFailureSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 			status: 'error',
 			activityText: '目标页面无法打开。',
@@ -12795,10 +15400,13 @@ function assertResultSummaryBehavior() {
 		dropdownProbeSummary.stats?.total !== 1 ||
 		dropdownProbeSummary.items?.[0]?.label !== '状态' ||
 		dropdownProbeSummary.items?.[0]?.sourceLabel !== '展开候选' ||
-		dropdownProbeSummary.items?.[0]?.value !== '候选 2 项' ||
-		!String(dropdownProbeSummary.text || '').includes('状态：通过')
+		dropdownProbeSummary.items?.[0]?.value !== '候选 2 项：启用 / 禁用' ||
+		dropdownProbeSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
+		!String(dropdownProbeSummary.text || '').includes('状态：通过') ||
+		!String(dropdownProbeSummary.text || '').includes('值=候选 2 项：启用 / 禁用') ||
+		!String(dropdownProbeSummary.text || '').includes('依据=真实候选/动作结果返回可见候选 2 项')
 	) {
-		throw new Error(`field action summary should report successful dropdown probes with candidate counts, got ${JSON.stringify(dropdownProbeSummary)}`)
+		throw new Error(`field action summary should report successful dropdown probes with candidate counts and option previews, got ${JSON.stringify(dropdownProbeSummary)}`)
 	}
 	const dropdownThenSelectSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'completed',
@@ -12826,19 +15434,88 @@ function assertResultSummaryBehavior() {
 		dropdownThenSelectSummary.stats?.total !== 1 ||
 		dropdownThenSelectSummary.items?.[0]?.sourceLabel !== '选择候选' ||
 		dropdownThenSelectSummary.items?.[0]?.value !== '启用' ||
+		dropdownThenSelectSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
 		dropdownThenSelectSummary.items?.[0]?.attempts !== 1 ||
+		!String(dropdownThenSelectSummary.text || '').includes('依据=真实候选/先前展开候选包含所选值（候选 2 项）') ||
 		String(dropdownThenSelectSummary.text || '').includes('动作=展开候选')
 	) {
 		throw new Error(`field action summary should avoid double-counting dropdown probes once the same field is selected, got ${JSON.stringify(dropdownThenSelectSummary)}`)
 	}
+	const directDropdownSelectSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '测试页面每一个下拉选择器是否正常',
+		latestTask: '测试页面每一个下拉选择器是否正常',
+		history: [
+			{
+				action: 'choose_dropdown_option',
+				input: { index: 42, target_label: '状态', text: '启用' },
+				success: true,
+				output: '已选择下拉选项 "启用"。 | 动作结果: value_changed progress=true candidates="启用"',
+				outcome: { kind: 'value_changed', progress: true, visibleOptions: ['启用'], reason: '字段值已更新。' },
+			},
+		],
+	})
+	if (
+		directDropdownSelectSummary?.type !== 'field_actions' ||
+		directDropdownSelectSummary.items?.[0]?.value !== '启用' ||
+		directDropdownSelectSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
+		!String(directDropdownSelectSummary.text || '').includes('依据=真实候选/动作结果返回可见候选并包含所选值（候选 1 项）')
+	) {
+		throw new Error(`direct dropdown selections should summarize their own visible option evidence, got ${JSON.stringify(directDropdownSelectSummary)}`)
+	}
+	const metaOutcomeDropdownSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '测试页面每一个下拉选择器是否正常',
+		latestTask: '测试页面每一个下拉选择器是否正常',
+		history: [
+			{
+				action: 'choose_dropdown_option',
+				input: { index: 44, target_label: '状态', text: '启用' },
+				success: true,
+				output: '已选择下拉选项 "启用"。',
+				meta: { outcome: { kind: 'value_changed', progress: true, visibleOptions: ['启用'], reason: '字段值已更新。' } },
+			},
+		],
+	})
+	if (
+		metaOutcomeDropdownSummary?.type !== 'field_actions' ||
+		metaOutcomeDropdownSummary.items?.[0]?.value !== '启用' ||
+		metaOutcomeDropdownSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
+		!String(metaOutcomeDropdownSummary.text || '').includes('依据=真实候选/动作结果返回可见候选并包含所选值（候选 1 项）')
+	) {
+		throw new Error(`field action summaries should read visible option evidence from meta.outcome, got ${JSON.stringify(metaOutcomeDropdownSummary)}`)
+	}
+	const directSelectableSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '测试页面每一个选择控件是否正常',
+		latestTask: '测试页面每一个选择控件是否正常',
+		history: [
+			{
+				action: 'select_checkbox_option',
+				input: { index: 43, target_label: '通知方式', text: '短信' },
+				success: true,
+				output: '已选择复选项 "短信"。 | 动作结果: state_changed progress=true candidates="短信"',
+				outcome: { kind: 'state_changed', progress: true, visibleOptions: ['短信'], reason: '候选状态已变化。' },
+			},
+		],
+	})
+	if (
+		directSelectableSummary?.type !== 'field_actions' ||
+		directSelectableSummary.items?.[0]?.sourceLabel !== '选择选项' ||
+		directSelectableSummary.items?.[0]?.value !== '短信' ||
+		directSelectableSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
+		!String(directSelectableSummary.text || '').includes('依据=真实候选/动作结果返回可见候选并包含所选值（候选 1 项）')
+	) {
+		throw new Error(`direct selectable selections should summarize their own visible option evidence, got ${JSON.stringify(directSelectableSummary)}`)
+	}
 	const editCascaderSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'error',
-		task: '编辑一下客户所在地，修改为江苏省，南京市，江宁区',
-		latestTask: '编辑一下客户所在地，修改为江苏省，南京市，江宁区',
+		task: '编辑一下所在地，修改为江苏省，南京市，江宁区',
+		latestTask: '编辑一下所在地，修改为江苏省，南京市，江宁区',
 		history: [
 			{
 				action: 'select_cascader_path',
-				input: { index: 10, target_label: '客户所在地', path: ['江苏省', '南京市', '江宁区'] },
+				input: { index: 10, target_label: '所在地', path: ['江苏省', '南京市', '江宁区'] },
 				success: false,
 				output: '级联选择失败：未找到第 2 级选项 "南京市"。',
 				outcome: { kind: 'failed', reason: '级联选择失败：未找到第 2 级选项 "南京市"。' },
@@ -12848,10 +15525,123 @@ function assertResultSummaryBehavior() {
 	if (
 		editCascaderSummary?.type !== 'field_actions' ||
 		!String(editCascaderSummary.headline || '').includes('字段操作发现异常') ||
-		String(editCascaderSummary.headline || '').includes('字段测试') ||
-		!String(editCascaderSummary.text || '').includes('客户所在地：失败')
-	) {
+			String(editCascaderSummary.headline || '').includes('字段测试') ||
+			editCascaderSummary.items?.[0]?.value !== '江苏省 / 南京市 / 江宁区' ||
+			editCascaderSummary.items?.[0]?.valueSourceLabel ||
+			!editCascaderSummary.diagnostics?.some((item) => item.kind === 'field_selection_failed' && String(item.text || '').includes('所在地') && String(item.text || '').includes('级联路径')) ||
+			!editCascaderSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('目标字段范围内的真实候选') && String(item.text || '').includes('不要用字段外候选')) ||
+			!String(editCascaderSummary.text || '').includes('所在地：失败') ||
+			!String(editCascaderSummary.text || '').includes('值=江苏省 / 南京市 / 江宁区')
+		) {
 		throw new Error(`edit field action summary should not use the testing headline, got ${JSON.stringify(editCascaderSummary)}`)
+	}
+	const compactCascaderSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '编辑一下所在地，修改为江苏南京江宁',
+		latestTask: '编辑一下所在地，修改为江苏南京江宁',
+		history: [
+			{
+				action: 'select_cascader_path',
+				input: { index: 10, target_label: '所在地', path: ['江苏南京江宁'] },
+				success: true,
+				output: '已按紧凑目标选择级联选项：江苏省 > 南京市 > 江宁区。',
+				meta: {
+					selectedPath: ['江苏省', '南京市', '江宁区'],
+					requestedPath: ['江苏南京江宁'],
+					outcome: {
+						kind: 'value_changed',
+						selectedPath: ['江苏省', '南京市', '江宁区'],
+						requestedPath: ['江苏南京江宁'],
+					},
+				},
+				outcome: {
+					kind: 'value_changed',
+					selectedPath: ['江苏省', '南京市', '江宁区'],
+					requestedPath: ['江苏南京江宁'],
+				},
+			},
+		],
+	})
+	if (
+		compactCascaderSummary?.type !== 'field_actions' ||
+		compactCascaderSummary.items?.[0]?.value !== '江苏省 / 南京市 / 江宁区' ||
+		compactCascaderSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
+		!String(compactCascaderSummary.text || '').includes('值=江苏省 / 南京市 / 江宁区') ||
+		!String(compactCascaderSummary.text || '').includes('依据=真实候选/动作结果返回已选路径') ||
+		String(compactCascaderSummary.text || '').includes('值=江苏南京江宁')
+	) {
+		throw new Error(`compact cascader summaries should prefer actual selected path evidence over the compact requested input, got ${JSON.stringify(compactCascaderSummary)}`)
+	}
+	const metaOutcomeCascaderSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '编辑一下层级，修改为一级二级三级',
+		latestTask: '编辑一下层级，修改为一级二级三级',
+		history: [
+			{
+				action: 'select_cascader_path',
+				input: { index: 10, target_label: '层级', path: ['一级二级三级'] },
+				success: true,
+				output: '已按紧凑目标选择级联选项：一级 > 二级 > 三级。',
+				meta: {
+					outcome: {
+						kind: 'value_changed',
+						selectedPath: ['一级', '二级', '三级'],
+						requestedPath: ['一级二级三级'],
+					},
+				},
+			},
+		],
+	})
+	if (
+		metaOutcomeCascaderSummary?.type !== 'field_actions' ||
+		metaOutcomeCascaderSummary.items?.[0]?.value !== '一级 / 二级 / 三级' ||
+		metaOutcomeCascaderSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
+		!String(metaOutcomeCascaderSummary.text || '').includes('依据=真实候选/动作结果返回已选路径') ||
+		String(metaOutcomeCascaderSummary.text || '').includes('值=一级二级三级')
+	) {
+		throw new Error(`field action summaries should read selected path evidence from meta.outcome, got ${JSON.stringify(metaOutcomeCascaderSummary)}`)
+	}
+	const visibleCascaderCandidateSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'completed',
+		task: '编辑一下所在地，修改为江苏省，南京市，江宁区',
+		latestTask: '编辑一下所在地，修改为江苏省，南京市，江宁区',
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: {
+					index: 33,
+					target_label: '江宁区',
+					workflow: 'form-fill',
+					workflow_step: 'select_visible_cascader_option_timeout_recovery',
+					workflow_field_label: '所在地',
+					workflow_requested_text: '江宁区',
+					workflow_value_source: 'visible_option',
+					workflow_value_basis: '可见级联候选与请求值匹配：江宁区',
+				},
+				success: true,
+				output: '已点击江宁区。 | 动作结果: value_changed',
+				outcome: { kind: 'value_changed', reason: '字段值已更新。' },
+			},
+		],
+	})
+	if (
+		visibleCascaderCandidateSummary?.type !== 'form_task' ||
+		visibleCascaderCandidateSummary.status !== 'inconclusive' ||
+		visibleCascaderCandidateSummary.stats?.submitMissing !== 1 ||
+		visibleCascaderCandidateSummary.items?.[0]?.label !== '所在地' ||
+		visibleCascaderCandidateSummary.items?.[0]?.source !== 'select_visible_cascader_option' ||
+		visibleCascaderCandidateSummary.items?.[0]?.sourceLabel !== '选择级联候选' ||
+		visibleCascaderCandidateSummary.items?.[0]?.value !== '江宁区' ||
+		visibleCascaderCandidateSummary.items?.[0]?.valueSourceLabel !== '真实候选' ||
+		!String(visibleCascaderCandidateSummary.text || '').includes('所在地：通过') ||
+		!String(visibleCascaderCandidateSummary.text || '').includes('动作=选择级联候选') ||
+		!String(visibleCascaderCandidateSummary.text || '').includes('值=江宁区') ||
+		!String(visibleCascaderCandidateSummary.text || '').includes('依据=真实候选/可见级联候选与请求值匹配') ||
+		!String(visibleCascaderCandidateSummary.text || '').includes('表单完成：未提交') ||
+		!visibleCascaderCandidateSummary.diagnostics?.some((item) => item.kind === 'form_submit_missing') ||
+		String(visibleCascaderCandidateSummary.text || '').includes('动作=点击/切换控件')
+	) {
+		throw new Error(`visible cascader candidate recovery should summarize selected field evidence inside a form-task report, got ${JSON.stringify(visibleCascaderCandidateSummary)}`)
 	}
 	const generic = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'error',
@@ -12861,9 +15651,124 @@ function assertResultSummaryBehavior() {
 			{ action: 'done', success: false, output: '最后动作失败。' },
 		],
 	})
-		if (generic?.type !== 'general' || !String(generic.headline || '').includes('任务未完成') || !generic.issues.length) {
-			throw new Error(`generic result summary should cover non-search tasks, got ${JSON.stringify(generic)}`)
-		}
+	if (generic?.type !== 'general' || !String(generic.headline || '').includes('任务未完成') || !generic.issues.length) {
+		throw new Error(`generic result summary should cover non-search tasks, got ${JSON.stringify(generic)}`)
+	}
+	const genericOperationalDiagnostics = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'error',
+		activityText: '通用页面任务未完成。',
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: { index: 5, target_label: '目标按钮' },
+				success: false,
+				output: '动作执行超时。动作校验失败: 点击后没有可见变化。',
+				outcome: { kind: 'failed', progress: false, reason: 'action_timeout' },
+			},
+			{
+				action: 'click_element_by_index.loop_guard',
+				input: { index: 5, target_label: '目标按钮' },
+				success: false,
+				output: '循环保护拦截了重复点击。',
+				outcome: { kind: 'loop_guard', progress: false, reason: 'loop_guard' },
+			},
+		],
+		traceItems: [
+			{
+				title: '模型调用: 动作规划',
+				kind: 'error',
+				detail: '模型接口返回错误。',
+				io: { error: 'model_error' },
+			},
+			{
+				title: '规划进度',
+				detail: '模型输出不是可执行 JSON，对页面动作未执行。',
+				progress: { stage: 'invalid_model_output' },
+			},
+			{
+				title: '规划进度',
+				detail: '执行前校验拦截 click_element_by_index。',
+				progress: {
+					stage: 'validation_feedback',
+					validationKind: 'covered_target',
+					validationGuidance: '目标当前被遮挡，应先重新定位可命中元素。',
+				},
+			},
+			{
+				title: '循环保护',
+				detail: '检测到同一失败动作重复。',
+				action: {
+					name: 'click_element_by_index.loop_guard',
+					loopGuardGuidance: '不要再次执行同一动作；先换 index、换工具或补充上下文。',
+				},
+			},
+			{
+				title: '步骤 4: 校验失败',
+				detail: '动作校验失败: 点击后没有可见变化。',
+			},
+		],
+	})
+	if (
+		genericOperationalDiagnostics?.type !== 'general' ||
+		genericOperationalDiagnostics.stats?.modelErrors !== 1 ||
+		genericOperationalDiagnostics.stats?.timeouts !== 1 ||
+		genericOperationalDiagnostics.stats?.plannerCorrections !== 1 ||
+		genericOperationalDiagnostics.stats?.loopGuards !== 1 ||
+		genericOperationalDiagnostics.stats?.verificationFailures !== 1 ||
+		!String(genericOperationalDiagnostics.headline || '').includes('运行诊断') ||
+		!String(genericOperationalDiagnostics.headline || '').includes('模型错误 1 次') ||
+		!String(genericOperationalDiagnostics.headline || '').includes('超时 1 次') ||
+		!String(genericOperationalDiagnostics.headline || '').includes('规划纠偏 1 次') ||
+		!String(genericOperationalDiagnostics.headline || '').includes('执行前校验 1 次') ||
+		!String(genericOperationalDiagnostics.headline || '').includes('循环保护 1 次') ||
+		!String(genericOperationalDiagnostics.headline || '').includes('校验失败 1 次') ||
+		!genericOperationalDiagnostics.issues?.some((item) => item.statusLabel === '失败动作' && String(item.label || '').includes('点击元素') && String(item.label || '').includes('目标按钮')) ||
+		!genericOperationalDiagnostics.issues?.some((item) => item.statusLabel === '失败动作' && String(item.summary || '').includes('动作执行超时') && String(item.neededEvidence || '').includes('复核动作是否已在页面上生效')) ||
+		!genericOperationalDiagnostics.issues?.some((item) => item.statusLabel === '失败动作' && String(item.summary || '').includes('循环保护') && String(item.neededEvidence || '').includes('停止重复同一动作')) ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'model_error') ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'timeout') ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'planner_correction') ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'validation_feedback' && String(item.text || '').includes('covered_target 1')) ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'loop_guard') ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'verification_failure') ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('不要再次执行同一动作')) ||
+		!String(genericOperationalDiagnostics.text || '').includes('诊断：模型调用异常') ||
+		!String(genericOperationalDiagnostics.text || '').includes('诊断：规划输出纠偏') ||
+		!String(genericOperationalDiagnostics.text || '').includes('诊断：执行前校验拦截') ||
+		!String(genericOperationalDiagnostics.text || '').includes('诊断：循环保护触发') ||
+		!String(genericOperationalDiagnostics.text || '').includes('诊断：动作校验失败') ||
+		!String(genericOperationalDiagnostics.text || '').includes('诊断：建议：不要再次执行同一动作') ||
+		!String(genericOperationalDiagnostics.text || '').includes('失败动作：点击元素：目标按钮')
+	) {
+		throw new Error(`generic summaries should include operational trace diagnostics, got ${JSON.stringify(genericOperationalDiagnostics)}`)
+	}
+	const genericSensitiveFailureSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'error',
+		activityText: '提交失败，密码 Secret987! 仍在表单中，验证码 246810 已过期。',
+		task: '执行通用页面任务，密码 Secret987!，验证码 246810',
+		latestTask: '执行通用页面任务',
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: { index: 12, target_label: '登录密码', type: 'password', text: 'Secret987!' },
+				success: false,
+				output: '点击后密码 Secret987! 仍可见，验证码 246810 已过期。',
+				outcome: { kind: 'failed', progress: false, reason: '验证码 246810 已过期。' },
+			},
+		],
+	})
+	const genericSensitiveText = JSON.stringify(genericSensitiveFailureSummary)
+	if (
+		genericSensitiveFailureSummary?.type !== 'general' ||
+		genericSensitiveText.includes('Secret987') ||
+		genericSensitiveText.includes('246810') ||
+		!genericSensitiveText.includes('已隐藏') ||
+		!genericSensitiveFailureSummary.issues?.some((item) => item.statusLabel === '失败动作' && String(item.summary || '').includes('已隐藏')) ||
+		!String(genericSensitiveFailureSummary.reason || '').includes('已隐藏') ||
+		!String(genericSensitiveFailureSummary.text || '').includes('失败动作：点击元素：登录密码')
+	) {
+		throw new Error(`generic summaries should redact sensitive values in terminal and failed-action details, got ${genericSensitiveText}`)
+	}
 		const genericVerificationRecoverySummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 			status: 'error',
 			activityText: '动作校验失败: 点击后没有可见变化 | 恢复处理: 当前动作不支持视觉恢复。',
@@ -12904,17 +15809,45 @@ function assertResultSummaryBehavior() {
 					},
 				],
 			})
-			if (
-				genericContextLimitSummary?.type !== 'general' ||
-				genericContextLimitSummary.stats?.contextRequestLimit !== 1 ||
-				!String(genericContextLimitSummary.headline || '').includes('上下文补证上限 1 个') ||
-				!genericContextLimitSummary.diagnostics?.some((item) => item.kind === 'context_request_limit') ||
-				!genericContextLimitSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('最后的补充上下文'))
-			) {
-				throw new Error(`generic summaries should preserve context request limit diagnostics, got ${JSON.stringify(genericContextLimitSummary)}`)
-			}
-			const genericRecovered = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
-				status: 'completed',
+				if (
+					genericContextLimitSummary?.type !== 'general' ||
+					genericContextLimitSummary.stats?.contextRequestLimit !== 1 ||
+					!String(genericContextLimitSummary.headline || '').includes('上下文补证上限 1 个') ||
+					!genericContextLimitSummary.diagnostics?.some((item) => item.kind === 'context_request_limit') ||
+					!genericContextLimitSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('最后的补充上下文'))
+				) {
+					throw new Error(`generic summaries should preserve context request limit diagnostics, got ${JSON.stringify(genericContextLimitSummary)}`)
+				}
+				const genericUserInputRequiredSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+					status: 'error',
+					activityText: '询问用户失败: 等待用户回答超时。',
+					history: [
+						{
+							action: 'ask_user',
+							input: {
+								question: '请输入验证码',
+								reason: '当前页面要求验证码后才能继续。',
+							},
+							success: false,
+							output: '询问用户失败: 等待用户回答超时。',
+							outcome: { kind: 'no_effect', progress: false, reason: '等待用户回答超时。' },
+						},
+					],
+				})
+				if (
+					genericUserInputRequiredSummary?.type !== 'general' ||
+					genericUserInputRequiredSummary.status !== 'inconclusive' ||
+					genericUserInputRequiredSummary.stats?.userInputRequired !== 1 ||
+					genericUserInputRequiredSummary.stats?.terminalFailed !== 0 ||
+					!String(genericUserInputRequiredSummary.headline || '').includes('需要用户补充 1 个') ||
+					!genericUserInputRequiredSummary.diagnostics?.some((item) => item.kind === 'user_input_required') ||
+					!genericUserInputRequiredSummary.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('等待用户回答前的步骤')) ||
+					genericUserInputRequiredSummary.diagnostics?.some((item) => item.kind === 'task_terminal_failure' && item.severity === 'error')
+				) {
+					throw new Error(`generic summaries should classify required user input separately from ordinary terminal failures, got ${JSON.stringify(genericUserInputRequiredSummary)}`)
+				}
+				const genericRecovered = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+					status: 'completed',
 		activityText: '任务完成。',
 		history: [
 			{ action: 'click_element_by_index', input: { index: 2, target_label: '打开菜单' }, success: false, output: '索引 2 点击未生效。 | 动作结果: no_effect progress=false' },
@@ -13111,6 +16044,27 @@ function assertPlannerContextExtractedFromPlanner() {
 	}
 	if (!plannerContext.includes('classifyInvalidActionInput') || !plannerContext.includes('failure_kind="${classified.kind}"') || !plannerContext.includes('下一步建议')) {
 		throw new Error('planner context should classify invalid action inputs and provide model-visible recovery guidance')
+	}
+	if (
+		!plannerContext.includes('classifyInvalidActionInput,') ||
+		!planner.includes('classifyInvalidActionInput') ||
+		!planner.includes('getValidationFeedbackDiagnostic') ||
+		!planner.includes('validationKind: validationDiagnostic.kind') ||
+		!planner.includes('validationGuidance: validationDiagnostic.guidance') ||
+		!planner.includes('类型=${kind}') ||
+		!planner.includes('建议=${guidance}') ||
+		!planner.includes('已把原因和建议补给模型')
+	) {
+		throw new Error('planner should reuse invalid-action classification in visible validation feedback progress')
+	}
+	if (
+		!planner.includes('buildInvalidModelOutputProgressText') ||
+		!planner.includes('buildInvalidActionProgressText') ||
+		!planner.includes("stage: 'invalid_model_output'") ||
+		!planner.includes("stage: 'invalid_action_name'") ||
+		!planner.includes('页面尚未执行动作')
+	) {
+		throw new Error('planner should surface invalid model output and invalid action-name replans as visible no-page-action progress')
 	}
 	if (
 		!plannerContext.includes('unowned_selection_candidate') ||
@@ -13635,6 +16589,39 @@ function assertPlannerRejectsCoveredIndexTargets() {
 	if (!String(cascaderChooseToolError || '').includes('级联选择字段') || !String(cascaderChooseToolError || '').includes('select_cascader_path')) {
 		throw new Error(`choose_dropdown_option should steer cascader parents to select_cascader_path, got ${cascaderChooseToolError}`)
 	}
+	const cascaderPathOnTextError = validation.validateExecutableAction(
+		{ name: 'select_cascader_path', input: { index: 33, path: ['华东', '江苏'], target_label: '联系电话' } },
+		inputObservation,
+		[]
+	)
+	if (!String(cascaderPathOnTextError || '').includes('普通可编辑输入框') || !String(cascaderPathOnTextError || '').includes('input_text/type')) {
+		throw new Error(`select_cascader_path should reject plain editable text fields, got ${cascaderPathOnTextError}`)
+	}
+	const cascaderPathOnPlainSelectError = validation.validateExecutableAction(
+		{ name: 'select_cascader_path', input: { index: 34, path: ['启用', '默认'], target_label: '状态' } },
+		inputObservation,
+		[]
+	)
+	if (!String(cascaderPathOnPlainSelectError || '').includes('非层级选择控件') || !String(cascaderPathOnPlainSelectError || '').includes('choose_dropdown_option')) {
+		throw new Error(`select_cascader_path should reject plain non-hierarchical selection fields, got ${cascaderPathOnPlainSelectError}`)
+	}
+	const treeCascaderPathError = validation.validateExecutableAction(
+		{ name: 'select_cascader_path', input: { index: 37, path: ['华东', '江苏'], target_label: '组织树' } },
+		{
+			forms: [
+				{
+					id: 'filter',
+					fields: [
+						{ index: 37, label: '组织树', role: 'combobox', fieldType: 'tree_select', selectionControl: 'tree-parent', valueState: 'empty' },
+					],
+				},
+			],
+		},
+		[]
+	)
+	if (treeCascaderPathError) {
+		throw new Error(`select_cascader_path should allow tree/hierarchy parent fields, got ${treeCascaderPathError}`)
+	}
 	const missingCheckboxTargetLabelError = validation.validateExecutableAction(
 		{ name: 'select_checkbox_option', input: { index: 35, text: '管理员' } },
 		inputObservation,
@@ -13751,6 +16738,9 @@ function assertPlannerPromptExtractedFromPlanner() {
 	if (!prompt.includes('wait(reason)') || !prompt.includes('禁止无原因等待')) {
 		throw new Error('planner prompt should require a reason for wait actions')
 	}
+	if (!prompt.includes('formatOutcomeList') || !prompt.includes('selectedPath=') || !prompt.includes('requestedPath=')) {
+		throw new Error('planner prompt history summaries should surface structured path evidence')
+	}
 	if (
 		!prompt.includes('search_data_requirement status="missing_table_samples"') ||
 		!prompt.includes('request_context source=tables region=content') ||
@@ -13763,6 +16753,9 @@ function assertPlannerPromptExtractedFromPlanner() {
 	if (
 		!prompt.includes('通用规划流程') ||
 		!prompt.includes('真正的页面内动作仍需要你结合当前页面元素和用户任务自行判断') ||
+		!prompt.includes('用户任务文本只表示意图和候选目标，不是 DOM 证据') ||
+		!prompt.includes('不要把任务里的模块名/字段名直接当作 target_label 或 index 命中依据') ||
+		!prompt.includes('应先 request_context/inspect_region/inspect_index 或 ask_user') ||
 		!prompt.includes('scope=all_matching_controls') ||
 		!prompt.includes('所有匹配的搜索/查询/筛选控件') ||
 		!prompt.includes('request_context source=actions region=content query="新增"') ||
@@ -14254,7 +17247,7 @@ function assertTaskNavigationWorkflowBehavior() {
 	if (!createUserTargets.includes('账户中心') || createUserTargets.includes('角色为管理')) {
 		throw new Error(`task-navigation should ignore field assignment phrases such as role=admin while keeping real modules: ${JSON.stringify(createUserTargets)}`)
 	}
-	const recordDetailTask = '进入http://116.205.97.39:8201 这个网站，登录账号admin 密码123456 然后你进入资料管理页面，帮我找到列表第一条资料，然后查看这个资料的详情'
+	const recordDetailTask = '进入http://example.test/ 这个网站，登录账号admin 密码123456 然后你进入资料管理页面，帮我找到列表第一条资料，然后查看这个资料的详情'
 	const recordDetailTargets = workflow.extractTaskNavigationTargetKeys({
 		task: recordDetailTask,
 		latestTask: recordDetailTask,
@@ -14576,7 +17569,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		throw new Error(`task-navigation should not reveal unrelated domain menus while searching for 资料管理: ${JSON.stringify(unrelatedCustomerReveal)}`)
 	}
 	const recordDetailObservation = {
-		url: 'http://116.205.97.39:8201/#/demo/record',
+		url: 'http://example.test/#/demo/record',
 		title: '资料-样例系统',
 		forms: [],
 		actions: [
@@ -14636,7 +17629,47 @@ function assertTaskNavigationWorkflowBehavior() {
 	if (noRecordListEvidenceDecision !== null) {
 		throw new Error(`record-view workflow should not click detail buttons without visible record/list row evidence, got ${JSON.stringify(noRecordListEvidenceDecision)}`)
 	}
-	const firstRecordWithoutDetailTask = '进入http://116.205.97.39:8201 这个网站，然后你进入资料管理页面，帮我找到列表第一条资料'
+	const paginationOnlyRecordDecision = workflow.derivePreModelWorkflowDecision(
+		{ task: recordDetailTask, latestTask: recordDetailTask, history: [], workflowState: {} },
+		{
+			...recordDetailObservation,
+			tables: [],
+			actions: [
+				{ index: 45, region: 'content', role: 'button', label: '详情', actionIntent: 'view', rect: { left: 720, top: 140, width: 52, height: 28 } },
+			],
+			popups: [
+				{ index: 90, region: 'pagination', role: 'combobox', label: '共 476 条', valueState: 'selected:10条/页', rect: { left: 640, top: 820, width: 120, height: 30 } },
+			],
+		},
+		{ tabsSummary: [{ id: 1, url: recordDetailObservation.url, current: true }] }
+	)
+	assertAction(paginationOnlyRecordDecision, 'locate_by_vision')
+	if (
+		paginationOnlyRecordDecision.action.input.workflow !== 'record-view' ||
+		paginationOnlyRecordDecision.action.input.workflow_step !== 'view_first_record_detail' ||
+		!/第一行|第一条/.test(String(paginationOnlyRecordDecision.action.input.target_description || ''))
+	) {
+		throw new Error(`record-view workflow should use constrained vision when positive pagination proves a list but rows/actions are not exposed, got ${JSON.stringify(paginationOnlyRecordDecision)}`)
+	}
+	const paginationRecordHint = workflow.buildWorkflowContextText(
+		{ task: recordDetailTask, latestTask: recordDetailTask, history: [], workflowState: {} },
+		{
+			...recordDetailObservation,
+			tables: [],
+			actions: [],
+			popups: [
+				{ index: 90, region: 'pagination', role: 'combobox', label: '共 476 条', valueState: 'selected:10条/页' },
+			],
+		}
+	)
+	if (
+		!paginationRecordHint.includes('record_view_requirement') ||
+		!paginationRecordHint.includes('detail_action_missing') ||
+		!paginationRecordHint.includes('pagination="共 476 条"')
+	) {
+		throw new Error(`record-view hints should expose positive pagination evidence when row extraction is missing, got ${paginationRecordHint}`)
+	}
+	const firstRecordWithoutDetailTask = '进入http://example.test/ 这个网站，然后你进入资料管理页面，帮我找到列表第一条资料'
 	const noDetailIntentDecision = workflow.derivePreModelWorkflowDecision(
 		{ task: firstRecordWithoutDetailTask, latestTask: firstRecordWithoutDetailTask, history: [], workflowState: {} },
 		recordDetailObservation,
@@ -14660,7 +17693,7 @@ function assertTaskNavigationWorkflowBehavior() {
 			workflowState: {},
 		},
 		{ ...recordDetailObservation, title: '资料详情-样例系统', actions: [] },
-		{ tabsSummary: [{ id: 1, url: 'http://116.205.97.39:8201/#/demo/record/detail/1', current: true }] }
+		{ tabsSummary: [{ id: 1, url: 'http://example.test/#/demo/record/detail/1', current: true }] }
 	)
 	assertAction(completedRecordViewDecision, 'done')
 	if (
@@ -15185,6 +18218,13 @@ function assertSearchWorkflowBehavior() {
 	if (!/function\s+buildFieldClearFallbackDecision\s*\(/.test(workflowSource) || !/function\s+canClearSearchFieldByInput\s*\(/.test(workflowSource)) {
 		throw new Error('search workflow should provide a generic field-level clear fallback for plain editable search fields')
 	}
+	if (
+		!workflowSource.includes('isCascaderLikeField(field)') ||
+		!workflowSource.includes('parseSearchCascaderCandidatePath(sample)') ||
+		!workflowSource.includes('select_cascader_path')
+	) {
+		throw new Error('search workflow should route cascader-like search fields through generic cascader path selection')
+	}
 	if (!plannerWorkflows?.recordPlanningContextDeferral) {
 		throw new Error('planner workflow registry should expose planning-context deferral recording for tests')
 	}
@@ -15352,14 +18392,14 @@ function assertSearchWorkflowBehavior() {
 			{
 				name: 'request_context',
 				input: { source: 'tables', limit: 10 },
-				text: [
-					'<context_response seq="1" request="request_context">',
-					'<context_chunk source="tables" cursor="0" limit="10" total="1">',
-					'table region="content" headers="创建时间|客户名称"',
-					'  row 1: 创建时间=2026-06-02 | 客户名称=星火科技有限公司',
-					'</context_chunk>',
-					'</context_response>',
-				].join('\n'),
+					text: [
+						'<context_response seq="1" request="request_context">',
+						'<context_chunk source="tables" cursor="0" limit="10" total="1">',
+						'table region="content" headers="创建时间|名称"',
+						'  row 1: 创建时间=2026-06-02 | 名称=星火科技有限公司',
+						'</context_chunk>',
+						'</context_response>',
+					].join('\n'),
 			},
 			{
 				name: 'request_options_for',
@@ -15600,9 +18640,9 @@ function assertSearchWorkflowBehavior() {
 						],
 					},
 				],
-				tables: [
-					{ headers: ['创建时间', '客户名称'], rows: [['2026-06-02', '星火科技有限公司']] },
-				],
+					tables: [
+						{ headers: ['创建时间', '名称'], rows: [['2026-06-02', '星火科技有限公司']] },
+					],
 			},
 			planningContext: [
 				{
@@ -15793,13 +18833,17 @@ function assertSearchWorkflowBehavior() {
 	if (
 		!workflowSource.includes('function candidateSampleContainsWithBoundaries') ||
 		!workflowSource.includes('function containsWithAsciiDigitBoundary') ||
+		!workflowSource.includes('function timeCandidatesOverlap') ||
+		!workflowSource.includes('function normalizeTimeCandidate') ||
 		!workflowSource.includes('function scoreCandidateSampleTextMatch') ||
 		!workflowSource.includes('function optionTextHasBoundedDecorationMatch') ||
 		!extractFunctionSource(workflowSource, 'pickCandidateMatchingSample').includes('scoreCandidateSampleTextMatch(key, sampleKey)') ||
+		!extractFunctionSource(workflowSource, 'pickCandidateMatchingTaskValue').includes('timeCandidatesOverlap(text, explicitTaskValue)') ||
+		!extractFunctionSource(workflowSource, 'scoreCandidateSampleTextMatch').includes('timeCandidatesOverlap(candidateKey, sampleKey)') ||
 		!extractFunctionSource(workflowSource, 'scoreCandidateSampleTextMatch').includes('optionTextHasBoundedDecorationMatch(candidateKey, sampleKey)') ||
 		!extractFunctionSource(workflowSource, 'scoreCandidateSampleTextMatch').includes('candidateSampleContainsWithBoundaries(candidateKey, sampleKey)')
 	) {
-		throw new Error('search workflow should match table samples to options with exact/decorated/boundary-aware logic instead of raw substring matching')
+		throw new Error('search workflow should match table samples and explicit task values to options with exact/decorated/boundary-aware/time-normalized logic instead of raw substring matching')
 	}
 	const actionSearchTextFn = extractFunctionSource(workflowSource, 'getActionSearchText')
 	for (const expected of ['selectorHints.testId', 'selectorHints.dataTest', 'selectorHints.className', 'action?.className', 'action?.iconClass']) {
@@ -15817,14 +18861,20 @@ function assertSearchWorkflowBehavior() {
 		!workflowSource.includes('function temporalRangeCellMatchesValue') ||
 		!workflowSource.includes('function formatInsensitiveResultMatches') ||
 		!workflowSource.includes('function normalizeComparableResultToken') ||
+		!workflowSource.includes('function extractTimeCandidates') ||
 		!resultMatchFn.includes('searchResultCellMatchesValue(cells[headerIndex], normalizedValue, value)') ||
 		!resultMatchFn.includes('searchResultCellMatchesValue(cell, normalizedValue, value)')
 	) {
-		throw new Error('search workflow should verify submitted results with exact/boundary-aware, temporal-range-aware, and format-insensitive cell matching instead of raw substring matching')
+		throw new Error('search workflow should verify submitted results with exact/boundary-aware, temporal-range-aware, time-normalized, and format-insensitive cell matching instead of raw substring matching')
 	}
 	const dateRangeCandidateFn = extractFunctionSource(workflowSource, 'pickDateRangeCandidate')
 	if (
 		!workflowSource.includes('function pickDateRangeFromDayOnlyCandidates') ||
+		!workflowSource.includes('function pickExplicitDateRangeCandidate') ||
+		!workflowSource.includes('function extractDateRangeTaskValueAfterLabel') ||
+		!workflowSource.includes('function extractExplicitDateRangeText') ||
+		!workflowSource.includes('through|thru|until|and') ||
+		!workflowSource.includes('function dateRangeEndpointsVisibleAsDayOnly') ||
 		!workflowSource.includes('function inferFullDateFromMonthDayCandidate') ||
 		!workflowSource.includes('function parseMonthDayDateCandidate') ||
 		!workflowSource.includes('function monthDayFallsWithinDateRange') ||
@@ -15832,6 +18882,7 @@ function assertSearchWorkflowBehavior() {
 		!workflowSource.includes('function shiftDate') ||
 		!workflowSource.includes('function inferDateFromDayOnlyHistory') ||
 		!workflowSource.includes('function extractDayOnlyDateFromHistoryItem') ||
+		!dateRangeCandidateFn.includes('pickExplicitDateRangeCandidate(candidates, failed, anchorValue, fullDateCandidates)') ||
 		!dateRangeCandidateFn.includes('inferFullDateFromMonthDayCandidate(anchorValue, fullDateCandidates)') ||
 		!dateRangeCandidateFn.includes('pickDateRangeFromDayOnlyCandidates(candidates, failed, anchorDate)')
 	) {
@@ -16344,24 +19395,24 @@ function assertSearchWorkflowBehavior() {
 				},
 			],
 			actions: [{ index: 18, actionIntent: 'search', label: '搜索', region: 'content' }],
-			tables: [
-				{
-					region: 'content',
-					headers: ['客户编号', '客户名称'],
-					rows: [
-						['KH-001', '星火科技有限公司'],
-					],
-				},
-			],
+				tables: [
+					{
+						region: 'content',
+						headers: ['记录编号', '名称'],
+						rows: [
+							['REC-001', '星火科技有限公司'],
+						],
+					},
+				],
+			}
+		)
+		assertAction(uniqueAffixSampleDecision, 'input_text')
+		if (
+			uniqueAffixSampleDecision.action.input.text !== 'REC-001' ||
+			uniqueAffixSampleDecision.action.input.workflow_value_source !== 'table_sample'
+		) {
+			throw new Error(`search workflow should use a unique generic-header affix match such as 编号 -> 记录编号, got ${JSON.stringify(uniqueAffixSampleDecision)}`)
 		}
-	)
-	assertAction(uniqueAffixSampleDecision, 'input_text')
-	if (
-		uniqueAffixSampleDecision.action.input.text !== 'KH-001' ||
-		uniqueAffixSampleDecision.action.input.workflow_value_source !== 'table_sample'
-	) {
-		throw new Error(`search workflow should use a unique generic-header affix match such as 编号 -> 客户编号, got ${JSON.stringify(uniqueAffixSampleDecision)}`)
-	}
 	const uniqueNameSampleDecision = workflow.deriveSearchWorkflowDecision(
 		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
 		{
@@ -16412,13 +19463,13 @@ function assertSearchWorkflowBehavior() {
 				},
 			],
 			actions: [{ index: 18, actionIntent: 'search', label: '搜索', region: 'content' }],
-			tables: [
-				{
-					region: 'content',
-					headers: ['客户名称', '项目名称'],
-					rows: [
-						['星火科技有限公司', '二期工程'],
-					],
+				tables: [
+					{
+						region: 'content',
+						headers: ['公司名称', '项目名称'],
+						rows: [
+							['星火科技有限公司', '二期工程'],
+						],
 				},
 			],
 		}
@@ -17318,6 +20369,60 @@ function assertSearchWorkflowBehavior() {
 	) {
 		throw new Error(`search workflow should still use instruction-like values when the user explicitly assigns them, got ${JSON.stringify(explicitInstructionLikeValueDecision)}`)
 	}
+	const quotedMultiWordValueDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项，标题为 "Quarterly Report"', latestTask: '测试搜索区域每一个搜索项，标题为 "Quarterly Report"', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '标题' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 39, label: '标题', fieldType: 'text', valueState: 'empty', role: 'textbox', type: 'text', region: 'content' },
+					],
+				},
+			],
+			actions: [
+				{ index: 44, actionIntent: 'search', label: '搜索', region: 'content' },
+			],
+		}
+	)
+	assertAction(quotedMultiWordValueDecision, 'input_text')
+	if (
+		quotedMultiWordValueDecision.action.input.text !== 'Quarterly Report' ||
+		quotedMultiWordValueDecision.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`search workflow should preserve quoted multi-word task search values, got ${JSON.stringify(quotedMultiWordValueDecision)}`)
+	}
+	const bracketedMultiWordValueDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项，备注设置为（季度 报告 2026）', latestTask: '测试搜索区域每一个搜索项，备注设置为（季度 报告 2026）', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '备注' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 40, label: '备注', fieldType: 'text', valueState: 'empty', role: 'textbox', type: 'text', region: 'content' },
+					],
+				},
+			],
+			actions: [
+				{ index: 44, actionIntent: 'search', label: '搜索', region: 'content' },
+			],
+		}
+	)
+	assertAction(bracketedMultiWordValueDecision, 'input_text')
+	if (
+		bracketedMultiWordValueDecision.action.input.text !== '季度 报告 2026' ||
+		bracketedMultiWordValueDecision.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`search workflow should preserve bracketed multi-word task search values, got ${JSON.stringify(bracketedMultiWordValueDecision)}`)
+	}
 	const explicitPhoneDecision = workflow.deriveSearchWorkflowDecision(
 		{ task: '测试搜索区域每一个搜索项，联系方式是145555555', latestTask: '测试搜索区域每一个搜索项，联系方式是145555555', history: [], workflowState: {} },
 		{
@@ -17655,6 +20760,180 @@ function assertSearchWorkflowBehavior() {
 	) {
 		throw new Error(`search workflow should recognize clear/reset criteria controls as filter reset actions, got ${JSON.stringify(criteriaResetDecision)}`)
 	}
+	for (const label of ['Clear all criteria', '清除全部条件']) {
+		const allCriteriaResetSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+		const allCriteriaResetObservation = {
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: 'Filters', fields: 'Company' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: 'Filters',
+					fields: [
+						{ index: 12, label: 'Company', fieldType: 'unknown', valueState: 'empty', role: 'textbox', type: 'text', region: 'content', rect: { left: 80, top: 40, width: 180, height: 32 } },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, actionIntent: 'button', label: 'Search', region: 'content', rect: { left: 280, top: 42, width: 76, height: 32 } },
+				{ index: 19, actionIntent: 'button', label, region: 'content', rect: { left: 364, top: 42, width: 138, height: 32 } },
+			],
+			tables: [
+				{ headers: ['Company', 'Phone'], rows: [['Acme Corp LLC', '13800138000']] },
+			],
+		}
+		const allCriteriaFillDecision = workflow.deriveSearchWorkflowDecision(allCriteriaResetSession, allCriteriaResetObservation)
+		assertAction(allCriteriaFillDecision, 'input_text')
+		workflow.recordSearchWorkflowOutcome(allCriteriaResetSession, allCriteriaFillDecision, { success: true, output: '已输入。' })
+		const allCriteriaSubmitDecision = workflow.deriveSearchWorkflowDecision(allCriteriaResetSession, allCriteriaResetObservation)
+		assertAction(allCriteriaSubmitDecision, 'click_element_by_index')
+		workflow.recordSearchWorkflowOutcome(allCriteriaResetSession, allCriteriaSubmitDecision, { success: true, output: '已搜索。' })
+		const allCriteriaResetDecision = workflow.deriveSearchWorkflowDecision(allCriteriaResetSession, allCriteriaResetObservation)
+		assertAction(allCriteriaResetDecision, 'click_element_by_index')
+		if (
+			allCriteriaResetDecision.action.input.index !== 19 ||
+			allCriteriaResetDecision.action.input.target_label !== label ||
+			allCriteriaResetDecision.action.input.workflow_step !== 'reset_filters'
+		) {
+			throw new Error(`search workflow should recognize all-criteria reset controls as filter reset actions, got ${JSON.stringify(allCriteriaResetDecision)}`)
+		}
+	}
+	for (const label of ['Clear form', '重置字段']) {
+		const formResetSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+		const formResetObservation = {
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: 'Filters', fields: 'Company' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: 'Filters',
+					fields: [
+						{ index: 12, label: 'Company', fieldType: 'unknown', valueState: 'empty', role: 'textbox', type: 'text', region: 'content', rect: { left: 80, top: 40, width: 180, height: 32 } },
+					],
+				},
+			],
+			actions: [
+				{ index: 18, actionIntent: 'button', label: 'Search', region: 'content', rect: { left: 280, top: 42, width: 76, height: 32 } },
+				{ index: 19, actionIntent: 'button', label, region: 'content', rect: { left: 364, top: 42, width: 108, height: 32 } },
+			],
+			tables: [
+				{ headers: ['Company', 'Phone'], rows: [['Acme Corp LLC', '13800138000']] },
+			],
+		}
+		const formResetFillDecision = workflow.deriveSearchWorkflowDecision(formResetSession, formResetObservation)
+		assertAction(formResetFillDecision, 'input_text')
+		workflow.recordSearchWorkflowOutcome(formResetSession, formResetFillDecision, { success: true, output: '已输入。' })
+		const formResetSubmitDecision = workflow.deriveSearchWorkflowDecision(formResetSession, formResetObservation)
+		assertAction(formResetSubmitDecision, 'click_element_by_index')
+		workflow.recordSearchWorkflowOutcome(formResetSession, formResetSubmitDecision, { success: true, output: '已搜索。' })
+		const formResetDecision = workflow.deriveSearchWorkflowDecision(formResetSession, formResetObservation)
+		assertAction(formResetDecision, 'click_element_by_index')
+		if (
+			formResetDecision.action.input.index !== 19 ||
+			formResetDecision.action.input.target_label !== label ||
+			formResetDecision.action.input.workflow_step !== 'reset_filters'
+		) {
+			throw new Error(`search workflow should recognize form/field reset controls near filter fields, got ${JSON.stringify(formResetDecision)}`)
+		}
+	}
+	for (const label of ['Clear selections', 'Deselect all', '清除选择', '取消全部选择']) {
+		const selectionResetSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+		const selectionResetObservation = {
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: 'Filters', fields: 'Category' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: 'Filters',
+					fields: [
+						{
+							index: 12,
+							label: 'Category',
+							fieldType: 'select',
+							valueState: 'empty',
+							role: 'combobox',
+							selectionControl: 'select',
+							optionLabels: ['Active', 'Pending'],
+							region: 'content',
+							rect: { left: 80, top: 40, width: 180, height: 32 },
+						},
+					],
+				},
+			],
+			actions: [
+				{ index: 18, actionIntent: 'button', label: 'Search', region: 'content', rect: { left: 280, top: 42, width: 76, height: 32 } },
+				{ index: 19, actionIntent: 'button', label, region: 'content', rect: { left: 364, top: 42, width: 138, height: 32 } },
+			],
+			tables: [
+				{ headers: ['Category', 'State'], rows: [['Active', 'Visible']] },
+			],
+		}
+		const selectionFillDecision = workflow.deriveSearchWorkflowDecision(selectionResetSession, selectionResetObservation)
+		assertAction(selectionFillDecision, 'choose_dropdown_option')
+		workflow.recordSearchWorkflowOutcome(selectionResetSession, selectionFillDecision, { success: true, output: '已选择。' })
+		const selectionSubmitDecision = workflow.deriveSearchWorkflowDecision(selectionResetSession, selectionResetObservation)
+		assertAction(selectionSubmitDecision, 'click_element_by_index')
+		workflow.recordSearchWorkflowOutcome(selectionResetSession, selectionSubmitDecision, { success: true, output: '已搜索。' })
+		const selectionResetDecision = workflow.deriveSearchWorkflowDecision(selectionResetSession, selectionResetObservation)
+		assertAction(selectionResetDecision, 'click_element_by_index')
+		if (
+			selectionResetDecision.action.input.index !== 19 ||
+			selectionResetDecision.action.input.target_label !== label ||
+			selectionResetDecision.action.input.workflow_step !== 'reset_filters'
+		) {
+			throw new Error(`search workflow should recognize selection reset controls near filter fields, got ${JSON.stringify(selectionResetDecision)}`)
+		}
+	}
+	const farSelectionResetSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const farSelectionResetObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: 'Filters', fields: 'Category' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: 'Filters',
+				fields: [
+					{
+						index: 12,
+						label: 'Category',
+						fieldType: 'select',
+						valueState: 'empty',
+						role: 'combobox',
+						selectionControl: 'select',
+						optionLabels: ['Active', 'Pending'],
+						region: 'content',
+						rect: { left: 80, top: 40, width: 180, height: 32 },
+					},
+				],
+			},
+		],
+		actions: [
+			{ index: 18, actionIntent: 'button', label: 'Search', region: 'content', rect: { left: 280, top: 42, width: 76, height: 32 } },
+			{ index: 99, actionIntent: 'button', label: 'Deselect all', region: 'content', rect: { left: 80, top: 760, width: 120, height: 32 } },
+		],
+		tables: [
+			{ headers: ['Category', 'State'], rows: [['Active', 'Visible']] },
+		],
+	}
+	const farSelectionFillDecision = workflow.deriveSearchWorkflowDecision(farSelectionResetSession, farSelectionResetObservation)
+	assertAction(farSelectionFillDecision, 'choose_dropdown_option')
+	workflow.recordSearchWorkflowOutcome(farSelectionResetSession, farSelectionFillDecision, { success: true, output: '已选择。' })
+	const farSelectionSubmitDecision = workflow.deriveSearchWorkflowDecision(farSelectionResetSession, farSelectionResetObservation)
+	assertAction(farSelectionSubmitDecision, 'click_element_by_index')
+	workflow.recordSearchWorkflowOutcome(farSelectionResetSession, farSelectionSubmitDecision, { success: true, output: '已搜索。' })
+	const farSelectionResetDecision = workflow.deriveSearchWorkflowDecision(farSelectionResetSession, farSelectionResetObservation)
+	assertAction(farSelectionResetDecision, 'done')
+	if (
+		farSelectionResetDecision.action.input.success !== false ||
+		farSelectionResetDecision.action.input.workflow_reset_action_missing !== true ||
+		String(farSelectionResetDecision.action.input.text || '').includes('Deselect all')
+	) {
+		throw new Error(`search workflow should not treat distant selection reset controls as filter reset actions, got ${JSON.stringify(farSelectionResetDecision)}`)
+	}
 	const hintedResetSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const hintedResetObservation = {
 		panels: [
@@ -17813,6 +21092,122 @@ function assertSearchWorkflowBehavior() {
 		!String(missingResetDoneDecision.action.input.workflow_result_summary || '').includes('公司名称=通过')
 	) {
 		throw new Error(`search workflow should mark field-clear fallback as completing the current search field, got ${JSON.stringify(missingResetDoneDecision)}`)
+	}
+	const pseudoTextDateResetSession = {
+		task: 'Test every filter field',
+		history: [],
+		workflowState: {
+			search: {
+				version: 6,
+				phase: 'awaiting_reset',
+				activeFieldKey: 'index:27',
+				lastSearchedFieldKey: 'index:27',
+				fieldOrder: ['index:27'],
+				completedKeys: [],
+				skippedKeys: [],
+				resetCompletedKeys: [],
+				fields: {
+					'index:27': {
+						key: 'index:27',
+						index: 27,
+						label: 'Date range',
+						fieldType: 'unknown',
+						lastTestValue: '2026-06-01..2026-06-03',
+						lastValueSource: 'table_sample',
+					},
+				},
+				resultsByKey: {},
+				clearRetryAttemptsByKey: {},
+			},
+		},
+	}
+	const pseudoTextDateResetObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: 'Filters', fields: 'Date range' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: 'Filters',
+				fields: [
+					{ index: 27, label: 'Date range', placeholder: 'Start date - End date', fieldType: 'unknown', valueState: 'filled:2026-06-01 - 2026-06-03', role: 'textbox', type: 'text', region: 'content' },
+				],
+			},
+		],
+		actions: [
+			{ index: 18, actionIntent: 'search', label: 'Search', region: 'content' },
+		],
+		tables: [
+			{ headers: ['Date range', 'Name'], rows: [['2026-06-02', 'Sample']] },
+		],
+	}
+	const pseudoTextDateResetDecision = workflow.deriveSearchWorkflowDecision(pseudoTextDateResetSession, pseudoTextDateResetObservation)
+	assertAction(pseudoTextDateResetDecision, 'done')
+	if (
+		pseudoTextDateResetDecision.action.input.success !== false ||
+		pseudoTextDateResetDecision.action.input.workflow_reset_action_missing !== true ||
+		pseudoTextDateResetDecision.action.input.workflow_reset_context !== 'after_submit' ||
+		String(pseudoTextDateResetDecision.action.input.text || '').includes('字段级清空')
+	) {
+		throw new Error(`search workflow should not field-clear date/time pickers exposed as text inputs, got ${JSON.stringify(pseudoTextDateResetDecision)}`)
+	}
+	const pseudoTextSelectResetSession = {
+		task: 'Test every filter field',
+		history: [],
+		workflowState: {
+			search: {
+				version: 6,
+				phase: 'awaiting_reset',
+				activeFieldKey: 'index:28',
+				lastSearchedFieldKey: 'index:28',
+				fieldOrder: ['index:28'],
+				completedKeys: [],
+				skippedKeys: [],
+				resetCompletedKeys: [],
+				fields: {
+					'index:28': {
+						key: 'index:28',
+						index: 28,
+						label: 'Status',
+						fieldType: 'unknown',
+						lastTestValue: 'Active',
+						lastValueSource: 'table_sample',
+					},
+				},
+				resultsByKey: {},
+				clearRetryAttemptsByKey: {},
+			},
+		},
+	}
+	const pseudoTextSelectResetObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: 'Filters', fields: 'Status' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: 'Filters',
+				fields: [
+					{ index: 28, label: 'Status', placeholder: 'Select status', fieldType: 'unknown', valueState: 'filled:Active', role: 'textbox', type: 'text', region: 'content', className: 'select-trigger' },
+				],
+			},
+		],
+		actions: [
+			{ index: 18, actionIntent: 'search', label: 'Search', region: 'content' },
+		],
+		tables: [
+			{ headers: ['Status', 'Name'], rows: [['Active', 'Sample']] },
+		],
+	}
+	const pseudoTextSelectResetDecision = workflow.deriveSearchWorkflowDecision(pseudoTextSelectResetSession, pseudoTextSelectResetObservation)
+	assertAction(pseudoTextSelectResetDecision, 'done')
+	if (
+		pseudoTextSelectResetDecision.action.input.success !== false ||
+		pseudoTextSelectResetDecision.action.input.workflow_reset_action_missing !== true ||
+		pseudoTextSelectResetDecision.action.input.workflow_reset_context !== 'after_submit' ||
+		String(pseudoTextSelectResetDecision.action.input.text || '').includes('字段级清空')
+	) {
+		throw new Error(`search workflow should not field-clear selection widgets exposed as text inputs, got ${JSON.stringify(pseudoTextSelectResetDecision)}`)
 	}
 	const ineffectiveResetAfterSubmitSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const ineffectiveResetInitialObservation = {
@@ -17988,13 +21383,13 @@ function assertSearchWorkflowBehavior() {
 				fieldOrder: ['index:12'],
 				completedKeys: [],
 				fields: {
-					'index:12': {
-						key: 'index:12',
-						index: 12,
-						label: '公司名称',
-						lastTestValue: 'llm自然语言识别新增客户2',
-						lastValueSource: 'table_sample',
-					},
+						'index:12': {
+							key: 'index:12',
+							index: 12,
+							label: '公司名称',
+							lastTestValue: 'llm自然语言识别新增记录2',
+							lastValueSource: 'table_sample',
+						},
 				},
 				resultsByKey: {},
 			},
@@ -18017,18 +21412,18 @@ function assertSearchWorkflowBehavior() {
 			{ index: 18, actionIntent: 'search', label: '搜索', region: 'content' },
 			{ index: 19, actionIntent: 'reset', label: '清空', region: 'content' },
 		],
-		tables: [],
-		rawCandidates: [
-			'<div class="el-table__row"><span class="cell">公司名称：llm自然语言识别新增客户2</span><span class="cell">操作 详情 删除</span></div>',
-		],
+			tables: [],
+			rawCandidates: [
+				'<div class="el-table__row"><span class="cell">公司名称：llm自然语言识别新增记录2</span><span class="cell">操作 详情 删除</span></div>',
+			],
 	}
 	const rawTextRowResetDecision = workflow.deriveSearchWorkflowDecision(rawTextRowResultSession, rawTextRowResultObservation)
 	assertAction(rawTextRowResetDecision, 'click_element_by_index')
 	if (
-		rawTextRowResetDecision.action.input.workflow_result_status !== 'passed_match' ||
-		!String(rawTextRowResetDecision.action.input.workflow_result_summary || '').includes('未拿到结构化表格摘要') ||
-		!String(rawTextRowResetDecision.action.input.workflow_result_summary || '').includes('llm自然语言识别新增客户2')
-	) {
+			rawTextRowResetDecision.action.input.workflow_result_status !== 'passed_match' ||
+			!String(rawTextRowResetDecision.action.input.workflow_result_summary || '').includes('未拿到结构化表格摘要') ||
+			!String(rawTextRowResetDecision.action.input.workflow_result_summary || '').includes('llm自然语言识别新增记录2')
+		) {
 		throw new Error(`search workflow should treat table-like raw rows as evidence even when data text contains create/action words, got ${JSON.stringify(rawTextRowResetDecision)}`)
 	}
 	const dateRangeResultSession = {
@@ -18793,6 +22188,168 @@ function assertSearchWorkflowBehavior() {
 	) {
 		throw new Error(`selection search fields should prefer a real option matching current table data, got ${JSON.stringify(sampledNativeOptionDecision)}`)
 	}
+	const sampledCascaderPathDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '区域' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 7, label: '区域', fieldType: 'cascader', selectionControl: 'cascader', valueState: 'empty', role: 'combobox', region: 'content' },
+					],
+				},
+			],
+			actions: [{ index: 8, actionIntent: 'search', label: '搜索', region: 'content' }],
+			tables: [
+				{ headers: ['区域', '名称'], rows: [['江苏省 / 南京市 / 江宁区', '星火科技有限公司']] },
+			],
+		}
+	)
+	assertAction(sampledCascaderPathDecision, 'select_cascader_path')
+	if (
+		JSON.stringify(sampledCascaderPathDecision.action.input.path) !== JSON.stringify(['江苏省', '南京市', '江宁区']) ||
+		sampledCascaderPathDecision.action.input.workflow_value_source !== 'table_sample' ||
+		sampledCascaderPathDecision.action.input.workflow_test_value !== '江苏省 / 南京市 / 江宁区' ||
+		Object.prototype.hasOwnProperty.call(sampledCascaderPathDecision.action.input, 'text')
+	) {
+		throw new Error(`cascader-like search fields should use table sample paths with select_cascader_path, got ${JSON.stringify(sampledCascaderPathDecision)}`)
+	}
+	const dashedSampledCascaderPathDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '区域' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 7, label: '区域', fieldType: 'cascader', selectionControl: 'cascader', valueState: 'empty', role: 'combobox', region: 'content' },
+					],
+				},
+			],
+			actions: [{ index: 8, actionIntent: 'search', label: '搜索', region: 'content' }],
+			tables: [
+				{ headers: ['区域', '名称'], rows: [['江苏省-南京市-江宁区', '星火科技有限公司']] },
+			],
+		}
+	)
+	assertAction(dashedSampledCascaderPathDecision, 'select_cascader_path')
+	if (
+		JSON.stringify(dashedSampledCascaderPathDecision.action.input.path) !== JSON.stringify(['江苏省', '南京市', '江宁区']) ||
+		dashedSampledCascaderPathDecision.action.input.workflow_value_source !== 'table_sample' ||
+		dashedSampledCascaderPathDecision.action.input.workflow_test_value !== '江苏省-南京市-江宁区'
+	) {
+		throw new Error(`cascader-like search fields should parse dashed table sample paths generically, got ${JSON.stringify(dashedSampledCascaderPathDecision)}`)
+	}
+	const explicitCascaderTaskDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项，区域为江苏南京江宁', latestTask: '测试搜索区域每一个搜索项，区域为江苏南京江宁', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '区域' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 7, label: '区域', fieldType: 'cascader', selectionControl: 'cascader', valueState: 'empty', role: 'combobox', region: 'content' },
+					],
+				},
+			],
+			actions: [{ index: 8, actionIntent: 'search', label: '搜索', region: 'content' }],
+		}
+	)
+	assertAction(explicitCascaderTaskDecision, 'select_cascader_path')
+	if (
+		JSON.stringify(explicitCascaderTaskDecision.action.input.path) !== JSON.stringify(['江苏南京江宁']) ||
+		explicitCascaderTaskDecision.action.input.workflow_value_source !== 'task_value' ||
+		explicitCascaderTaskDecision.action.input.workflow_test_value !== '江苏南京江宁'
+	) {
+		throw new Error(`cascader-like search fields should use task-explicit compact values as generic cascader paths, got ${JSON.stringify(explicitCascaderTaskDecision)}`)
+	}
+	const compactCascaderOutcomeSession = {
+		task: '测试搜索区域每一个搜索项，层级为一级二级三级',
+		latestTask: '测试搜索区域每一个搜索项，层级为一级二级三级',
+		history: [],
+		workflowState: {},
+	}
+	const compactCascaderOutcomeObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '层级' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: '搜索/筛选区域',
+				fields: [
+					{ index: 7, label: '层级', fieldType: 'cascader', selectionControl: 'cascader', valueState: 'empty', role: 'combobox', region: 'content' },
+				],
+			},
+		],
+		actions: [{ index: 8, actionIntent: 'search', label: '搜索', region: 'content' }],
+	}
+	const compactCascaderOutcomeDecision = workflow.deriveSearchWorkflowDecision(compactCascaderOutcomeSession, compactCascaderOutcomeObservation)
+	assertAction(compactCascaderOutcomeDecision, 'select_cascader_path')
+	workflow.recordSearchWorkflowOutcome(compactCascaderOutcomeSession, compactCascaderOutcomeDecision, {
+		success: true,
+		output: '已按紧凑目标选择级联选项：一级 > 二级 > 三级。',
+		meta: {
+			outcome: {
+				kind: 'value_changed',
+				progress: true,
+				requestedPath: ['一级二级三级'],
+				selectedPath: ['一级', '二级', '三级'],
+				selectedLabels: ['一级', '二级', '三级'],
+			},
+		},
+	})
+	const compactCascaderStored = compactCascaderOutcomeSession.workflowState?.search?.fields?.['index:7'] || {}
+	if (
+		compactCascaderStored.lastTestValue !== '一级 / 二级 / 三级' ||
+		!String(compactCascaderStored.lastValueBasis || '').includes('动作结果返回已选路径')
+	) {
+		throw new Error(`search workflow should replace compact cascader request values with selected path evidence, got ${JSON.stringify(compactCascaderStored)}`)
+	}
+	const compactCascaderSubmitDecision = workflow.deriveSearchWorkflowDecision(compactCascaderOutcomeSession, compactCascaderOutcomeObservation)
+	assertAction(compactCascaderSubmitDecision, 'click_element_by_index')
+	if (
+		compactCascaderSubmitDecision.action.input.workflow_step !== 'submit_search' ||
+		compactCascaderSubmitDecision.action.input.workflow_test_value !== '一级 / 二级 / 三级'
+	) {
+		throw new Error(`search submit should carry selected cascader path evidence, got ${JSON.stringify(compactCascaderSubmitDecision)}`)
+	}
+	const dashedExplicitCascaderTaskDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项，区域为江苏省-南京市-江宁区', latestTask: '测试搜索区域每一个搜索项，区域为江苏省-南京市-江宁区', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '区域' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 7, label: '区域', fieldType: 'cascader', selectionControl: 'cascader', valueState: 'empty', role: 'combobox', region: 'content' },
+					],
+				},
+			],
+			actions: [{ index: 8, actionIntent: 'search', label: '搜索', region: 'content' }],
+		}
+	)
+	assertAction(dashedExplicitCascaderTaskDecision, 'select_cascader_path')
+	if (
+		JSON.stringify(dashedExplicitCascaderTaskDecision.action.input.path) !== JSON.stringify(['江苏省', '南京市', '江宁区']) ||
+		dashedExplicitCascaderTaskDecision.action.input.workflow_value_source !== 'task_value' ||
+		dashedExplicitCascaderTaskDecision.action.input.workflow_test_value !== '江苏省-南京市-江宁区'
+	) {
+		throw new Error(`cascader-like search fields should parse dashed task paths generically, got ${JSON.stringify(dashedExplicitCascaderTaskDecision)}`)
+	}
 	const decoratedOptionDecision = workflow.deriveSearchWorkflowDecision(
 		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
 		{
@@ -18955,6 +22512,74 @@ function assertSearchWorkflowBehavior() {
 		!String(mismatchedOptionDecision.action.input.text || '').includes('可见候选')
 	) {
 		throw new Error(`selection search fields should stop when table samples do not match visible options, got ${JSON.stringify(mismatchedOptionDecision)}`)
+	}
+	const activePopupDropdownDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '资料等级' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{
+							index: 26,
+							label: '资料等级',
+							fieldType: 'select',
+							valueState: 'empty',
+							role: 'combobox',
+							selectionControl: 'dropdown',
+							expandedState: 'expanded',
+							region: 'content',
+							rect: { left: 20, top: 80, width: 180, height: 36 },
+						},
+					],
+				},
+			],
+			actions: [{ index: 8, actionIntent: 'search', label: '搜索', region: 'content' }],
+			options: [
+				{
+					index: 91,
+					region: 'popover',
+					role: 'option',
+					label: '重要',
+					newSinceLastObservation: true,
+					popupHints: 'popupRole=listbox',
+					rect: { left: 760, top: 260, width: 180, height: 32 },
+				},
+				{
+					index: 92,
+					region: 'popover',
+					role: 'option',
+					label: '核心',
+					newSinceLastObservation: true,
+					popupHints: 'popupRole=listbox',
+					rect: { left: 760, top: 292, width: 180, height: 32 },
+				},
+				{
+					index: 93,
+					region: 'popover',
+					role: 'option',
+					label: '潜力',
+					newSinceLastObservation: false,
+					popupHints: 'popupRole=listbox',
+					rect: { left: 20, top: 640, width: 180, height: 32 },
+				},
+			],
+			tables: [
+				{ headers: ['资料等级', '资料名称'], rows: [['核心', '星火科技有限公司']] },
+			],
+		}
+	)
+	assertAction(activePopupDropdownDecision, 'choose_dropdown_option')
+	if (
+		activePopupDropdownDecision.action.input.index !== 26 ||
+		activePopupDropdownDecision.action.input.text !== '核心' ||
+		activePopupDropdownDecision.action.input.workflow_value_source !== 'table_sample'
+	) {
+		throw new Error(`search workflow should use active newly opened ownerless popup candidates for expanded fields, got ${JSON.stringify(activePopupDropdownDecision)}`)
 	}
 	const sampledDropdownSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const sampledDropdownObservation = {
@@ -19198,6 +22823,48 @@ function assertSearchWorkflowBehavior() {
 	) {
 		throw new Error(`timerange fields should match real time candidates from table samples instead of being forced into date-range selection, got ${JSON.stringify(timeRangeChoiceDecision)}`)
 	}
+	const timeRangeNormalizedSampleSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const timeRangeNormalizedSampleObservation = {
+		...timeRangeObservation,
+		tables: [
+			{ headers: ['时间段', '名称'], rows: [['9:00', '样本记录']] },
+		],
+	}
+	const timeRangeNormalizedOpen = workflow.deriveSearchWorkflowDecision(timeRangeNormalizedSampleSession, timeRangeNormalizedSampleObservation)
+	assertAction(timeRangeNormalizedOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(timeRangeNormalizedSampleSession, timeRangeNormalizedOpen, {
+		success: true,
+		output: '已展开下拉框索引 18。',
+		meta: { outcome: { kind: 'options_visible', visibleOptions: ['09:00', '10:00'] } },
+	})
+	const timeRangeNormalizedChoice = workflow.deriveSearchWorkflowDecision(timeRangeNormalizedSampleSession, timeRangeNormalizedSampleObservation)
+	assertAction(timeRangeNormalizedChoice, 'choose_dropdown_option')
+	if (
+		timeRangeNormalizedChoice.action.input.text !== '09:00' ||
+		timeRangeNormalizedChoice.action.input.workflow_value_source !== 'table_sample'
+	) {
+		throw new Error(`timerange search fields should normalize human time samples such as 9:00 before matching visible options, got ${JSON.stringify(timeRangeNormalizedChoice)}`)
+	}
+	const timeRangeTaskSession = { task: '测试搜索区域每一个搜索项，时间段设置为 9:00', history: [], workflowState: {} }
+	const timeRangeTaskObservation = {
+		...timeRangeObservation,
+		tables: [],
+	}
+	const timeRangeTaskOpen = workflow.deriveSearchWorkflowDecision(timeRangeTaskSession, timeRangeTaskObservation)
+	assertAction(timeRangeTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(timeRangeTaskSession, timeRangeTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 18。',
+		meta: { outcome: { kind: 'options_visible', visibleOptions: ['09:00', '10:00'] } },
+	})
+	const timeRangeTaskChoice = workflow.deriveSearchWorkflowDecision(timeRangeTaskSession, timeRangeTaskObservation)
+	assertAction(timeRangeTaskChoice, 'choose_dropdown_option')
+	if (
+		timeRangeTaskChoice.action.input.text !== '09:00' ||
+		timeRangeTaskChoice.action.input.workflow_value_source !== 'task_value'
+	) {
+		throw new Error(`timerange search fields should normalize explicit task time values such as 9:00 before matching visible options, got ${JSON.stringify(timeRangeTaskChoice)}`)
+	}
 	const separatedDateRangeSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const separatedDateRangeObservation = {
 		...dateRangeObservation,
@@ -19299,6 +22966,301 @@ function assertSearchWorkflowBehavior() {
 	) {
 		throw new Error(`daterange search fields should form a real range anchored to table date samples, got ${JSON.stringify(sampledDateRangeDecision)}`)
 	}
+	const explicitDateRangeSampleSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const explicitDateRangeSampleObservation = {
+		...dateRangeObservation,
+		tables: [
+			{ headers: ['创建时间', '资料名称'], rows: [['2026-06-02 至 2026-06-05', '星火科技有限公司']] },
+		],
+	}
+	const explicitDateRangeOpenDecision = workflow.deriveSearchWorkflowDecision(explicitDateRangeSampleSession, explicitDateRangeSampleObservation)
+	assertAction(explicitDateRangeOpenDecision, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(explicitDateRangeSampleSession, explicitDateRangeOpenDecision, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05'],
+			},
+		},
+	})
+	const explicitDateRangeDecision = workflow.deriveSearchWorkflowDecision(explicitDateRangeSampleSession, explicitDateRangeSampleObservation)
+	assertAction(explicitDateRangeDecision, 'choose_dropdown_option')
+	if (
+		explicitDateRangeDecision.action.input.text !== '2026-06-02..2026-06-05' ||
+		explicitDateRangeDecision.action.input.workflow_value_source !== 'table_sample' ||
+		!String(explicitDateRangeDecision.action.input.workflow_value_basis || '').includes('2026-06-02 至 2026-06-05')
+	) {
+		throw new Error(`daterange fields should preserve explicit table date ranges instead of shrinking them to adjacent dates, got ${JSON.stringify(explicitDateRangeDecision)}`)
+	}
+	const compactExplicitRangeSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const compactExplicitRangeObservation = {
+		...dateRangeObservation,
+		tables: [
+			{ headers: ['创建时间', '资料名称'], rows: [['20260602-20260605', '星火科技有限公司']] },
+		],
+	}
+	const compactExplicitRangeOpen = workflow.deriveSearchWorkflowDecision(compactExplicitRangeSession, compactExplicitRangeObservation)
+	assertAction(compactExplicitRangeOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(compactExplicitRangeSession, compactExplicitRangeOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05'],
+			},
+		},
+	})
+	const compactExplicitRangeDecision = workflow.deriveSearchWorkflowDecision(compactExplicitRangeSession, compactExplicitRangeObservation)
+	assertAction(compactExplicitRangeDecision, 'choose_dropdown_option')
+	if (
+		compactExplicitRangeDecision.action.input.text !== '2026-06-02..2026-06-05' ||
+		compactExplicitRangeDecision.action.input.workflow_value_source !== 'table_sample' ||
+		!String(compactExplicitRangeDecision.action.input.workflow_value_basis || '').includes('20260602-20260605')
+	) {
+		throw new Error(`daterange fields should preserve compact explicit table ranges instead of choosing adjacent dates, got ${JSON.stringify(compactExplicitRangeDecision)}`)
+	}
+	const dottedDateSampleSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const dottedDateSampleObservation = {
+		...dateRangeObservation,
+		tables: [
+			{ headers: ['创建时间', '资料名称'], rows: [['2026.06.02', '星火科技有限公司']] },
+		],
+	}
+	const dottedDateOpenDecision = workflow.deriveSearchWorkflowDecision(dottedDateSampleSession, dottedDateSampleObservation)
+	assertAction(dottedDateOpenDecision, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(dottedDateSampleSession, dottedDateOpenDecision, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-01', '2026-06-02', '2026-06-03'],
+			},
+		},
+	})
+	const dottedDateRangeDecision = workflow.deriveSearchWorkflowDecision(dottedDateSampleSession, dottedDateSampleObservation)
+	assertAction(dottedDateRangeDecision, 'choose_dropdown_option')
+	if (
+		dottedDateRangeDecision.action.input.text !== '2026-06-02..2026-06-03' ||
+		dottedDateRangeDecision.action.input.workflow_value_source !== 'table_sample' ||
+		!String(dottedDateRangeDecision.action.input.workflow_value_basis || '').includes('2026-06-02')
+	) {
+		throw new Error(`daterange fields should normalize dotted table date samples before matching real candidates, got ${JSON.stringify(dottedDateRangeDecision)}`)
+	}
+	const compactDateSampleSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const compactDateSampleObservation = {
+		...dateRangeObservation,
+		tables: [
+			{ headers: ['创建时间', '资料名称'], rows: [['20260602', '星火科技有限公司']] },
+		],
+	}
+	const compactDateOpenDecision = workflow.deriveSearchWorkflowDecision(compactDateSampleSession, compactDateSampleObservation)
+	assertAction(compactDateOpenDecision, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(compactDateSampleSession, compactDateOpenDecision, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-01', '2026-06-02', '2026-06-03'],
+			},
+		},
+	})
+	const compactDateRangeDecision = workflow.deriveSearchWorkflowDecision(compactDateSampleSession, compactDateSampleObservation)
+	assertAction(compactDateRangeDecision, 'choose_dropdown_option')
+	if (
+		compactDateRangeDecision.action.input.text !== '2026-06-02..2026-06-03' ||
+		compactDateRangeDecision.action.input.workflow_value_source !== 'table_sample' ||
+		!String(compactDateRangeDecision.action.input.workflow_value_basis || '').includes('2026-06-02')
+	) {
+		throw new Error(`daterange fields should normalize compact table date samples before matching real candidates, got ${JSON.stringify(compactDateRangeDecision)}`)
+	}
+	const dottedDateTaskSession = { task: '测试搜索区域每一个搜索项，创建时间为 2026.06.02', history: [], workflowState: {} }
+	const dottedDateTaskObservation = {
+		...dateRangeObservation,
+		tables: [],
+	}
+	const dottedDateTaskOpen = workflow.deriveSearchWorkflowDecision(dottedDateTaskSession, dottedDateTaskObservation)
+	assertAction(dottedDateTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(dottedDateTaskSession, dottedDateTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-01', '2026-06-02', '2026-06-03'],
+			},
+		},
+	})
+	const dottedDateTaskChoice = workflow.deriveSearchWorkflowDecision(dottedDateTaskSession, dottedDateTaskObservation)
+	assertAction(dottedDateTaskChoice, 'choose_dropdown_option')
+	if (
+		dottedDateTaskChoice.action.input.text !== '2026-06-02..2026-06-03' ||
+		dottedDateTaskChoice.action.input.workflow_value_source !== 'task_value' ||
+		!String(dottedDateTaskChoice.action.input.workflow_value_basis || '').includes('2026-06-02')
+	) {
+		throw new Error(`daterange fields should normalize dotted task date values before matching real candidates, got ${JSON.stringify(dottedDateTaskChoice)}`)
+	}
+	const compactDateTaskSession = { task: '测试搜索区域每一个搜索项，创建时间为 20260602', history: [], workflowState: {} }
+	const compactDateTaskObservation = {
+		...dateRangeObservation,
+		tables: [],
+	}
+	const compactDateTaskOpen = workflow.deriveSearchWorkflowDecision(compactDateTaskSession, compactDateTaskObservation)
+	assertAction(compactDateTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(compactDateTaskSession, compactDateTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-01', '2026-06-02', '2026-06-03'],
+			},
+		},
+	})
+	const compactDateTaskChoice = workflow.deriveSearchWorkflowDecision(compactDateTaskSession, compactDateTaskObservation)
+	assertAction(compactDateTaskChoice, 'choose_dropdown_option')
+	if (
+		compactDateTaskChoice.action.input.text !== '2026-06-02..2026-06-03' ||
+		compactDateTaskChoice.action.input.workflow_value_source !== 'task_value' ||
+		!String(compactDateTaskChoice.action.input.workflow_value_basis || '').includes('2026-06-02')
+	) {
+		throw new Error(`daterange fields should normalize compact task date values before matching real candidates, got ${JSON.stringify(compactDateTaskChoice)}`)
+	}
+	const explicitDateRangeTaskSession = { task: '测试搜索区域每一个搜索项，创建时间从 2026-06-02 到 2026-06-05', history: [], workflowState: {} }
+	const explicitDateRangeTaskObservation = {
+		...dateRangeObservation,
+		tables: [],
+	}
+	const explicitDateRangeTaskOpen = workflow.deriveSearchWorkflowDecision(explicitDateRangeTaskSession, explicitDateRangeTaskObservation)
+	assertAction(explicitDateRangeTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(explicitDateRangeTaskSession, explicitDateRangeTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05'],
+			},
+		},
+	})
+	const explicitDateRangeTaskChoice = workflow.deriveSearchWorkflowDecision(explicitDateRangeTaskSession, explicitDateRangeTaskObservation)
+	assertAction(explicitDateRangeTaskChoice, 'choose_dropdown_option')
+	if (
+		explicitDateRangeTaskChoice.action.input.text !== '2026-06-02..2026-06-05' ||
+		explicitDateRangeTaskChoice.action.input.workflow_value_source !== 'task_value' ||
+		!String(explicitDateRangeTaskChoice.action.input.workflow_value_basis || '').includes('2026-06-02 到 2026-06-05')
+	) {
+		throw new Error(`daterange fields should preserve explicit task date ranges instead of shrinking them to adjacent dates, got ${JSON.stringify(explicitDateRangeTaskChoice)}`)
+	}
+	const englishDateRangeTaskSession = { task: '测试搜索区域每一个搜索项，创建时间 from 2026-06-02 to 2026-06-05', history: [], workflowState: {} }
+	const englishDateRangeTaskObservation = {
+		...dateRangeObservation,
+		tables: [],
+	}
+	const englishDateRangeTaskOpen = workflow.deriveSearchWorkflowDecision(englishDateRangeTaskSession, englishDateRangeTaskObservation)
+	assertAction(englishDateRangeTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(englishDateRangeTaskSession, englishDateRangeTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05'],
+			},
+		},
+	})
+	const englishDateRangeTaskChoice = workflow.deriveSearchWorkflowDecision(englishDateRangeTaskSession, englishDateRangeTaskObservation)
+	assertAction(englishDateRangeTaskChoice, 'choose_dropdown_option')
+	if (
+		englishDateRangeTaskChoice.action.input.text !== '2026-06-02..2026-06-05' ||
+		englishDateRangeTaskChoice.action.input.workflow_value_source !== 'task_value' ||
+		!String(englishDateRangeTaskChoice.action.input.workflow_value_basis || '').includes('2026-06-02 to 2026-06-05')
+	) {
+		throw new Error(`daterange fields should preserve English from/to task date ranges, got ${JSON.stringify(englishDateRangeTaskChoice)}`)
+	}
+	const betweenDateRangeTaskSession = { task: '测试搜索区域每一个搜索项，创建时间 between 2026-06-02 and 2026-06-05', history: [], workflowState: {} }
+	const betweenDateRangeTaskObservation = {
+		...dateRangeObservation,
+		tables: [],
+	}
+	const betweenDateRangeTaskOpen = workflow.deriveSearchWorkflowDecision(betweenDateRangeTaskSession, betweenDateRangeTaskObservation)
+	assertAction(betweenDateRangeTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(betweenDateRangeTaskSession, betweenDateRangeTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05'],
+			},
+		},
+	})
+	const betweenDateRangeTaskChoice = workflow.deriveSearchWorkflowDecision(betweenDateRangeTaskSession, betweenDateRangeTaskObservation)
+	assertAction(betweenDateRangeTaskChoice, 'choose_dropdown_option')
+	if (
+		betweenDateRangeTaskChoice.action.input.text !== '2026-06-02..2026-06-05' ||
+		betweenDateRangeTaskChoice.action.input.workflow_value_source !== 'task_value' ||
+		!String(betweenDateRangeTaskChoice.action.input.workflow_value_basis || '').includes('2026-06-02 and 2026-06-05')
+	) {
+		throw new Error(`daterange fields should preserve English between/and task date ranges, got ${JSON.stringify(betweenDateRangeTaskChoice)}`)
+	}
+	const compactDateRangeTaskSession = { task: '测试搜索区域每一个搜索项，创建时间为 20260602-20260605', history: [], workflowState: {} }
+	const compactDateRangeTaskObservation = {
+		...dateRangeObservation,
+		tables: [],
+	}
+	const compactDateRangeTaskOpen = workflow.deriveSearchWorkflowDecision(compactDateRangeTaskSession, compactDateRangeTaskObservation)
+	assertAction(compactDateRangeTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(compactDateRangeTaskSession, compactDateRangeTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05'],
+			},
+		},
+	})
+	const compactDateRangeTaskChoice = workflow.deriveSearchWorkflowDecision(compactDateRangeTaskSession, compactDateRangeTaskObservation)
+	assertAction(compactDateRangeTaskChoice, 'choose_dropdown_option')
+	if (
+		compactDateRangeTaskChoice.action.input.text !== '2026-06-02..2026-06-05' ||
+		compactDateRangeTaskChoice.action.input.workflow_value_source !== 'task_value' ||
+		!String(compactDateRangeTaskChoice.action.input.workflow_value_basis || '').includes('20260602-20260605')
+	) {
+		throw new Error(`daterange fields should preserve compact task date ranges instead of choosing adjacent dates, got ${JSON.stringify(compactDateRangeTaskChoice)}`)
+	}
+	const invalidDateSampleSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const invalidDateSampleObservation = {
+		...dateRangeObservation,
+		tables: [
+			{ headers: ['创建时间', '资料名称'], rows: [['2026-02-30', '星火科技有限公司']] },
+		],
+	}
+	const invalidDateOpenDecision = workflow.deriveSearchWorkflowDecision(invalidDateSampleSession, invalidDateSampleObservation)
+	assertAction(invalidDateOpenDecision, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(invalidDateSampleSession, invalidDateOpenDecision, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-02-28', '2026-03-01'],
+			},
+		},
+	})
+	const invalidDateDecision = workflow.deriveSearchWorkflowDecision(invalidDateSampleSession, invalidDateSampleObservation)
+	assertAction(invalidDateDecision, 'done')
+	if (
+		invalidDateDecision.action.input.success !== false ||
+		invalidDateDecision.action.input.workflow_missing_table_samples !== true
+	) {
+		throw new Error(`daterange fields should reject impossible full-date samples instead of selecting nearby candidates, got ${JSON.stringify(invalidDateDecision)}`)
+	}
 	const monthDayDateRangeSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const monthDayDateRangeObservation = {
 		...dateRangeObservation,
@@ -19326,6 +23288,87 @@ function assertSearchWorkflowBehavior() {
 		!String(monthDayDateRangeDecision.action.input.workflow_value_basis || '').includes('06-02')
 	) {
 		throw new Error(`daterange fields should infer the year for month/day table samples from visible real date candidates, got ${JSON.stringify(monthDayDateRangeDecision)}`)
+	}
+	const dottedMonthDayDateRangeSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const dottedMonthDayDateRangeObservation = {
+		...dateRangeObservation,
+		tables: [
+			{ headers: ['创建时间', '资料名称'], rows: [['06.02', '星火科技有限公司']] },
+		],
+	}
+	const dottedMonthDayDateOpenDecision = workflow.deriveSearchWorkflowDecision(dottedMonthDayDateRangeSession, dottedMonthDayDateRangeObservation)
+	assertAction(dottedMonthDayDateOpenDecision, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(dottedMonthDayDateRangeSession, dottedMonthDayDateOpenDecision, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-01', '2026-06-02', '2026-06-03'],
+			},
+		},
+	})
+	const dottedMonthDayDateRangeDecision = workflow.deriveSearchWorkflowDecision(dottedMonthDayDateRangeSession, dottedMonthDayDateRangeObservation)
+	assertAction(dottedMonthDayDateRangeDecision, 'choose_dropdown_option')
+	if (
+		dottedMonthDayDateRangeDecision.action.input.text !== '2026-06-02..2026-06-03' ||
+		dottedMonthDayDateRangeDecision.action.input.workflow_value_source !== 'table_sample' ||
+		!String(dottedMonthDayDateRangeDecision.action.input.workflow_value_basis || '').includes('06.02')
+	) {
+		throw new Error(`daterange fields should infer the year for dotted month/day table samples from visible real date candidates, got ${JSON.stringify(dottedMonthDayDateRangeDecision)}`)
+	}
+	const dottedMonthDayTaskSession = { task: '测试搜索区域每一个搜索项，创建时间为 06.02', history: [], workflowState: {} }
+	const dottedMonthDayTaskObservation = {
+		...dateRangeObservation,
+		tables: [],
+	}
+	const dottedMonthDayTaskOpen = workflow.deriveSearchWorkflowDecision(dottedMonthDayTaskSession, dottedMonthDayTaskObservation)
+	assertAction(dottedMonthDayTaskOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(dottedMonthDayTaskSession, dottedMonthDayTaskOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-06-01', '2026-06-02', '2026-06-03'],
+			},
+		},
+	})
+	const dottedMonthDayTaskChoice = workflow.deriveSearchWorkflowDecision(dottedMonthDayTaskSession, dottedMonthDayTaskObservation)
+	assertAction(dottedMonthDayTaskChoice, 'choose_dropdown_option')
+	if (
+		dottedMonthDayTaskChoice.action.input.text !== '2026-06-02..2026-06-03' ||
+		dottedMonthDayTaskChoice.action.input.workflow_value_source !== 'task_value' ||
+		!String(dottedMonthDayTaskChoice.action.input.workflow_value_basis || '').includes('06.02')
+	) {
+		throw new Error(`daterange fields should infer the year for dotted month/day task values from visible real date candidates, got ${JSON.stringify(dottedMonthDayTaskChoice)}`)
+	}
+	const invalidMonthDaySession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const invalidMonthDayObservation = {
+		...dateRangeObservation,
+		tables: [
+			{ headers: ['创建时间', '资料名称'], rows: [['02.30', '星火科技有限公司']] },
+		],
+	}
+	const invalidMonthDayOpen = workflow.deriveSearchWorkflowDecision(invalidMonthDaySession, invalidMonthDayObservation)
+	assertAction(invalidMonthDayOpen, 'open_dropdown')
+	workflow.recordSearchWorkflowOutcome(invalidMonthDaySession, invalidMonthDayOpen, {
+		success: true,
+		output: '已展开下拉框索引 7。',
+		meta: {
+			outcome: {
+				kind: 'options_visible',
+				visibleOptions: ['2026-02-28', '2026-03-01'],
+			},
+		},
+	})
+	const invalidMonthDayDecision = workflow.deriveSearchWorkflowDecision(invalidMonthDaySession, invalidMonthDayObservation)
+	assertAction(invalidMonthDayDecision, 'done')
+	if (
+		invalidMonthDayDecision.action.input.success !== false ||
+		invalidMonthDayDecision.action.input.workflow_missing_table_samples !== true
+	) {
+		throw new Error(`daterange fields should reject impossible month/day samples instead of selecting nearby candidates, got ${JSON.stringify(invalidMonthDayDecision)}`)
 	}
 	const zhMonthDayDateRangeSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const zhMonthDayDateRangeObservation = {
@@ -20104,8 +24147,15 @@ function assertObserverCapturesTableSummaries() {
 	if (!workflowSource.includes('function isNonDataTableSample') || !extractFunctionSource(workflowSource, 'isUsableTableSample').includes('isNonDataTableSample(text)')) {
 		throw new Error('search workflow should reject placeholder/loading/masked table samples before using them as search values')
 	}
-	if (!workflowSource.includes('NC_CONTROL_SEMANTICS') || !workflowSource.includes('function collectObservedOptionCandidatesForField') || !workflowSource.includes('collectUsableOptionCandidates(state, field, observation)')) {
-		throw new Error('search workflow should reuse generic control semantics to collect field-scoped visible options from the current observation')
+	if (
+		!workflowSource.includes('NC_CONTROL_SEMANTICS') ||
+		!workflowSource.includes('function collectObservedOptionCandidatesForField') ||
+		!workflowSource.includes('collectUsableOptionCandidates(state, field, observation)') ||
+		!workflowSource.includes('function collectActiveNewPopupOptionLabels') ||
+		!workflowSource.includes('collectActiveNewPopupItemsForTargets') ||
+		!read('naturalclick-extension/shared/control-semantics.js').includes('newSinceLastObservation')
+	) {
+		throw new Error('search workflow should reuse generic control semantics and active newly opened popup evidence to collect field-scoped visible options from the current observation')
 	}
 	if (!workflowSource.includes('textRowResultContainsValue') || !workflowSource.includes('unknown_result_pending')) {
 		throw new Error('search workflow should record submitted results and verify fallback table-like text rows')
@@ -20736,13 +24786,35 @@ function assertPlannerWorkflowRegistryBehavior() {
 
 function assertSessionLoopGuardRecordsWorkflowOutcome() {
 	const engine = read('naturalclick-extension/background/session-engine.js')
+	const loopGuard = read('naturalclick-extension/background/loop-guard.js')
+	const sidepanel = read('naturalclick-extension/sidepanel.js')
 	const loopGuardFn = extractFunctionSource(engine, 'recordLoopGuardReplan')
 	if (
 		!/recordWorkflowOutcome\s*\(\s*session\s*,\s*decision\s*,/.test(loopGuardFn) ||
 		!/success:\s*false/.test(loopGuardFn) ||
-		!/stage:\s*'loop_guard'/.test(loopGuardFn)
+		!/stage:\s*'loop_guard'/.test(loopGuardFn) ||
+		!/loopGuardKind/.test(loopGuardFn) ||
+		!/loopGuardGuidance/.test(loopGuardFn)
 	) {
 		throw new Error('loop guard replan should report blocked workflow actions back to the workflow registry')
+	}
+	if (
+		!loopGuard.includes('function classifyLoopGuardReason') ||
+		!loopGuard.includes('repeated_no_progress_action') ||
+		!loopGuard.includes('scroll_no_progress') ||
+		!loopGuard.includes('repeated_wait') ||
+		!engine.includes('classifyLoopGuardReason')
+	) {
+		throw new Error('loop guard should classify blocked repeat patterns with generic recovery guidance')
+	}
+	if (
+		!sidepanel.includes('LOOP_GUARD_KIND_LABELS') ||
+		!sidepanel.includes('countLoopGuardKinds') ||
+		!sidepanel.includes('getLastLoopGuardTrace') ||
+		!sidepanel.includes('循环保护类型：${loopGuardSummary}') ||
+		!sidepanel.includes('最近循环保护建议：${clampText(lastLoopGuard.guidance, 500)}')
+	) {
+		throw new Error('sidepanel should aggregate structured loop guard diagnostics in summaries and exports')
 	}
 }
 
@@ -20773,8 +24845,16 @@ function assertStructuredActionOutcomeContract() {
 		progress: false,
 		requestedText: 'WEB',
 		visibleOptions: ['企业端', '后台端'],
+		requestedPath: ['A'],
+		selectedPath: ['A', 'B'],
 	})
-	if (!summary.includes('动作结果: failed') || !summary.includes('requested="WEB"') || !summary.includes('candidates="企业端|后台端"')) {
+	if (
+		!summary.includes('动作结果: failed') ||
+		!summary.includes('requested="WEB"') ||
+		!summary.includes('candidates="企业端|后台端"') ||
+		!summary.includes('requestedPath="A"') ||
+		!summary.includes('selectedPath="A|B"')
+	) {
 		throw new Error(`action contract should format structured outcome summaries, got ${summary}`)
 	}
 }
@@ -21240,6 +25320,7 @@ function assertActionOptionsSupportDatePickerCells() {
 	const rowFn = extractFunctionSource(actionOptions, 'findOptionRow')
 	const comparableFn = extractFunctionSource(actionOptions, 'normalizeComparableText')
 	const parseDateTextFn = extractFunctionSource(actionOptions, 'parseDateText')
+	const formatDatePartsFn = extractFunctionSource(actionOptions, 'formatDateParts')
 	const requestedDateTextsFn = extractFunctionSource(actionOptions, 'extractRequestedDateTexts')
 	const associationFn = extractFunctionSource(actionOptions, 'isOptionAssociatedWithField')
 	const dateDomAssociationFn = extractFunctionSource(actionOptions, 'scoreDomDateOptionFieldAssociation')
@@ -21250,11 +25331,13 @@ function assertActionOptionsSupportDatePickerCells() {
 	const explicitAssociationFn = extractFunctionSource(actionOptions, 'getExplicitOptionFieldAssociation')
 	const staleControlledFn = extractFunctionSource(actionOptions, 'shouldIgnoreStaleControlledPopupIds')
 	const selectFn = extractFunctionSource(actionSelect, 'selectDropdownOptionAction')
+	const dateSelectionRequestFn = extractFunctionSource(actionSelect, 'parseDateSelectionRequest')
 	for (const expected of [
 		'.el-date-table td.available',
 		'.ant-picker-cell:not(.ant-picker-cell-disabled)',
 		'.arco-picker-cell:not(.arco-picker-cell-disabled)',
 		'.n-date-panel-date',
+		'.n-date-panel-year',
 		'.layui-laydate-content td:not(.laydate-disabled)',
 		'.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled)',
 		'.vxe-date-picker--date td:not(.is--disabled)',
@@ -21271,11 +25354,34 @@ function assertActionOptionsSupportDatePickerCells() {
 	if (!optionCandidateFn.includes('isDatePickerOption(node)')) {
 		throw new Error('dropdown option discovery should treat date cells as option candidates')
 	}
-	if (!labelFn.includes('getDatePickerOptionLabel(element)') || !actionOptions.includes('formatDateParts')) {
-		throw new Error('date picker option labels should be normalized before generic text extraction')
+	if (
+		!labelFn.includes('getDatePickerOptionLabel(element)') ||
+		!actionOptions.includes('formatDateParts') ||
+		!actionOptions.includes('normalizeDatePickerPeriodLabel') ||
+		!actionOptions.includes('formatMonthParts') ||
+		!actionOptions.includes('formatWeekParts')
+	) {
+		throw new Error('date picker option labels should normalize date, month, year, and week candidates before generic text extraction')
 	}
-	if (!comparableFn.includes('parseDateText(value)') || !parseDateTextFn.includes('(\\d{4})(\\d{2})(\\d{2})')) {
+	if (!comparableFn.includes('parseTemporalOptionText(value)') || !parseDateTextFn.includes('(\\d{4})(\\d{2})(\\d{2})')) {
 		throw new Error('date picker option matching should normalize common date text formats before comparing candidates')
+	}
+	if (!actionOptions.includes('parseMonthCellText') || !actionOptions.includes('inferDatePickerYearContext') || !actionOptions.includes('parseYearWeekText')) {
+		throw new Error('date picker matching should infer month/year/week option labels from generic picker headers')
+	}
+	if (!parseDateTextFn.includes('[-/.]') || !requestedDateTextsFn.includes('[-/.]') || !dateSelectionRequestFn.includes('[-/.年]')) {
+		throw new Error('date picker option matching should normalize dotted date formats such as YYYY.MM.DD across request parsing and option matching')
+	}
+	if (
+		!dateSelectionRequestFn.includes('\\b(\\d{4})(\\d{2})(\\d{2})\\b') ||
+		!dateSelectionRequestFn.includes('normalizeDateSelectionParts') ||
+		!actionSelect.includes('function normalizeDateSelectionParts') ||
+		!actionSelect.includes('Date.UTC')
+	) {
+		throw new Error('date-range selection parsing should normalize compact YYYYMMDD requests and reject impossible dates')
+	}
+	if (!formatDatePartsFn.includes('Date.UTC') || !formatDatePartsFn.includes('getUTCFullYear')) {
+		throw new Error('date picker option matching should reject impossible dates instead of only zero-padding parsed parts')
 	}
 	if (
 		!findOptionByTextFn.includes('scoreVisibleOptionTextMatch') ||
@@ -21291,7 +25397,7 @@ function assertActionOptionsSupportDatePickerCells() {
 	if (
 		!requestedDateTextsFn.includes('matchAll') ||
 		!requestedDateTextsFn.includes('parseDateText(raw)') ||
-		!requestedDateTextsFn.includes('\\d{4}\\s*[-/]') ||
+		!requestedDateTextsFn.includes('\\d{4}\\s*[-/.]') ||
 		!requestedDateTextsFn.includes('\\b\\d{8}\\b')
 	) {
 		throw new Error('date picker option matching should extract every requested date from ranges instead of only parsing the first date token')
@@ -21399,9 +25505,14 @@ function assertActionCascaderExtractedFromActions() {
 	}
 	for (const fn of [
 		'findCascaderOptionByScrolling',
+		'findCascaderOptionByCompactTarget',
+		'findCompactCascaderOptionInLevel',
+		'scoreCompactCascaderOption',
+		'isAmbiguousCompactCascaderMatch',
 		'waitForCascaderMenuLevel',
 		'bringCascaderOptionIntoView',
 		'getCascaderLevelSignature',
+		'listCascaderLevelLabels',
 		'summarizeCascaderLevel',
 		'isDomVisibleInActivePopup',
 		'findVerticalScrollable',
@@ -21413,6 +25524,155 @@ function assertActionCascaderExtractedFromActions() {
 		if (actionsFnDefinition.test(actions)) {
 			throw new Error(`actions should not define ${fn}; keep cascader behavior in content/action-cascader.js`)
 		}
+	}
+}
+
+async function assertCompactCascaderMatchingBehavior() {
+	class FakeElement {
+		constructor(label, options = {}) {
+			this.label = label
+			this.innerText = label
+			this.textContent = label
+			this.className = options.className || 'el-cascader-node'
+			this.children = []
+			this.parentElement = null
+			this.scrollTop = 0
+			this.clientHeight = options.clientHeight || 100
+			this.scrollHeight = options.scrollHeight || this.clientHeight
+			this.left = options.left || 0
+			this.top = options.top || 0
+			this.width = options.width || 80
+			this.height = options.height || 24
+		}
+		querySelectorAll() {
+			return this.children
+		}
+		getBoundingClientRect() {
+			return {
+				left: this.left,
+				top: this.top,
+				width: this.width,
+				height: this.height,
+				right: this.left + this.width,
+				bottom: this.top + this.height,
+			}
+		}
+		dispatchEvent() {}
+		scrollIntoView() {}
+	}
+	const menu = new FakeElement('甲级 其他', {
+		className: 'el-cascader-menu',
+		width: 120,
+		height: 160,
+	})
+	menu.children = [
+		new FakeElement('其他', { top: 0 }),
+		new FakeElement('甲级', { top: 28 }),
+		new FakeElement('甲乙区', { top: 56 }),
+	]
+	for (const child of menu.children) child.parentElement = menu
+	const sandbox = {
+		console,
+		window: null,
+		document: {
+			body: new FakeElement('body', { className: 'body' }),
+			querySelectorAll: () => [menu],
+		},
+		HTMLElement: FakeElement,
+		Event: class {
+			constructor(type, options) {
+				this.type = type
+				this.options = options || {}
+			}
+		},
+	}
+	sandbox.window = sandbox
+	sandbox.window.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+	vm.runInNewContext(read('naturalclick-extension/content/action-cascader.js'), sandbox, {
+		filename: 'naturalclick-extension/content/action-cascader.js',
+	})
+	const helpers = sandbox.NC_CONTENT_ACTION_CASCADER.createCascaderHelpers({
+		sleep: async () => {},
+		randomBetween: () => 1,
+		normalizeComparableText: (value) => String(value || '').replace(/\s+/g, '').trim().toLowerCase(),
+		getVisibleOptionLabel: (node) => String(node?.label || node?.innerText || node?.textContent || ''),
+		compareOptionCandidate: (text) => {
+			const expected = String(text || '').replace(/\s+/g, '').trim().toLowerCase()
+			return (a, b) => {
+				const left = String(a?.label || '').replace(/\s+/g, '').trim().toLowerCase()
+				const right = String(b?.label || '').replace(/\s+/g, '').trim().toLowerCase()
+				const leftExact = left === expected ? 0 : 1
+				const rightExact = right === expected ? 0 : 1
+				return leftExact - rightExact || left.length - right.length
+			}
+		},
+		isVisibleClickTarget: () => true,
+		pulseSustainedHover: () => {},
+	})
+	const match = await helpers.findCascaderOptionByCompactTarget('甲级乙级丙级', 0, 'direct')
+	if (!match || match.option !== menu.children[1] || match.label !== '甲级' || match.consumedKey !== '甲级'.toLowerCase()) {
+		throw new Error(`compact cascader matching should select the visible first-level prefix, got ${JSON.stringify({ label: match?.label, consumedKey: match?.consumedKey })}`)
+	}
+	const fallback = await helpers.findCascaderOptionByCompactTarget('甲乙丙丁', 0, 'direct')
+	if (!fallback || fallback.option !== menu.children[2] || fallback.consumedKey !== '甲乙') {
+		throw new Error(`compact cascader matching should fall back to a bounded two-character prefix for compact text, got ${JSON.stringify({ label: fallback?.label, consumedKey: fallback?.consumedKey })}`)
+	}
+	menu.children = [
+		new FakeElement('浙江省', { top: 0 }),
+		new FakeElement('江苏省', { top: 28 }),
+	]
+	for (const child of menu.children) child.parentElement = menu
+	const province = await helpers.findCascaderOptionByCompactTarget('江苏南京江宁', 0, 'direct')
+	if (!province || province.option !== menu.children[1] || province.consumedKey !== '江苏') {
+		throw new Error(`compact cascader matching should match suffixless province text to province-labelled candidates, got ${JSON.stringify({ label: province?.label, consumedKey: province?.consumedKey })}`)
+	}
+	menu.children = [
+		new FakeElement('苏州市', { top: 0 }),
+		new FakeElement('南京市', { top: 28 }),
+	]
+	for (const child of menu.children) child.parentElement = menu
+	const city = await helpers.findCascaderOptionByCompactTarget('南京江宁', 0, 'direct')
+	if (!city || city.option !== menu.children[1] || city.consumedKey !== '南京') {
+		throw new Error(`compact cascader matching should match suffixless city text to city-labelled candidates, got ${JSON.stringify({ label: city?.label, consumedKey: city?.consumedKey })}`)
+	}
+	menu.children = [
+		new FakeElement('浦口区', { top: 0 }),
+		new FakeElement('江宁区', { top: 28 }),
+	]
+	for (const child of menu.children) child.parentElement = menu
+	const district = await helpers.findCascaderOptionByCompactTarget('江宁', 0, 'direct')
+	if (!district || district.option !== menu.children[1] || district.consumedKey !== '江宁') {
+		throw new Error(`compact cascader matching should match suffixless district text to district-labelled candidates, got ${JSON.stringify({ label: district?.label, consumedKey: district?.consumedKey })}`)
+	}
+	const unrelated = await helpers.findCascaderOptionByCompactTarget('丙级目标', 0, 'direct')
+	if (unrelated) {
+		throw new Error(`compact cascader matching should not select unrelated visible options, got ${JSON.stringify({ label: unrelated.label, consumedKey: unrelated.consumedKey })}`)
+	}
+	menu.children = [
+		new FakeElement('甲', { top: 0 }),
+	]
+	for (const child of menu.children) child.parentElement = menu
+	const tooShort = await helpers.findCascaderOptionByCompactTarget('甲乙丙丁', 0, 'direct')
+	if (tooShort) {
+		throw new Error(`compact cascader matching should not auto-select a one-character prefix from a longer compact target, got ${JSON.stringify({ label: tooShort.label, consumedKey: tooShort.consumedKey })}`)
+	}
+	menu.children = [
+		new FakeElement('甲乙丙丁组', { top: 0 }),
+		new FakeElement('甲乙丙丁部', { top: 28 }),
+	]
+	for (const child of menu.children) child.parentElement = menu
+	const containingButNotExact = await helpers.findCascaderOptionByCompactTarget('甲乙丙丁', 0, 'direct')
+	if (containingButNotExact) {
+		throw new Error(`compact cascader matching should not let the immediate branch bypass ambiguity for containing labels, got ${JSON.stringify({ label: containingButNotExact.label, consumedKey: containingButNotExact.consumedKey })}`)
+	}
+	menu.children = [
+		new FakeElement('甲乙区', { top: 0 }),
+		new FakeElement('甲乙部', { top: 28 }),
+	]
+	for (const child of menu.children) child.parentElement = menu
+	const ambiguous = await helpers.findCascaderOptionByCompactTarget('甲乙丙丁', 0, 'direct')
+	if (ambiguous) {
+		throw new Error(`compact cascader matching should refuse ambiguous equal-prefix matches, got ${JSON.stringify({ label: ambiguous.label, consumedKey: ambiguous.consumedKey })}`)
 	}
 }
 
@@ -21438,6 +25698,10 @@ function assertActionSelectExtractedFromActions() {
 		'selectDropdownOptionAction',
 		'selectCheckboxOptionAction',
 		'selectCascaderPathAction',
+		'selectCompactCascaderPathAction',
+		'attachCascaderSelectionEvidence',
+		'consumeCompactCascaderTarget',
+		'getCascaderVisibleOptions',
 		'dismissSelectionPopup',
 		'waitForDropdownSelectionEffect',
 		'buildDropdownFailureResult',
@@ -21497,6 +25761,9 @@ function assertActionsReturnStructuredOutcomes() {
 	if (!/inferDropdownSelectionOutcome\(before,\s*after,\s*optionAfter\)/.test(cascaderFn)) {
 		throw new Error('cascader path selection should infer progress from real field/option state')
 	}
+	if (!actionSelect.includes('requestedPath') || !actionSelect.includes('selectedPath') || !actionSelect.includes('selectedLabels')) {
+		throw new Error('cascader path selection should return structured requestedPath and selectedPath evidence for diagnostics')
+	}
 	if (!/dismissSelectionPopup\(field \|\| finalOption,\s*inputMode\)/.test(cascaderFn)) {
 		throw new Error('cascader path selection should dismiss the floating panel after selecting the leaf option')
 	}
@@ -21513,6 +25780,15 @@ function assertActionsReturnStructuredOutcomes() {
 	if (!/expandCascaderParentOption\(option,\s*i \+ 1,\s*inputMode,\s*path\[i \+ 1\]\)/.test(cascaderFn)) {
 		throw new Error('cascader path selection should pass the expected child label to the shared parent expansion helper before searching child levels')
 	}
+	if (!actionSelect.includes('findCascaderOptionByCompactTarget') || !actionSelect.includes('compact_cascader_level_')) {
+		throw new Error('cascader path selection should support compact user target strings through the generic compact cascader matcher')
+	}
+	if (!actionSelect.includes('getCascaderPathSeparatorPattern') || !actionSelect.includes('stripLeadingCascaderPathSeparators')) {
+		throw new Error('cascader path selection should share generic hierarchy separator parsing and compact separator consumption')
+	}
+	if (!actions.includes('findCascaderOptionByCompactTarget')) {
+		throw new Error('content actions should pass compact cascader matching into action-select')
+	}
 	const cascaderExpandFn = extractFunctionSource(actionSelect, 'expandCascaderParentOption')
 	if (!cascaderExpandFn.includes('resolveCascaderExpandTarget(option)') || !cascaderExpandFn.includes('dispatchCascaderElementClick(expandTarget') || !cascaderExpandFn.includes('dispatchCascaderElementClick(option, inputMode, { rightEdge: true })')) {
 		throw new Error('cascader parent expansion should fall back from hover to arrow click and then parent row click')
@@ -21520,8 +25796,11 @@ function assertActionsReturnStructuredOutcomes() {
 	if (!actionSelect.includes('waitForCascaderNextLevelRefresh') || !actionSelect.includes('readCascaderLevelSignature') || !actionSelect.includes('getCascaderLevelSignature')) {
 		throw new Error('cascader parent expansion should verify that an existing child column refreshed instead of treating any old column as ready')
 	}
-	if (!actions.includes('getCascaderLevelSignature')) {
-		throw new Error('content actions should pass cascader level signatures into action-select')
+	if (!actions.includes('getCascaderLevelSignature') || !actions.includes('listCascaderLevelLabels')) {
+		throw new Error('content actions should pass cascader level signatures and visible candidate labels into action-select')
+	}
+	if (!actionSelect.includes('getCascaderVisibleOptions') || !/visibleOptions:\s*getCascaderVisibleOptions\(i\)/.test(cascaderFn) || !/visibleOptions:\s*getCascaderVisibleOptions\(level\)/.test(actionSelect)) {
+		throw new Error('cascader path failures should expose current level candidates as structured visibleOptions')
 	}
 	const cascaderExpandTargetFn = extractFunctionSource(actionSelect, 'resolveCascaderExpandTarget')
 	for (const expected of ['.el-cascader-node__postfix', 'arrow-right', 'expand-icon', 'postfix', 'suffix']) {
@@ -21541,7 +25820,7 @@ function assertActionsReturnStructuredOutcomes() {
 	}
 }
 
-function assertSelectionFailuresUseStructuredOutcomes() {
+async function assertSelectionFailuresUseStructuredOutcomes() {
 	const actionSelect = read('naturalclick-extension/content/action-select.js')
 	const validation = read('naturalclick-extension/background/planner-validation.js')
 	const checkboxFn = extractFunctionSource(actionSelect, 'selectCheckboxOptionAction')
@@ -21565,6 +25844,133 @@ function assertSelectionFailuresUseStructuredOutcomes() {
 	}
 	if (!validationFn.includes('getActionSelectionText') || !validationFn.includes('selectionTextMatchesRequested')) {
 		throw new Error('planner history validation should compare structured selection failures against future selection inputs')
+	}
+	{
+		class FakeElement {
+			constructor(label) {
+				this.label = label
+				this.children = []
+			}
+			querySelectorAll() {
+				return []
+			}
+			dispatchEvent() {}
+			getBoundingClientRect() {
+				return { left: 0, top: 0, right: 100, bottom: 24, width: 100, height: 24 }
+			}
+			closest() {
+				return null
+			}
+			blur() {}
+			click() {}
+		}
+		const sandbox = {
+			window: null,
+			document: {
+				activeElement: null,
+				body: new FakeElement('body'),
+				querySelectorAll: () => [],
+			},
+			HTMLElement: FakeElement,
+			KeyboardEvent: class {
+				constructor(type, options) {
+					this.type = type
+					this.options = options || {}
+				}
+			},
+			MouseEvent: class {
+				constructor(type, options) {
+					this.type = type
+					this.options = options || {}
+				}
+			},
+			PointerEvent: class {
+				constructor(type, options) {
+					this.type = type
+					this.options = options || {}
+				}
+			},
+		}
+		sandbox.window = sandbox
+		sandbox.window.innerWidth = 1024
+		sandbox.window.innerHeight = 768
+		sandbox.window.getComputedStyle = () => ({ display: 'block', visibility: 'visible' })
+		vm.runInNewContext(actionSelect, sandbox, {
+			filename: 'naturalclick-extension/content/action-select.js',
+		})
+		const field = new FakeElement('层级字段')
+		const selectActions = sandbox.NC_CONTENT_ACTION_SELECT.createSelectActions({
+			observer: {
+				getElementByIndex: () => field,
+				shortText: (value) => String(value || ''),
+			},
+			humanLikeClick: async () => {},
+			hoverElement: async () => {},
+			isDisabledElement: () => false,
+			setNativeValue: () => {},
+			sleep: async () => {},
+			randomBetween: () => 1,
+			appendStateChange: (message) => message,
+			createOutcome: (kind, extra = {}) => ({ kind, progress: false, ...extra }),
+			getElementInteractionState: () => ({ text: '' }),
+			inferInteractionOutcome: () => ({ kind: 'none', progress: false }),
+			OUTCOME_KIND: { FAILED: 'failed', NONE: 'none' },
+			waitForVisibleOption: async () => null,
+			findDropdownOptionByScrolling: async () => null,
+			listVisibleOptionLabels: () => [],
+			getVisibleOptionLabel: (node) => String(node?.label || ''),
+			normalizeComparableText: (value) => String(value || '').replace(/\s+/g, '').trim().toLowerCase(),
+			resolveDropdownTrigger: () => field,
+			resolveNativeSelect: () => null,
+			listNativeSelectOptionLabels: () => [],
+			selectOptionByText: () => null,
+			resolveSelectableClickTarget: (node) => node,
+			findCascaderOptionByCompactTarget: async () => null,
+			findCascaderOptionByScrolling: async () => null,
+			bringCascaderOptionIntoView: async () => {},
+			getCascaderLevelSignature: () => '',
+			listCascaderLevelLabels: () => ['甲级', '乙级'],
+			waitForCascaderMenuLevel: async () => true,
+			summarizeCascaderLevel: () => ' 当前第 1 级可见项: 甲级、乙级。',
+		})
+		const result = await selectActions.selectCascaderPathAction({
+			index: 8,
+			path: ['丙级'],
+		}, 'direct')
+		const visible = result?.meta?.visibleOptions || []
+		const outcomeVisible = result?.meta?.outcome?.visibleOptions || []
+		if (
+			result?.success !== false ||
+			visible.join('|') !== '甲级|乙级' ||
+			outcomeVisible.join('|') !== '甲级|乙级' ||
+			!String(result?.message || '').includes('第 1 级可见候选: 甲级、乙级')
+		) {
+			throw new Error(`cascader selection failures should expose structured visible candidates, got ${JSON.stringify(result)}`)
+		}
+		const segmentedStringResult = await selectActions.selectCascaderPathAction({
+			index: 8,
+			path: '丙级、丁级',
+		}, 'direct')
+		if (
+			segmentedStringResult?.success !== false ||
+			segmentedStringResult?.meta?.requestedText !== '丙级' ||
+			!String(segmentedStringResult?.message || '').includes('第 1 级选项 "丙级"') ||
+			String(segmentedStringResult?.message || '').includes('紧凑目标 "丙级、丁级"')
+		) {
+			throw new Error(`cascader string paths should be parsed by hierarchy separators before compact matching, got ${JSON.stringify(segmentedStringResult)}`)
+		}
+		const dashedStringResult = await selectActions.selectCascaderPathAction({
+			index: 8,
+			path: '丙级-丁级',
+		}, 'direct')
+		if (
+			dashedStringResult?.success !== false ||
+			dashedStringResult?.meta?.requestedText !== '丙级' ||
+			!String(dashedStringResult?.message || '').includes('第 1 级选项 "丙级"') ||
+			String(dashedStringResult?.message || '').includes('紧凑目标 "丙级-丁级"')
+		) {
+			throw new Error(`cascader string paths should parse CJK dashed hierarchy separators before compact matching, got ${JSON.stringify(dashedStringResult)}`)
+		}
 	}
 }
 
@@ -22067,6 +26473,26 @@ async function assertVerifierRetriesDropdownSelectionUntilFieldValueChanges() {
 }
 
 async function assertVerifierAcceptsTimedOutSelectionWhenValueIsSatisfied() {
+	let postObservation = {
+		url: 'http://example.test/app',
+		content: 'dialog-still-open',
+		forms: [
+			{
+				id: 'dialog',
+				name: '弹层',
+				fields: [
+					{
+						index: 8,
+						region: 'dialog',
+						label: '所在地',
+						valueState: 'selected:江苏省 / 南京市 / 江宁区',
+						role: 'combobox',
+						selectionControl: 'cascader-parent',
+					},
+				],
+			},
+		],
+	}
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
 		NC_BG_CONSTANTS: {
 			TYPES: { VERIFY_INPUT: 'NC_VERIFY_INPUT', VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT' },
@@ -22077,26 +26503,7 @@ async function assertVerifierAcceptsTimedOutSelectionWhenValueIsSatisfied() {
 		NC_BG_EXECUTOR: {
 			requestObservation: async () => ({
 				ok: true,
-				data: {
-					url: 'http://example.test/app',
-					content: 'dialog-still-open',
-					forms: [
-						{
-							id: 'dialog',
-							name: '弹层',
-							fields: [
-								{
-									index: 8,
-									region: 'dialog',
-									label: '所在地',
-									valueState: 'selected:江苏省 / 南京市 / 江宁区',
-									role: 'combobox',
-									selectionControl: 'cascader-parent',
-								},
-							],
-						},
-					],
-				},
+				data: postObservation,
 			}),
 		},
 	})
@@ -22124,6 +26531,51 @@ async function assertVerifierAcceptsTimedOutSelectionWhenValueIsSatisfied() {
 	)
 	if (!result.ok || !String(result.reason || '').includes('字段值已')) {
 		throw new Error(`timed-out selection should pass when observation satisfies the requested value, got ${JSON.stringify(result)}`)
+	}
+	postObservation = {
+		url: 'http://example.test/app',
+		content: 'time-filter-selected',
+		forms: [
+			{
+				id: 'filter',
+				name: '搜索区域',
+				fields: [
+					{
+						index: 12,
+						region: 'content',
+						label: '时间段',
+						valueState: 'selected:09:00',
+						role: 'combobox',
+						fieldType: 'timerange',
+					},
+				],
+			},
+		],
+	}
+	const timeResult = await sandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{ name: 'choose_dropdown_option', input: { index: 12, text: '9:00' } },
+		{
+			url: 'http://example.test/app',
+			content: 'time-filter-open',
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索区域',
+					fields: [
+						{ index: 12, region: 'content', label: '时间段', valueState: 'empty', role: 'combobox', fieldType: 'timerange' },
+					],
+				},
+			],
+		},
+		{
+			success: false,
+			message: '页面动作超时（17秒），已放弃等待。',
+			meta: { outcome: { kind: 'failed', progress: false, reason: '页面动作超时（17秒），已放弃等待。' } },
+		}
+	)
+	if (!timeResult.ok || !String(timeResult.reason || '').includes('字段值已')) {
+		throw new Error(`timed-out time selection should pass when normalized observed value satisfies the requested value, got ${JSON.stringify(timeResult)}`)
 	}
 }
 
@@ -23398,10 +27850,38 @@ function assertModelReasoningIsSurfaced() {
 		'runtimeStageCounts',
 		'lastPlanningProgress',
 		'lastRuntimeProgress',
+		'validationFeedbackKindCounts',
+		'lastValidationFeedback',
+		'VALIDATION_FEEDBACK_KIND_LABELS',
+		'动作校验反馈：${validationFeedbackSummary}',
+		'最近校验建议：${clampText(lastValidationFeedback.guidance, 500)}',
+		'plannerCorrectionCount',
+		'plannerCorrectionCounts',
+		'lastPlannerCorrection',
+		'formatPlannerCorrectionSummary',
+		'countPlannerCorrectionStages',
+		'getLastPlannerCorrectionTrace',
+		'规划纠偏：${plannerCorrectionSummary}',
+		'最近规划纠偏：${clampText(lastPlannerCorrection.detail, 500)}',
+		"kind: 'planner_correction'",
+		"kind: 'planner_correction_detail'",
+		'规划输出纠偏：${plannerCorrectionSummary}',
+		'countValidationFeedbackKinds',
+		'getLastValidationFeedbackTrace',
 		'formatProgressStageSummary',
+		'formatLastProgressExport',
+		'formatProgressElapsedForExport',
+		'invalid_model_output',
+		'模型输出纠偏',
+		'invalid_action_name',
+		'工具名纠偏',
+		'elapsedMs: Math.max(0, Number(item?.progress?.elapsedMs) || 0)',
+		'timeoutMs: Math.max(0, Number(item?.progress?.timeoutMs) || 0)',
 		'进度阶段：${progressSummary}',
 		'最后规划进度：${clampText(lastPlanningProgress, 500)}',
 		'最后运行进度：${clampText(lastRuntimeProgress, 500)}',
+		'最近模型分析：',
+		'modelThoughts.slice(-3)',
 		'execution_recovery',
 		'verification_recovery',
 		'dateCandidateOwnershipCount',
@@ -23419,8 +27899,18 @@ function assertModelReasoningIsSurfaced() {
 	if (!sidepanel.includes('extractCandidateDiagnostics') || !sidepanel.includes('candidateDiagnostics')) {
 		throw new Error('sidepanel session export diagnostics should include candidate diagnostics for missed UI recognition')
 	}
+	if (!sidepanel.includes('mergeSessionDiagnosticsIntoResultSummary') || !sidepanel.includes('candidate_diagnostics') || !sidepanel.includes('候选定位诊断')) {
+		throw new Error('sidepanel result summaries should merge candidate diagnostics into visible result cards')
+	}
 	if (!sidepanel.includes('const reason = String(payload.reason || payload.purpose') || !sidepanel.includes('原因：${reason}') || !sidepanel.includes('等待用户回答：${reason}')) {
 		throw new Error('sidepanel should surface ask_user reason in the confirmation dialog and activity text')
+	}
+	if (
+		!sidepanel.includes('buildConfirmationActivityText') ||
+		!/message\.type === TYPES\.CONFIRM_REQUEST[\s\S]*state\.activityText = buildConfirmationActivityText\(payload\)[\s\S]*state\.planItems = upsertConfirmationPlanItem\(state\.planItems, payload\)[\s\S]*render\(\)/.test(sidepanel) ||
+		!/function resolveConfirm\(approved\)[\s\S]*state\.planItems = completeConfirmationPlanItem\(state\.planItems, approved\)[\s\S]*render\(\)/.test(sidepanel)
+	) {
+		throw new Error('sidepanel should surface dangerous-action confirmation waits in activity text and plan progress')
 	}
 	if (!read('naturalclick-extension/sidepanel.html').includes('sp-model-error')) {
 		throw new Error('sidepanel should style direct model error summaries')
@@ -23513,6 +28003,47 @@ function assertManifestVersion() {
 	const readmeEn = read('README.md')
 	if (!readmeEn.includes('0.X.99') || !readmeEn.includes('0.(X+1).1') || !readmeEn.includes('0.X.1') || !readmeEn.includes('committed and pushed')) {
 		throw new Error('README.md should document the carry rule and required commit/push for every 0.X.1 release')
+	}
+}
+
+function assertVersionBumpScript() {
+	const script = read('scripts/bump-version.js')
+	for (const expected of [
+		'computeNextVersion',
+		'isCarryRelease',
+		'syncVersionFiles',
+		'0.X.99 bumps to 0.(X+1).1',
+		'Every 0.X.1 release must be committed and pushed once',
+		'git commit -m "Release NaturalClick Agent ${result.nextVersion}"',
+	]) {
+		if (!script.includes(expected)) {
+			throw new Error(`version bump script should encode release version rules: missing ${expected}`)
+		}
+	}
+	const versionTools = require(path.join(repoRoot, 'scripts/bump-version.js'))
+	if (versionTools.computeNextVersion('0.4.98') !== '0.4.99') {
+		throw new Error('version bump script should increment ordinary tail versions')
+	}
+	if (versionTools.computeNextVersion('0.4.99') !== '0.5.1') {
+		throw new Error('version bump script should carry 0.X.99 to 0.(X+1).1')
+	}
+	if (!versionTools.isCarryRelease('0.5.1') || versionTools.isCarryRelease('0.5.2')) {
+		throw new Error('version bump script should identify every 0.X.1 release for commit/push')
+	}
+	let invalidTailRejected = false
+	try {
+		versionTools.computeNextVersion('0.4.100')
+	} catch (_) {
+		invalidTailRejected = true
+	}
+	if (!invalidTailRejected) {
+		throw new Error('version bump script should reject tail versions above 99')
+	}
+	for (const file of ['README.md', 'README.zh-CN.md']) {
+		const text = read(file)
+		if (!text.includes('node scripts/bump-version.js patch')) {
+			throw new Error(`${file} should document the version bump helper`)
+		}
 	}
 }
 

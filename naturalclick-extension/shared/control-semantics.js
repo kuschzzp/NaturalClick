@@ -201,6 +201,73 @@
 		return normalizeAssociationScore(unknownScore)
 	}
 
+	function collectActiveNewPopupItemsForTargets(items, targetItems) {
+		const targets = (Array.isArray(targetItems) ? targetItems : [targetItems]).filter(isExpandedOptionTarget)
+		if (!targets.length) return []
+		const active = (Array.isArray(items) ? items : [])
+			.filter((item) =>
+				item?.newSinceLastObservation &&
+				isPopupOptionItem(item) &&
+				targets.some((target) => !hasPopupLabelOwnerConflict(item, target))
+			)
+		if (!active.length) return []
+		const groups = new Map()
+		for (const item of active) {
+			const key = getPopupGroupKey(item)
+			if (!groups.has(key)) groups.set(key, [])
+			groups.get(key).push(item)
+		}
+		return groups.size === 1 ? active : []
+	}
+
+	function isActiveNewPopupItemForTargets(item, targetItems) {
+		return collectActiveNewPopupItemsForTargets([item], targetItems).includes(item)
+	}
+
+	function isExpandedOptionTarget(item) {
+		const text = [
+			item?.expandedState,
+			item?.stateHints,
+			item?.popupHints,
+			item?.valueState,
+		].map((value) => String(value || '').toLowerCase()).join(' ')
+		return /(expanded|open|opened|visible|active|已展开|展开|打开)/i.test(text)
+	}
+
+	function isPopupOptionItem(item) {
+		const region = String(item?.region || '').toLowerCase()
+		const hints = String(item?.popupHints || '').toLowerCase()
+		const role = String(item?.role || '').toLowerCase()
+		const kind = String(item?.selectionControl || item?.controlKind || '').toLowerCase()
+		return region === 'popover' ||
+			region === 'popup' ||
+			/(popup|popper|listbox|dropdown|picker|calendar|cascader)/i.test(hints) ||
+			['option', 'treeitem', 'menuitem'].includes(role) ||
+			/(option|dropdown|select|cascader|picker|date|time)/i.test(kind)
+	}
+
+	function hasPopupLabelOwnerConflict(item, targetItem) {
+		const labelledByIds = extractObservedHintIdRefs(item?.popupHints, ['popupLabelledBy'])
+		if (!labelledByIds.length) return false
+		const targetIds = [
+			String(targetItem?.selectorHints?.id || '').trim(),
+			...extractObservedHintIdRefs(targetItem?.relationHints, ['for', 'aria-labelledby', 'aria-describedby']),
+		].filter(Boolean)
+		if (!targetIds.length) return false
+		return !labelledByIds.some((id) => targetIds.includes(id))
+	}
+
+	function getPopupGroupKey(item) {
+		const ids = [
+			...extractObservedHintIdRefs(item?.popupHints, ['popupId']),
+			...extractObservedHintIdRefs(item?.popupHints, ['popupLabelledBy']),
+		]
+		if (ids.length) return ids.join('|')
+		const rect = item?.rect || {}
+		const region = String(item?.region || 'popover')
+		return `${region}:${Math.round(Number(rect.left) || 0)}:${Math.round(Number(rect.width) || 0)}`
+	}
+
 	function dateOptionHasAuthoritativeOwnerConflict(optionItem, targetItem, controlledIds = []) {
 		if (!isDatePickerOptionItem(optionItem) || !isDateLikeTargetItem(targetItem)) return false
 		const popupIds = extractObservedHintIdRefs(optionItem?.popupHints, ['popupId'])
@@ -433,9 +500,11 @@
 		DATE_OPTION_ASSOCIATION,
 		GEOMETRY_ASSOCIATION,
 		OPTION_ASSOCIATION_SCORES,
+		collectActiveNewPopupItemsForTargets,
 		describeObservedControl,
 		extractObservedHintIdRefs,
 		getObservedTargetAssociationIds,
+		isActiveNewPopupItemForTargets,
 		isOptionTargetGeometryRelated,
 		isDateLikeFieldTypeToken,
 		isObservedDropdownLike,

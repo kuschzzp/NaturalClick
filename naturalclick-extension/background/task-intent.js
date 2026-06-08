@@ -245,11 +245,26 @@
 			if (!target.canonical && !target.aliases.length) continue
 			if (!target.aliases.includes(target.canonical)) target.aliases.unshift(target.canonical)
 			target.aliases = uniqueStrings(target.aliases).slice(0, 12)
+			if (shouldDropReferentialRecordNavigationTarget(target, operation, taskText)) continue
 			if (shouldDropGenericRecordNavigationTarget(target, operation, taskText)) continue
 			if (shouldDropImplicitOperationObjectNavigationTarget(target, operation, taskText)) continue
 			targets.push(target)
 		}
 		return targets.slice(0, 5)
+	}
+
+	function shouldDropReferentialRecordNavigationTarget(target, operation, taskText = '') {
+		const op = String(operation || '').trim()
+		if (op !== 'view_detail' && op !== 'view_first_record_detail') return false
+		const values = [
+			target?.canonical,
+			target?.raw,
+			target?.entity,
+			...(Array.isArray(target?.aliases) ? target.aliases : []),
+		].map(cleanNavigationName).filter(Boolean)
+		if (!values.length) return false
+		if (values.some((value) => taskTextHasExplicitNavigationForTarget(taskText, value))) return false
+		return values.some(isReferentialRecordObjectName)
 	}
 
 	function shouldDropImplicitOperationObjectNavigationTarget(target, operation, taskText = '') {
@@ -283,6 +298,13 @@
 		const text = cleanNavigationName(value)
 		if (!text) return false
 		return /^(数据|信息|资料|记录|列表记录|列表第一条记录|第一条记录|条目|项目|对象|内容)$/.test(text)
+	}
+
+	function isReferentialRecordObjectName(value) {
+		const text = cleanNavigationName(value)
+		if (!text) return false
+		if (/(页面|网页|模块|区域|面板|菜单|标签页|page|screen|view|section|area|panel|menu|module|tab)$/i.test(text)) return false
+		return /^(?:这个|那个|该|本|此|当前|目标)[\u4e00-\u9fa5A-Za-z0-9_-]{1,24}的?$/.test(text)
 	}
 
 	function taskTextHasExplicitNavigationForTarget(taskText, target) {

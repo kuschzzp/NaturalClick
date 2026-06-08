@@ -138,6 +138,7 @@
 			'.arco-picker-cell:not(.arco-picker-cell-disabled)',
 			'.n-date-panel-date',
 			'.n-date-panel-month',
+			'.n-date-panel-year',
 			'.van-calendar__day:not(.van-calendar__day--disabled)',
 			'.layui-laydate-content td:not(.laydate-disabled)',
 			'.ivu-date-picker-cells-cell:not(.ivu-date-picker-cells-cell-disabled)',

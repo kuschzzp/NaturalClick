@@ -453,10 +453,13 @@
 				input: {
 					index,
 					text: match.correctedValue,
+					target_label: label,
 					workflow_step: 'resolve_field_validation_error',
 					workflow_field_label: label,
 					workflow_old_value: match.currentValue,
 					workflow_validation_error: shortWorkflowText(match.errorText, 120),
+					workflow_value_source: 'page_validation',
+					workflow_value_basis: shortWorkflowText(match.errorText, 120),
 				},
 			},
 		}
@@ -483,7 +486,7 @@
 			if (!label) continue
 			const segment = extractTaskAssignmentSegment(taskText, label, labels)
 			const path = parseCascaderPathSegment(segment)
-			if (path.length < 2) continue
+			if (path.length < 1) continue
 			if (!shouldRecoverAssignedCascaderField(session, field, path)) continue
 			if (hasRecentCascaderPathAttempt(session, index, path)) continue
 			matches.push({ field, index, label, path, updatingExisting: !isEmptyFormField(field) })
@@ -502,8 +505,11 @@
 				input: {
 					index: match.index,
 					path: match.path,
+					target_label: match.label,
 					workflow_step: 'select_cascader_path_timeout_recovery',
 					workflow_field_label: match.label,
+					workflow_value_source: 'task_value',
+					workflow_value_basis: '字段标签与任务文本匹配',
 				},
 			},
 		}
@@ -537,6 +543,8 @@
 					workflow_step: 'select_visible_cascader_option_timeout_recovery',
 					workflow_field_label: String(failed?.input?.workflow_field_label || ''),
 					workflow_requested_text: requested,
+					workflow_value_source: 'visible_option',
+					workflow_value_basis: `可见级联候选与请求值匹配：${shortWorkflowText(requested, 80)}`,
 				},
 			},
 		}
@@ -559,6 +567,8 @@
 					workflow_step: 'select_cascader_path_timeout_recovery',
 					workflow_field_label: failed.label,
 					workflow_retry_reason: 'previous_cascader_path_failed_after_reopen',
+					workflow_value_source: 'previous_action',
+					workflow_value_basis: '复用已声明的字段限定级联路径',
 				},
 			},
 		}
@@ -639,8 +649,11 @@
 				input: {
 					index,
 					text: value,
+					target_label: label,
 					workflow_step: 'fill_form_field_timeout_recovery',
 					workflow_field_label: label,
+					workflow_value_source: 'task_value',
+					workflow_value_basis: '字段标签与任务文本匹配',
 				},
 			},
 		}
@@ -656,9 +669,12 @@
 				name: 'open_dropdown',
 				input: {
 					index,
+					target_label: label,
 					workflow_step: 'open_form_dropdown_timeout_recovery',
 					workflow_field_label: label,
 					workflow_requested_text: value,
+					workflow_value_source: 'task_value',
+					workflow_value_basis: `任务目标值：${shortWorkflowText(value, 80)}`,
 				},
 			},
 		}
@@ -675,8 +691,11 @@
 				input: {
 					index,
 					text: value,
+					target_label: label,
 					workflow_step: 'choose_form_dropdown_timeout_recovery',
 					workflow_field_label: label,
+					workflow_value_source: 'visible_option',
+					workflow_value_basis: `可见候选与任务目标值匹配：${shortWorkflowText(value, 80)}`,
 				},
 			},
 		}
@@ -968,7 +987,7 @@
 			if (!segment) continue
 			if (isCascaderFormField(field)) {
 				const path = parseCascaderPathSegment(segment)
-				if (path.length < 2) continue
+				if (path.length < 1) continue
 				matchedCount += 1
 				if (isEmptyFormField(field) || !observedFieldValueMatchesCascaderPath(field, path)) return false
 				continue
@@ -1018,7 +1037,32 @@
 		return (Array.isArray(path) ? path : [])
 			.map((part) => getNavigationKey(cleanCascaderPathPart(part)))
 			.filter(Boolean)
-			.every((part) => actual.includes(part))
+			.every((part) => actual.includes(part) || compactCascaderValueMatches(actual, part))
+	}
+
+	function compactCascaderValueMatches(actualValue, expectedValue) {
+		const actual = getCompactCascaderCompareKey(actualValue)
+		const expected = getCompactCascaderCompareKey(expectedValue)
+		if (!actual || !expected || expected.length < 2) return false
+		if (actual.includes(expected)) return true
+		return isOrderedSubsequence(expected, actual)
+	}
+
+	function getCompactCascaderCompareKey(value) {
+		return String(value || '')
+			.replace(/^(?:selected|filled|value|已选|当前值)\s*[:：]/i, '')
+			.replace(/[\s"'“”‘’【】\[\]()（）{}<>《》,，、。.;；:：!?！？>＞\/\\|-]+/g, '')
+			.trim()
+			.toLowerCase()
+	}
+
+	function isOrderedSubsequence(needle, haystack) {
+		let cursor = 0
+		for (const ch of String(haystack || '')) {
+			if (ch === needle[cursor]) cursor += 1
+			if (cursor >= needle.length) return true
+		}
+		return false
 	}
 
 	function getObservedFormFieldValueText(item) {
@@ -1185,7 +1229,8 @@
 		if (unresolved.length) return []
 		if (hasRecentSuccessfulRecordViewAttempt(session)) return []
 		const listTables = getRecordListEvidenceTables(observation)
-		if (!listTables.length) {
+		const paginationEvidence = getPositivePaginationRecordEvidenceItems(observation)
+		if (!listTables.length && !paginationEvidence.length) {
 			return [
 				[
 					'- record_view_requirement',
@@ -1197,14 +1242,20 @@
 		}
 		const candidate = findFirstRecordDetailCandidate(observation)
 		if (!candidate) {
+			const paginationText = paginationEvidence
+				.map((item) => shortWorkflowText(getObservedItemLabel(item), 80))
+				.filter(Boolean)
+				.slice(0, 3)
+				.join('|')
 			return [
 				[
 					'- record_view_requirement',
 					'status="detail_action_missing"',
 					'position="first"',
 					`tableRows="${Number(countRecordListEvidenceRows(listTables))}"`,
-					'guidance="已观察到列表行，但没有稳定的第一行详情/查看入口；先 request_context source=actions region=content query=\'详情 查看 明细 预览\' 或 locate_by_vision 定位第一行入口，不要点击列表外按钮。"',
-				].join(' '),
+					paginationText ? `pagination="${escapeAttr(paginationText)}"` : '',
+					'guidance="已观察到列表/分页数据，但没有稳定的第一行详情/查看入口；先 request_context source=actions region=content query=\'详情 查看 明细 预览\' 或 locate_by_vision 定位第一行入口，不要点击列表外按钮。"',
+				].filter(Boolean).join(' '),
 			]
 		}
 		return [
@@ -1788,6 +1839,7 @@
 
 	function findFirstRecordDetailCandidate(observation) {
 		const listRects = getRecordListEvidenceRects(observation)
+		if (!listRects.length && hasPositivePaginationRecordEvidence(observation)) return null
 		const candidates = collectRecordDetailCandidateItems(observation)
 			.filter(isRecordDetailCandidateItem)
 			.filter((item) => isRecordDetailCandidateNearList(item, listRects))
@@ -1796,7 +1848,8 @@
 	}
 
 	function hasRecordListEvidence(observation) {
-		return getRecordListEvidenceTables(observation).length > 0
+		return getRecordListEvidenceTables(observation).length > 0 ||
+			hasPositivePaginationRecordEvidence(observation)
 	}
 
 	function getRecordListEvidenceTables(observation) {
@@ -1813,6 +1866,65 @@
 		return getRecordListEvidenceTables(observation)
 			.map((table) => normalizeWorkflowRect(table?.rect))
 			.filter(Boolean)
+	}
+
+	function hasPositivePaginationRecordEvidence(observation) {
+		return getPositivePaginationRecordEvidenceItems(observation).length > 0
+	}
+
+	function getPositivePaginationRecordEvidenceItems(observation) {
+		const items = [
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...(Array.isArray(observation?.popups) ? observation.popups : []),
+			...(Array.isArray(observation?.options) ? observation.options : []),
+			...collectObservedFormFields(observation),
+		]
+		const evidence = items
+			.filter((item) => {
+				const region = getNavigationKey(item?.region)
+				const text = [
+					getObservedItemLabel(item),
+					item?.valueState,
+					item?.value,
+					item?.stateHints,
+				].filter(Boolean).join(' ')
+				return (region === 'pagination' || /分页|pagination|pager|page-size|page-jump/i.test(text)) &&
+					extractPositiveRecordTotal(text) > 0
+			})
+		for (const row of (Array.isArray(observation?.simplifiedDom) ? observation.simplifiedDom : [])) {
+			const text = String(row || '')
+			if (/region=["']?pagination|pagination|分页|pager/i.test(text) && extractPositiveRecordTotal(text) > 0) {
+				evidence.push({ label: text, region: 'pagination' })
+			}
+		}
+		return evidence
+	}
+
+	function collectObservedFormFields(observation) {
+		const fields = []
+		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
+				if (field && typeof field === 'object') fields.push(field)
+			}
+		}
+		return fields
+	}
+
+	function extractPositiveRecordTotal(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return 0
+		const patterns = [
+			/(?:共|总计|总共|合计|total)\s*[:：]?\s*([1-9]\d*)\s*(?:条|项|筆|笔|records?|items?|rows?)?/i,
+			/(?:records?|items?|rows?)\s*[:：]?\s*([1-9]\d*)/i,
+			/(?:of|\/)\s*([1-9]\d*)\b/i,
+		]
+		for (const pattern of patterns) {
+			const match = text.match(pattern)
+			const total = Number(match?.[1])
+			if (Number.isFinite(total) && total > 0) return total
+		}
+		return 0
 	}
 
 	function isRecordDetailCandidateNearList(item, listRects) {
@@ -2742,7 +2854,7 @@
 			const input = item?.input || {}
 			return action === 'select_cascader_path' &&
 				Array.isArray(input.path) &&
-				normalizeCascaderPathParts(input.path).length >= 2
+				normalizeCascaderPathParts(input.path).length >= 1
 		}) || null
 	}
 
@@ -2758,7 +2870,7 @@
 			const index = Number(input.index)
 			if (!Number.isFinite(index)) continue
 			const path = normalizeCascaderPathParts(input.path)
-			if (path.length < 2) continue
+			if (path.length < 1) continue
 			if (!hasCascaderRetryEvidenceAfterFailure(history, pos, index, observation)) continue
 			if (hasLaterCascaderPathRecoveryRetry(history, pos, index, path)) continue
 			const field = findObservedFormFieldByIndex(observation, index)
@@ -3004,13 +3116,28 @@
 	function parseCascaderPathSegment(segment) {
 		const text = cleanAssignmentValue(segment)
 		if (!text) return []
+		const separatorPattern = getCascaderPathSeparatorPattern(text)
 		const parts = text
-			.split(/\s*(?:->|→|＞|>|\/|\\|,|，|、|\s+)\s*/g)
+			.split(separatorPattern)
 			.map(cleanCascaderPathPart)
 			.filter(Boolean)
-		if (parts.length < 2) return []
+		if (parts.length < 2) return parts.length === 1 && isSafeCascaderPathPart(parts[0]) ? parts : []
 		if (parts.some((part) => !isSafeCascaderPathPart(part))) return []
 		return parts
+	}
+
+	function getCascaderPathSeparatorPattern(text) {
+		const source = String(text || '')
+		const allowBareDash = /[\u4e00-\u9fff][\-–—－][\u4e00-\u9fff]/.test(source)
+		const dash = allowBareDash ? '|[-–—－]' : '|\\s+[-–—－]\\s+'
+		const whitespace = shouldTreatWhitespaceAsCascaderPathSeparator(source) ? '|\\s+' : ''
+		return new RegExp(`\\s*(?:->|=>|→|＞|>|/|\\\\|,|，|、|;|；|\\|${dash}${whitespace})\\s*`, 'g')
+	}
+
+	function shouldTreatWhitespaceAsCascaderPathSeparator(text) {
+		const parts = String(text || '').trim().split(/\s+/).filter(Boolean)
+		if (parts.length < 2) return false
+		return parts.every((part) => /^[\u4e00-\u9fff]{1,12}$/.test(cleanAssignmentValue(part)))
 	}
 
 	function cleanCascaderPathPart(value) {

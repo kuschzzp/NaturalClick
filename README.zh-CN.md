@@ -26,7 +26,7 @@ NaturalClick Agent 是一个 Chrome 扩展，它把浏览器侧边栏变成一�
 
 这不是隐蔽自动化工具，也不是 CAPTCHA 绕过项目。目标是透明、可调试、用户可控的真实网页自动化。
 
-当前扩展版本：`0.5.1`。版本号以 `naturalclick-extension/manifest.json` 为准。
+当前扩展版本：`0.6.1`。版本号以 `naturalclick-extension/manifest.json` 为准。
 
 版本规则：尾版本号必须保持在 `1-99`；`0.X.99` 之后进位到 `0.(X+1).1`。每个 `0.X.1` 版本都必须提交并 push 一次代码。
 
@@ -246,6 +246,14 @@ node -e "JSON.parse(require('fs').readFileSync('naturalclick-extension/manifest.
 ```bash
 node scripts/validate-runtime-contracts.js
 ```
+
+升级版本号时使用脚本，不要手动递增尾号：
+
+```bash
+node scripts/bump-version.js patch
+```
+
+脚本会同步 `manifest.json`、README 和诊断文档，并在 `0.X.99` 后自动进位到 `0.(X+1).1`。如果输出的新版本是 `0.X.1`，必须先运行契约检查，然后按脚本提示提交并 push 一次。
 
 修改扩展文件后：
 

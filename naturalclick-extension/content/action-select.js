@@ -17,14 +17,17 @@
 			findDropdownOptionByScrolling,
 			listVisibleOptionLabels,
 			getVisibleOptionLabel,
+			normalizeComparableText,
 			resolveDropdownTrigger,
 			resolveNativeSelect,
 			listNativeSelectOptionLabels,
 			selectOptionByText,
 			resolveSelectableClickTarget,
+			findCascaderOptionByCompactTarget,
 			findCascaderOptionByScrolling,
 			bringCascaderOptionIntoView,
 			getCascaderLevelSignature,
+			listCascaderLevelLabels,
 			waitForCascaderMenuLevel,
 			summarizeCascaderLevel,
 		} = deps || {}
@@ -116,10 +119,18 @@
 					nativeSelect.dispatchEvent(new Event('input', { bubbles: true }))
 					nativeSelect.dispatchEvent(new Event('change', { bubbles: true }))
 					const after = getElementInteractionState(field)
+					const nativeLabels = listNativeSelectOptionLabels(nativeSelect, 20)
 					return {
 						success: true,
 						message: appendStateChange(`已选择下拉选项 "${matched.label}"。`, before, after),
-						meta: { before, after, outcome: createOutcome(OUTCOME_KIND.VALUE_CHANGED) },
+						meta: {
+							before,
+							after,
+							outcome: attachVisibleOptionEvidence(
+								createOutcome(OUTCOME_KIND.VALUE_CHANGED),
+								nativeLabels.length ? nativeLabels : [matched.label]
+							),
+						},
 					}
 				}
 				if (field) {
@@ -180,6 +191,7 @@
 						: undefined,
 				})
 			}
+			const matchedOptionLabel = observer.shortText(getVisibleOptionLabel(option) || lookupText, 36) || lookupText
 			await humanLikeClick(option, null, inputMode)
 			const completedRange = await maybeCompleteDateRangeSelection({
 				field,
@@ -195,14 +207,15 @@
 					reason: 'date_range_second_option_selected',
 					requestedText: text,
 				})
-				: rangeStarted
-					? createOutcome(OUTCOME_KIND.STATE_CHANGED, {
-						reason: 'date_range_first_option_selected',
-						requestedText: text,
-						selectedDate: lookupText,
-						pendingText: dateSelectionTexts[1],
-					})
+					: rangeStarted
+						? createOutcome(OUTCOME_KIND.STATE_CHANGED, {
+							reason: 'date_range_first_option_selected',
+							requestedText: text,
+							selectedDate: lookupText,
+							pendingText: dateSelectionTexts[1],
+						})
 					: selection.outcome
+			const evidencedOutcome = attachVisibleOptionEvidence(outcome, [matchedOptionLabel])
 			const messageText = rangeStarted
 				? `已选择日期范围起点 "${lookupText}"，等待选择结束日期 "${dateSelectionTexts[1]}"。`
 				: `已选择下拉选项 "${selectedText}"。`
@@ -213,7 +226,7 @@
 					before,
 					after: selection.after,
 					optionAfter: selection.optionAfter,
-					outcome,
+					outcome: evidencedOutcome,
 				},
 			}
 		}
@@ -289,20 +302,19 @@
 			await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 100)
 			const after = getElementInteractionState(option)
 			const selectedLabel = observer.shortText(getVisibleOptionLabel(option) || text, 36) || text
+			const outcome = attachVisibleOptionEvidence(
+				inferInteractionOutcome(before, after, OUTCOME_KIND.NONE),
+				[selectedLabel]
+			)
 			return {
 				success: true,
 				message: appendStateChange(`已选择复选项 "${selectedLabel}"。`, before, after),
-				meta: { before, after, outcome: inferInteractionOutcome(before, after, OUTCOME_KIND.NONE) },
+				meta: { before, after, outcome },
 			}
 		}
 
 		async function selectCascaderPathAction(input, inputMode) {
-			const path = Array.isArray(input.path)
-				? input.path.map((item) => String(item || '').trim()).filter(Boolean)
-				: String(input.path || '')
-						.split(/[>\/,，]+/)
-						.map((item) => item.trim())
-						.filter(Boolean)
+			const path = normalizeCascaderPathInput(input.path)
 			if (!path.length) return { success: false, message: 'select_cascader_path 缺少 path。' }
 
 			const index = Number(input.index)
@@ -323,6 +335,15 @@
 					await openCascaderField(field, inputMode)
 				}
 			}
+			if (path.length === 1 && isCompactCascaderTarget(path[0]) && typeof findCascaderOptionByCompactTarget === 'function') {
+				return await selectCompactCascaderPathAction({
+					index,
+					field,
+					before,
+					targetText: path[0],
+					inputMode,
+				})
+			}
 
 			for (let i = 0; i < path.length; i++) {
 				const label = path[i]
@@ -331,7 +352,7 @@
 					return buildSelectionFailureResult({
 						index: Number.isFinite(index) ? index : null,
 						requestedText: label,
-						visibleOptions: [],
+						visibleOptions: getCascaderVisibleOptions(i),
 						reason: `级联选择失败：未找到第 ${i + 1} 级选项 "${label}"。${summarizeCascaderLevel(i)}`,
 						source: `cascader_level_${i + 1}`,
 						candidateLabel: `第 ${i + 1} 级可见候选`,
@@ -347,7 +368,7 @@
 						return buildSelectionFailureResult({
 							index: Number.isFinite(index) ? index : null,
 							requestedText: nextLabel,
-							visibleOptions: [],
+							visibleOptions: getCascaderVisibleOptions(i + 1),
 							reason: `级联选择失败：已尝试悬浮并点击第 ${i + 1} 级 "${label}" 的展开区域/父级行，但第 ${i + 2} 级菜单仍未展开，停止继续滚动上一级菜单。${summarizeCascaderLevel(i)}`,
 							source: `cascader_level_${i + 2}`,
 							candidateLabel: `第 ${i + 2} 级可见候选`,
@@ -366,12 +387,172 @@
 				? getElementInteractionState(field)
 				: readDropdownSelectionState(null, finalOption)
 			const optionAfter = readOptionSelectionState(finalOption)
-			const outcome = inferDropdownSelectionOutcome(before, after, optionAfter)
+			const selectionEvidence = {
+				requestedPath: path.slice(),
+				selectedPath: path.slice(),
+				selectedLabels: path.slice(),
+			}
+			const outcome = attachCascaderSelectionEvidence(
+				inferDropdownSelectionOutcome(before, after, optionAfter),
+				selectionEvidence
+			)
 			return {
 				success: true,
 				message: appendStateChange(`已按路径选择级联选项：${path.join(' > ')}。`, before, after),
-				meta: { before, after, optionAfter, outcome },
+				meta: { before, after, optionAfter, outcome, ...selectionEvidence },
 			}
+		}
+
+		async function selectCompactCascaderPathAction({ index, field, before, targetText, inputMode }) {
+			const selectedLabels = []
+			let remaining = normalizeComparableText(targetText)
+			let finalOption = null
+			for (let level = 0; level < 8 && remaining; level++) {
+				const match = await findCascaderOptionByCompactTarget(remaining, level, inputMode)
+				const option = match?.option
+				if (!(option instanceof HTMLElement)) {
+					return buildSelectionFailureResult({
+						index: Number.isFinite(index) ? index : null,
+						requestedText: remaining,
+						visibleOptions: getCascaderVisibleOptions(level),
+						reason: `级联选择失败：未能从紧凑目标 "${targetText}" 匹配第 ${level + 1} 级选项。${summarizeCascaderLevel(level)}`,
+						source: `compact_cascader_level_${level + 1}`,
+						candidateLabel: `第 ${level + 1} 级可见候选`,
+						emptyCandidateText: `当前第 ${level + 1} 级没有检测到可用于匹配紧凑目标的候选。`,
+						advice: '下一步建议：请求当前级联区域上下文，或换用带分隔符的完整路径。',
+					})
+				}
+				const label = String(match?.label || getVisibleOptionLabel(option) || remaining).trim()
+				selectedLabels.push(label || remaining)
+				await bringCascaderOptionIntoView(option, inputMode)
+				const nextRemaining = consumeCompactCascaderTarget(remaining, match?.consumedKey || label)
+				if (nextRemaining && level < 7) {
+					const nextLevelReady = await expandCascaderParentOption(option, level + 1, inputMode, nextRemaining)
+					if (!nextLevelReady) {
+						return buildSelectionFailureResult({
+							index: Number.isFinite(index) ? index : null,
+							requestedText: nextRemaining,
+							visibleOptions: getCascaderVisibleOptions(level + 1),
+							reason: `级联选择失败：已从紧凑目标 "${targetText}" 匹配到第 ${level + 1} 级 "${label}"，但第 ${level + 2} 级菜单未展开。${summarizeCascaderLevel(level)}`,
+							source: `compact_cascader_level_${level + 2}`,
+							candidateLabel: `第 ${level + 2} 级可见候选`,
+							emptyCandidateText: `当前第 ${level + 2} 级没有展开出候选。`,
+							advice: '下一步建议：保持当前父级菜单状态后重新观察，或使用页面真实存在的完整路径。',
+						})
+					}
+					remaining = nextRemaining
+					continue
+				}
+				finalOption = option
+				remaining = nextRemaining
+				await humanLikeClick(option, null, inputMode)
+				break
+			}
+			if (!(finalOption instanceof HTMLElement)) {
+				return buildSelectionFailureResult({
+					index: Number.isFinite(index) ? index : null,
+					requestedText: remaining || targetText,
+					visibleOptions: getCascaderVisibleOptions(0),
+					reason: `级联选择失败：紧凑目标 "${targetText}" 未能落到可点击叶子选项。`,
+					source: 'compact_cascader_leaf',
+					candidateLabel: '当前级联候选',
+					emptyCandidateText: '当前级联没有检测到可点击叶子候选。',
+					advice: '下一步建议：换用带分隔符的完整路径，或请求当前级联候选上下文。',
+				})
+			}
+			await sleep(inputMode === 'realistic' ? randomBetween(100, 180) : 90)
+			await dismissSelectionPopup(field || finalOption, inputMode)
+			const after = field instanceof HTMLElement
+				? getElementInteractionState(field)
+				: readDropdownSelectionState(null, finalOption)
+			const optionAfter = readOptionSelectionState(finalOption)
+			const selectionEvidence = {
+				requestedPath: [targetText],
+				selectedPath: selectedLabels.slice(),
+				selectedLabels: selectedLabels.slice(),
+			}
+			const outcome = attachCascaderSelectionEvidence(
+				inferDropdownSelectionOutcome(before, after, optionAfter),
+				selectionEvidence
+			)
+			return {
+				success: true,
+				message: appendStateChange(`已按紧凑目标选择级联选项：${selectedLabels.join(' > ')}。`, before, after),
+				meta: { before, after, optionAfter, outcome, ...selectionEvidence },
+			}
+		}
+
+		function attachCascaderSelectionEvidence(outcome, evidence) {
+			const base = outcome && typeof outcome === 'object'
+				? outcome
+				: createOutcome(OUTCOME_KIND.NONE)
+			return {
+				...base,
+				requestedPath: Array.isArray(evidence?.requestedPath) ? evidence.requestedPath.slice() : [],
+				selectedPath: Array.isArray(evidence?.selectedPath) ? evidence.selectedPath.slice() : [],
+				selectedLabels: Array.isArray(evidence?.selectedLabels) ? evidence.selectedLabels.slice() : [],
+			}
+		}
+
+		function attachVisibleOptionEvidence(outcome, visibleOptions) {
+			const base = outcome && typeof outcome === 'object'
+				? outcome
+				: createOutcome(OUTCOME_KIND.NONE)
+			const options = Array.isArray(visibleOptions)
+				? visibleOptions.map((item) => String(item || '').trim()).filter(Boolean)
+				: []
+			if (!options.length) return base
+			const merged = []
+			const seen = new Set()
+			for (const value of options) {
+				const key = normalizeComparableText(value)
+				if (!key || seen.has(key)) continue
+				seen.add(key)
+				merged.push(value)
+			}
+			return { ...base, visibleOptions: merged }
+		}
+
+		function isCompactCascaderTarget(value) {
+			return normalizeComparableText(value).length >= 2
+		}
+
+		function normalizeCascaderPathInput(value) {
+			if (Array.isArray(value)) {
+				return value.map((item) => String(item || '').trim()).filter(Boolean)
+			}
+			const text = String(value || '').trim()
+			if (!text) return []
+			const separatorPattern = getCascaderPathSeparatorPattern(text)
+			return text
+				.split(separatorPattern)
+				.map((item) => String(item || '').trim())
+				.filter(Boolean)
+		}
+
+		function consumeCompactCascaderTarget(targetText, consumedText) {
+			const target = normalizeComparableText(targetText)
+			const consumed = normalizeComparableText(consumedText)
+			if (!target || !consumed) return target
+			if (!target.startsWith(consumed)) return target
+			return stripLeadingCascaderPathSeparators(target.slice(consumed.length))
+		}
+
+		function getCascaderPathSeparatorPattern(text) {
+			const source = String(text || '')
+			const allowBareDash = /[\u4e00-\u9fff][\-–—－][\u4e00-\u9fff]/.test(source)
+			const dash = allowBareDash ? '|[-–—－]' : '|\\s+[-–—－]\\s+'
+			return new RegExp(`\\s*(?:->|=>|→|＞|>|/|\\\\|,|，|、|;|；|\\|${dash})\\s*`, 'g')
+		}
+
+		function stripLeadingCascaderPathSeparators(value) {
+			return String(value || '').replace(/^(?:->|=>|→|＞|>|\/|\\|,|，|、|;|；|\||[-–—－])+/g, '')
+		}
+
+		function getCascaderVisibleOptions(levelIndex) {
+			return typeof listCascaderLevelLabels === 'function'
+				? listCascaderLevelLabels(levelIndex, 12)
+				: []
 		}
 
 		async function expandCascaderParentOption(option, nextLevelIndex, inputMode, expectedNextLabel = '') {
@@ -686,15 +867,39 @@
 			const text = String(value || '')
 			const matches = []
 			const seen = new Set()
-			const pattern = /(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})/g
-			for (const match of text.matchAll(pattern)) {
-				const normalized = `${match[1]}-${pad2(match[2])}-${pad2(match[3])}`
-				if (seen.has(normalized)) continue
+			const push = (year, month, day) => {
+				const normalized = normalizeDateSelectionParts(year, month, day)
+				if (!normalized) return
+				if (seen.has(normalized)) return
 				seen.add(normalized)
 				matches.push(normalized)
+			}
+			const pattern = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})/g
+			for (const match of text.matchAll(pattern)) {
+				push(match[1], match[2], match[3])
+				if (matches.length >= 2) break
+			}
+			for (const match of text.matchAll(/\b(\d{4})(\d{2})(\d{2})\b/g)) {
+				push(match[1], match[2], match[3])
 				if (matches.length >= 2) break
 			}
 			return matches
+		}
+
+		function normalizeDateSelectionParts(year, month, day) {
+			const yearNum = Number(year)
+			const monthNum = Number(month)
+			const dayNum = Number(day)
+			if (![yearNum, monthNum, dayNum].every(Number.isFinite)) return ''
+			const date = new Date(Date.UTC(yearNum, monthNum - 1, dayNum))
+			if (
+				date.getUTCFullYear() !== yearNum ||
+				date.getUTCMonth() + 1 !== monthNum ||
+				date.getUTCDate() !== dayNum
+			) {
+				return ''
+			}
+			return `${yearNum}-${pad2(monthNum)}-${pad2(dayNum)}`
 		}
 
 		function pad2(value) {

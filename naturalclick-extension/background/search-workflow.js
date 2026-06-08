@@ -450,7 +450,13 @@
 		const candidateText = String(candidate?.text || candidate || '').trim()
 		const source = String(candidate?.source || 'option_candidate').trim()
 		const basis = String(candidate?.basis || '真实可见候选').trim()
-		const actionName = isCheckboxLikeField(field) ? 'select_checkbox_option' : 'choose_dropdown_option'
+		const isCascader = isCascaderLikeField(field)
+		const actionName = isCheckboxLikeField(field)
+			? 'select_checkbox_option'
+			: isCascader
+				? 'select_cascader_path'
+				: 'choose_dropdown_option'
+		const cascaderPath = isCascader ? parseSearchCascaderCandidatePath(candidateText) : []
 		return {
 			evaluation_previous_goal: `已获得搜索字段 "${label}" 的真实候选。`,
 			memory: `选择候选 "${candidateText}" 后提交搜索；候选来源=${source}${basis ? `，依据=${basis}` : ''}。`,
@@ -463,12 +469,14 @@
 				input: {
 					...buildFieldWorkflowInput(field),
 					index: Number(field.index),
-					text: candidateText,
-					label: candidateText,
 					target_label: label,
 					workflow_value_source: source,
 					workflow_value_basis: basis,
 					workflow_step: 'select_option',
+					workflow_test_value: candidateText,
+					...(isCascader
+						? { path: cascaderPath }
+						: { text: candidateText, label: candidateText }),
 				},
 			},
 		}
@@ -1774,6 +1782,9 @@
 					return
 				}
 			}
+			if (isDropdownChoiceHistory(item)) {
+				rememberSelectedSearchChoiceEvidence(state, key, input, historyOutcome)
+			}
 			state.phase = 'awaiting_submit'
 			clearPendingDateRangeStart(state, key)
 			state.pendingDropdownOutput = ''
@@ -1837,6 +1848,47 @@
 		].filter(Boolean).join(' '))
 		return /(global_popup_diagnostic|global_selectable_popup_diagnostic|字段外可见|字段外候选|不要直接选择字段外候选|候选未能与目标字段建立稳定归属|未归属到目标字段|没有稳定归属|不能直接选择.*候选)/i.test(text)
 			|| /(诊断候选|diagnostic_(?:options|popups)|field[-_\s]?external|unscoped).*(候选|candidate|option)/i.test(text)
+	}
+
+	function rememberSelectedSearchChoiceEvidence(state, key, input, outcome) {
+		if (!state || !key) return
+		const field = state.fields?.[key] || {}
+		const selectedPath = getOutcomeSelectedPath(outcome)
+		const selectedValue = selectedPath.length
+			? selectedPath.join(' / ')
+			: getMatchedSearchChoiceVisibleOption(input, outcome)
+		if (!selectedValue) return
+		const basis = selectedPath.length
+			? `动作结果返回已选路径：${selectedValue}`
+			: `动作结果返回可见候选并包含所选值：${selectedValue}`
+		rememberFieldMetadata(state, key, {
+			...input,
+			workflow_test_value: selectedValue,
+			workflow_value_source: field.lastValueSource || input?.workflow_value_source || 'visible_option',
+			workflow_value_basis: mergeSearchChoiceEvidenceBasis(field.lastValueBasis || input?.workflow_value_basis || '', basis),
+		})
+	}
+
+	function getMatchedSearchChoiceVisibleOption(input, outcome) {
+		const options = getOutcomeVisibleOptions(outcome)
+		if (!options.length) return ''
+		const requested = normalizeText([
+			input?.workflow_test_value,
+			input?.text,
+			input?.label,
+			input?.value,
+		].filter(Boolean).join(' '))
+		if (!requested && options.length === 1) return options[0]
+		const exact = options.find((option) => normalizeText(option) === requested)
+		return exact || ''
+	}
+
+	function mergeSearchChoiceEvidenceBasis(current, addition) {
+		const base = String(current || '').trim()
+		const extra = String(addition || '').trim()
+		if (!base) return extra
+		if (!extra || base.includes(extra)) return base
+		return `${base}；${extra}`
 	}
 
 	function isDateRangeFirstOptionSelection(state, key, item, outcome) {
@@ -2163,6 +2215,10 @@
 		return searchHistory.getOutcomeVisibleOptions(outcome)
 	}
 
+	function getOutcomeSelectedPath(outcome) {
+		return searchHistory.getOutcomeSelectedPath(outcome)
+	}
+
 	function normalizeOutcomeObject(outcome) {
 		return searchHistory.normalizeOutcomeObject(outcome)
 	}
@@ -2370,7 +2426,7 @@
 	function findSearchResetAction(observation, fields = []) {
 		return findActionByText(
 			observation,
-			/(重置|清空|清除|清理|恢复默认|取消筛选|清除筛选|清空筛选|重置筛选|移除筛选|清除过滤|清空过滤|重置过滤|清除条件|清空条件|重置条件|清除查询|清空查询|重置查询|reset|clear|removefilter|clearcriteria|resetcriteria|clearquery|resetquery)/i,
+			/(重置|清空|清除|清理|恢复默认|取消筛选|清除筛选|清空筛选|重置筛选|移除筛选|清除过滤|清空过滤|重置过滤|清除条件|清空条件|重置条件|清除全部条件|全部清除条件|清空全部条件|重置全部条件|清空表单|重置表单|清空字段|重置字段|清除字段|清除已选|清空已选|重置已选|清除选择|清空选择|重置选择|取消选择|取消全部选择|清除查询|清空查询|重置查询|reset|clear|removefilter|clearcriteria|clearallcriteria|resetcriteria|resetallcriteria|removecriteria|removeallcriteria|clearform|resetform|clearfields|resetfields|removefields|clearselection|clearselections|resetselection|resetselections|clearselected|remove selected|removeselected|deselectall|unselectall|clearquery|resetquery)/i,
 			fields,
 			'reset'
 		)
@@ -2412,8 +2468,8 @@
 			if (/(search|query|submit|filter|搜索|查询|查找|检索|筛选|过滤|确定|确认|提交)/i.test(intent)) score -= 40
 		} else if (kind === 'reset') {
 			if (isExplicitFilterResetActionText(intent)) score -= 95
-			if (/^(重置|清空|清除|清理|恢复默认|清空全部|全部清空|重置全部|全部重置|reset|clear|clearall|resetall)$/.test(label)) score -= 80
-			if (/(reset|clear|重置|清空|清除|清理|恢复默认|取消筛选|清除筛选|清空筛选|重置筛选|移除筛选|清除过滤|清空过滤|重置过滤|清除条件|清空条件|重置条件|清除查询|清空查询|重置查询|clearfilters|clearallfilters|resetfilters|resetallfilters|removefilters|removeallfilters|clearcriteria|resetcriteria|clearquery|resetquery)/i.test(intent)) score -= 40
+			if (/^(重置|清空|清除|清理|恢复默认|清空全部|全部清空|重置全部|全部重置|清除全部条件|全部清除条件|清空全部条件|重置全部条件|清空表单|重置表单|清空字段|重置字段|清除字段|清除已选|清空已选|重置已选|清除选择|清空选择|重置选择|取消选择|取消全部选择|reset|clear|clearall|resetall|clearallcriteria|resetallcriteria|removeallcriteria|clearform|resetform|clearfields|resetfields|removefields|clearselection|clearselections|resetselection|resetselections|clearselected|removeselected|deselectall|unselectall)$/.test(label)) score -= 80
+			if (/(reset|clear|重置|清空|清除|清理|恢复默认|取消筛选|清除筛选|清空筛选|重置筛选|移除筛选|清除过滤|清空过滤|重置过滤|清除条件|清空条件|重置条件|清除已选|清空已选|重置已选|清除选择|清空选择|重置选择|取消选择|取消全部选择|清除查询|清空查询|重置查询|clearfilters|clearallfilters|resetfilters|resetallfilters|removefilters|removeallfilters|clearcriteria|resetcriteria|clearselection|clearselections|resetselection|resetselections|clearselected|removeselected|deselectall|unselectall|clearquery|resetquery)/i.test(intent)) score -= 40
 		}
 		const spatial = scoreSearchActionSpatialRelation(action, fields)
 		if (Number.isFinite(spatial)) score += spatial
@@ -2446,19 +2502,33 @@
 		const text = normalizedText || normalizeText(getActionSearchText(action))
 		if (!text) return false
 		if (/(resetpassword|forgotpassword|找回密码|忘记密码)/i.test(text)) return false
-		if (isExplicitFilterResetActionText(text)) return true
+		if (isExplicitFilterResetActionText(text)) {
+			if (isSelectionResetActionText(text)) return hasSelectionResetActionEvidence(action, fields)
+			return true
+		}
 		if (isDangerousNonResetActionText(text)) return false
 		const label = normalizeText(getActionLabel(action))
 		const intent = normalizeText(action?.actionIntent || action?.intent || '')
 		if (intent === 'reset') return !isSearchActionSpatiallyContradicted(action, fields)
-		if (/^(重置|清空|清除|清理|恢复默认|清空全部|全部清空|重置全部|全部重置|reset|clear|clearall|resetall)$/.test(label)) {
+		if (/^(重置|清空|清除|清理|恢复默认|清空全部|全部清空|重置全部|全部重置|清除全部条件|全部清除条件|清空全部条件|重置全部条件|清空表单|重置表单|清空字段|重置字段|清除字段|清除已选|清空已选|重置已选|清除选择|清空选择|重置选择|取消选择|取消全部选择|reset|clear|clearall|resetall|clearallcriteria|resetallcriteria|removeallcriteria|clearform|resetform|clearfields|resetfields|removefields|clearselection|clearselections|resetselection|resetselections|clearselected|removeselected|deselectall|unselectall)$/.test(label)) {
+			if (isSelectionResetActionText(label)) return hasSelectionResetActionEvidence(action, fields)
 			return !isSearchActionSpatiallyContradicted(action, fields)
 		}
 		return false
 	}
 
 	function isExplicitFilterResetActionText(text) {
-		return /(取消筛选|清除筛选|清空筛选|重置筛选|移除筛选|取消过滤|清除过滤|清空过滤|重置过滤|移除过滤|清除条件|清空条件|重置条件|清除搜索|清空搜索|重置搜索|清除查询|清空查询|重置查询|clearfilter|clearfilters|clearallfilters|resetfilter|resetfilters|resetallfilters|removefilter|removefilters|removeallfilters|clearsearch|resetsearch|clearcondition|resetcondition|clearcriteria|resetcriteria|clearquery|resetquery)/i.test(normalizeActionCueText(text))
+		return /(取消筛选|清除筛选|清空筛选|重置筛选|移除筛选|取消过滤|清除过滤|清空过滤|重置过滤|移除过滤|清除条件|清空条件|重置条件|清除全部条件|全部清除条件|清空全部条件|重置全部条件|清空表单|重置表单|清空字段|重置字段|清除字段|清除已选|清空已选|重置已选|清除选择|清空选择|重置选择|取消选择|取消全部选择|清除搜索|清空搜索|重置搜索|清除查询|清空查询|重置查询|clearfilter|clearfilters|clearallfilters|resetfilter|resetfilters|resetallfilters|removefilter|removefilters|removeallfilters|clearsearch|resetsearch|clearcondition|resetcondition|clearcriteria|clearallcriteria|resetcriteria|resetallcriteria|removecriteria|removeallcriteria|clearform|resetform|clearfields|resetfields|removefields|clearselection|clearselections|resetselection|resetselections|clearselected|removeselected|deselectall|unselectall|clearquery|resetquery)/i.test(normalizeActionCueText(text))
+	}
+
+	function isSelectionResetActionText(text) {
+		return /(清除已选|清空已选|重置已选|清除选择|清空选择|重置选择|取消选择|取消全部选择|clearselection|clearselections|resetselection|resetselections|clearselected|removeselected|deselectall|unselectall)/i.test(normalizeActionCueText(text))
+	}
+
+	function hasSelectionResetActionEvidence(action, fields = []) {
+		if (isSearchActionSpatiallyContradicted(action, fields)) return false
+		if (hasSearchActionSpatialEvidence(action, fields)) return true
+		return (Array.isArray(fields) ? fields : []).some(isSelectionField)
 	}
 
 	function isDangerousNonResetActionText(text) {
@@ -2617,18 +2687,46 @@
 		if (!Number.isFinite(Number(field.index))) return false
 		if (!isPageSearchRegion(field)) return false
 		if (isSelectionField(field)) return false
+		if (isUnsafeSearchFieldClearTarget(field)) return false
 		if (hasReadonlyOrDisabledState(field)) return false
 		if (field.editable === false) return false
 		const role = String(field.role || '').toLowerCase()
 		const tag = String(field.tag || '').toLowerCase()
 		const type = String(field.type || '').toLowerCase()
 		const fieldType = String(field.fieldType || '').toLowerCase()
-		if (/(select|dropdown|date|time|range|checkbox|radio|switch|cascader)/i.test(fieldType)) return false
+		if (/(select|dropdown|date|time|range|checkbox|radio|switch|cascader|picker|calendar|multi|multiple)/i.test(fieldType)) return false
 		if (['textbox', 'searchbox'].includes(role)) return true
 		if (tag === 'textarea') return true
 		if (tag === 'input') return !type || /^(text|search|email|tel|url|number)$/i.test(type)
 		if (type && /^(text|search|email|tel|url|number)$/i.test(type)) return true
 		return field.editable === true
+	}
+
+	function isUnsafeSearchFieldClearTarget(field) {
+		if (!field || typeof field !== 'object') return false
+		if (/^selected:/i.test(String(field.valueState || field.value || ''))) return true
+		if (isTemporalSearchField(field)) return true
+		const structuralText = normalizeText([
+			field.fieldType,
+			field.selectionControl,
+			field.control,
+			field.role,
+			field.className,
+			field.classes,
+			field.inputMode,
+		].filter(Boolean).join(' '))
+		if (/(select|dropdown|combobox|listbox|picker|calendar|cascader|tree|checkbox|radio|switch|multi|multiple)/i.test(structuralText)) {
+			return true
+		}
+		const promptText = normalizeText([
+			field.placeholder,
+			field.ariaLabel,
+			field.aria_label,
+			field.title,
+			field.name,
+			field.valueState,
+		].filter(Boolean).join(' '))
+		return /^(请选择|选择|select|choose|pick)/i.test(promptText)
 	}
 
 	function hasReadonlyOrDisabledState(field) {
@@ -2735,6 +2833,12 @@
 	function extractTaskValueAfterLabel(taskText, label, field = null) {
 		const rawLabel = String(label || '').trim()
 		if (!rawLabel) return ''
+		if (isDateRangeField(field)) {
+			const rangeValue = extractDateRangeTaskValueAfterLabel(taskText, rawLabel)
+			if (rangeValue) return rangeValue
+		}
+		const wrappedValue = extractWrappedTaskValueAfterLabel(taskText, rawLabel, field)
+		if (wrappedValue) return wrappedValue
 		const escaped = rawLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 		const pattern = new RegExp(`${escaped}\\s*(是|为|=|:|：|设为|设置为|选择)?\\s*([^\\s,，;；。]{1,64})`, 'ig')
 		for (const match of String(taskText || '').matchAll(pattern)) {
@@ -2746,6 +2850,62 @@
 			return value
 		}
 		return ''
+	}
+
+	function extractWrappedTaskValueAfterLabel(taskText, label, field = null) {
+		const source = String(taskText || '')
+		const rawLabel = String(label || '').trim()
+		if (!source.trim() || !rawLabel) return ''
+		const escaped = rawLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+		const connector = '(?:设置为|设定为|指定为|选择为|选为|填写为|填为|输入为|录入为|搜索为|查询为|设为|是|为|=|:|：|equals?|is|set\\s+to)'
+		const wrappers = [
+			['["“]', '["”]'],
+			["['‘]", "['’]"],
+			['`', '`'],
+			['「', '」'],
+			['『', '』'],
+			['《', '》'],
+			['【', '】'],
+			['\\[', '\\]'],
+			['\\(', '\\)'],
+			['（', '）'],
+		]
+		for (const [open, close] of wrappers) {
+			const pattern = new RegExp(`${escaped}\\s*${connector}\\s*${open}([^\\n]{1,64}?)${close}`, 'ig')
+			for (const match of source.matchAll(pattern)) {
+				const value = String(match?.[1] || '').trim()
+				if (!value) continue
+				if (isCredentialSearchValueAmbiguous(source, field, match.index || 0)) continue
+				return value
+			}
+		}
+		return ''
+	}
+
+	function extractDateRangeTaskValueAfterLabel(taskText, label) {
+		const rawLabel = String(label || '').trim()
+		if (!rawLabel) return ''
+		const escaped = rawLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+		const pattern = new RegExp(`${escaped}\\s*(?:是|为|=|:|：|设为|设置为|选择|从|在)?\\s*([^,，;；。\\n]{1,160})`, 'ig')
+		for (const match of String(taskText || '').matchAll(pattern)) {
+			const text = String(match?.[1] || '').trim()
+			const range = extractExplicitDateRangeText(text)
+			if (range) return range
+		}
+		return ''
+	}
+
+	function extractExplicitDateRangeText(value) {
+		const text = String(value || '').trim()
+		if (!text) return ''
+		const dateToken = '(?:\\d{4}\\s*[-/.年]\\s*\\d{1,2}\\s*[-/.月]\\s*\\d{1,2}\\s*(?:日)?|\\b\\d{8}\\b)'
+		const pattern = new RegExp(`(${dateToken})\\s*(?:至|到|~|～|—|–|－|--|\\.\\.|-|to|through|thru|until|and)\\s*(${dateToken})`, 'i')
+		const match = text.match(pattern)
+		if (!match) return ''
+		const start = normalizeDateCandidate(match[1])
+		const end = normalizeDateCandidate(match[2])
+		if (!start || !end || start === end) return ''
+		return match[0].trim()
 	}
 
 	function extractTypedTaskSearchValue(taskText, field) {
@@ -2761,6 +2921,7 @@
 		}
 		if (/(date|time)/i.test(fieldType) || type === 'date' || /(日期|时间|开始|结束|date|time)/i.test(label)) {
 			patterns.push(/(?:日期|时间|开始时间|结束时间|date|time)\s*(?:是|为|=|:|：)?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2})/i)
+			patterns.push(/(?:时间|开始时间|结束时间|time|starttime|endtime)\s*(?:是|为|=|:|：)?\s*(\d{1,2}\s*:\s*\d{2}(?:\s*:\s*\d{2})?)/i)
 		}
 		if (/(number|amount|price|count|quantity)/i.test(fieldType) || type === 'number') {
 			patterns.push(/(?:数量|金额|价格|编号|编码|number|amount|price|count|quantity)\s*(?:是|为|=|:|：)?\s*([A-Za-z0-9_.-]{1,64})/i)
@@ -2878,10 +3039,17 @@
 		const sample = observedSample || contextSample
 		const sampleBasisPrefix = observedSample ? '当前列表对应列已有' : '补充表格上下文对应列已有'
 		if (sample) {
+			if (isCascaderLikeField(field) && parseSearchCascaderCandidatePath(sample).length) {
+				return {
+					text: sample,
+					source: 'table_sample',
+					basis: `${sampleBasisPrefix}级联路径：${sample}`,
+				}
+			}
 			if (isDateRangeField(field)) {
 				const range = pickDateRangeCandidate(candidates, failed, sample)
 				if (range) {
-					const date = normalizeDateCandidate(sample) || sample
+					const date = extractDateRangeBounds(sample) ? sample : (normalizeDateCandidate(sample) || sample)
 					return {
 						text: range,
 						source: 'table_sample',
@@ -2903,7 +3071,7 @@
 			const taskValue = extractTaskSearchValueForField(String(session?.latestTask || session?.task || ''), field)
 			const range = pickDateRangeCandidate(candidates, failed, taskValue)
 			if (range) {
-				const date = normalizeDateCandidate(taskValue) || taskValue
+				const date = extractDateRangeBounds(taskValue) ? taskValue : (normalizeDateCandidate(taskValue) || taskValue)
 				return {
 					text: range,
 					source: 'task_value',
@@ -2911,6 +3079,16 @@
 				}
 			}
 			return { text: '', source: '', basis: '' }
+		}
+		if (isCascaderLikeField(field)) {
+			const taskValue = extractTaskSearchValueForField(String(session?.latestTask || session?.task || ''), field)
+			if (parseSearchCascaderCandidatePath(taskValue).length) {
+				return {
+					text: taskValue,
+					source: 'task_value',
+					basis: '任务文本明确指定的级联路径',
+				}
+			}
 		}
 		const taskMatched = pickCandidateMatchingTaskValue(candidates, field, session, failed)
 		if (taskMatched) {
@@ -2980,7 +3158,15 @@
 			if (!label) continue
 			scored.push({ label, score })
 		}
-		return scored.sort((a, b) => a.score - b.score).map((entry) => entry.label)
+		if (scored.length) return scored.sort((a, b) => a.score - b.score).map((entry) => entry.label)
+		return collectActiveNewPopupOptionLabels(visibleItems, field)
+	}
+
+	function collectActiveNewPopupOptionLabels(items, field) {
+		const active = controlSemantics?.collectActiveNewPopupItemsForTargets?.(items, [field]) || []
+		return active
+			.map((item) => String(item?.label || item?.text || '').trim())
+			.filter(Boolean)
 	}
 
 	function pickFirstVisibleOptionCandidate(state, field, observation = null) {
@@ -3010,11 +3196,13 @@
 		if (!labels.length) return ''
 		const compactTask = normalizeTaskOptionText(taskText)
 		if (!compactTask) return ''
+		const explicitTaskValue = extractTaskSearchValueForField(taskText, field)
 		for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
 			const text = String(candidate || '').trim()
 			const key = normalizeText(text)
 			const candidateKey = normalizeTaskOptionText(text)
 			if (!key || !candidateKey || failed?.has(key)) continue
+			if (explicitTaskValue && timeCandidatesOverlap(text, explicitTaskValue)) return text
 			if (labels.some((label) => taskMentionsFieldOption(compactTask, label, candidateKey))) return text
 		}
 		return ''
@@ -3056,6 +3244,7 @@
 
 	function scoreCandidateSampleTextMatch(candidateKey, sampleKey) {
 		if (!candidateKey || !sampleKey || candidateKey === sampleKey) return Number.POSITIVE_INFINITY
+		if (timeCandidatesOverlap(candidateKey, sampleKey)) return 1
 		if (
 			optionTextHasBoundedDecorationMatch(candidateKey, sampleKey) ||
 			optionTextHasBoundedDecorationMatch(sampleKey, candidateKey)
@@ -3493,6 +3682,7 @@
 		const valueKey = normalizeText(normalizedValue)
 		if (!cellKey || !valueKey) return false
 		if (cellKey === valueKey) return true
+		if (timeCandidatesOverlap(cell, rawValue || normalizedValue)) return true
 		if (candidateSampleContainsWithBoundaries(cellKey, valueKey)) return true
 		if (formatInsensitiveResultMatches(cell, rawValue || normalizedValue)) return true
 		return temporalRangeCellMatchesValue(cell, rawValue || normalizedValue)
@@ -3761,7 +3951,7 @@
 		if (!text) return false
 		if (normalizeDateCandidate(text)) return true
 		if (parseMonthDayDateCandidate(text)) return true
-		return /\b\d{1,2}\s*:\s*\d{2}(?:\s*:\s*\d{2})?\b/.test(text)
+		return !!normalizeTimeCandidate(text)
 	}
 
 	function temporalRangeCellMatchesValue(cell, rawValue) {
@@ -3784,15 +3974,19 @@
 		const out = []
 		const seen = new Set()
 		const push = (year, month, day) => {
-			const date = `${year}-${pad2(month)}-${pad2(day)}`
+			const date = buildDateFromParts(year, month, day)
+			if (!date) return
 			if (seen.has(date)) return
 			seen.add(date)
 			out.push(date)
 		}
-		for (const match of text.matchAll(/(\d{4})\s*[-/]\s*(\d{1,2})\s*[-/]\s*(\d{1,2})/g)) {
+		for (const match of text.matchAll(/(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})/g)) {
 			push(match[1], match[2], match[3])
 		}
 		for (const match of text.matchAll(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})/g)) {
+			push(match[1], match[2], match[3])
+		}
+		for (const match of text.matchAll(/\b(\d{4})(\d{2})(\d{2})\b/g)) {
 			push(match[1], match[2], match[3])
 		}
 		return out
@@ -3800,6 +3994,8 @@
 
 	function pickDateRangeCandidate(candidates, failed, anchorValue = '') {
 		const fullDateCandidates = collectDateCandidateEntries(candidates, failed)
+		const explicitRange = pickExplicitDateRangeCandidate(candidates, failed, anchorValue, fullDateCandidates)
+		if (explicitRange) return explicitRange
 		const anchorDate = normalizeDateCandidate(anchorValue) ||
 			inferFullDateFromMonthDayCandidate(anchorValue, fullDateCandidates)
 		if (!anchorDate) return ''
@@ -3810,6 +4006,21 @@
 		if (!peer) return pickDateRangeFromDayOnlyCandidates(candidates, failed, anchorDate)
 		const pair = [dates[anchorIndex].date, peer.date].sort(compareDateStrings)
 		return `${pair[0]}..${pair[1]}`
+	}
+
+	function pickExplicitDateRangeCandidate(candidates, failed, anchorValue = '', fullDateCandidates = null) {
+		const range = extractDateRangeBounds(anchorValue)
+		if (!range || range.start === range.end) return ''
+		const pair = [range.start, range.end].sort(compareDateStrings)
+		if (failed?.has(normalizeText(pair[0])) || failed?.has(normalizeText(pair[1]))) return ''
+		const dates = [
+			...(Array.isArray(fullDateCandidates) ? fullDateCandidates : []),
+			...collectDateCandidateEntries(candidates, failed, pair[0]),
+		]
+		const visibleDates = new Set(dates.map((item) => String(item?.date || '').trim()).filter(Boolean))
+		if (visibleDates.has(pair[0]) && visibleDates.has(pair[1])) return `${pair[0]}..${pair[1]}`
+		if (dateRangeEndpointsVisibleAsDayOnly(candidates, failed, pair[0], pair[1])) return `${pair[0]}..${pair[1]}`
+		return ''
 	}
 
 	function collectDateCandidateEntries(candidates, failed, anchorDate = '') {
@@ -3861,7 +4072,7 @@
 		for (const match of text.matchAll(/(?:^|[^\d])(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?/g)) {
 			push(match[1], match[2])
 		}
-		for (const match of text.matchAll(/(?:^|[^\d])(\d{1,2})\s*[-/]\s*(\d{1,2})(?=$|[^\d])/g)) {
+		for (const match of text.matchAll(/(?:^|[^\d])(\d{1,2})\s*[-/.]\s*(\d{1,2})(?=$|[^\d])/g)) {
 			push(match[1], match[2])
 		}
 		return out
@@ -3875,7 +4086,8 @@
 		const monthNum = Number(month)
 		const dayNum = Number(day)
 		if (!Number.isFinite(monthNum) || !Number.isFinite(dayNum)) return null
-		if (monthNum < 1 || monthNum > 12 || dayNum < 1 || dayNum > 31) return null
+		const daysByMonth = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+		if (monthNum < 1 || monthNum > 12 || dayNum < 1 || dayNum > daysByMonth[monthNum - 1]) return null
 		return { month: monthNum, day: dayNum }
 	}
 
@@ -3937,6 +4149,22 @@
 		return ''
 	}
 
+	function dateRangeEndpointsVisibleAsDayOnly(candidates, failed, start, end) {
+		const startParts = parseDateParts(start)
+		const endParts = parseDateParts(end)
+		if (!startParts || !endParts) return false
+		if (startParts.year !== endParts.year || startParts.month !== endParts.month) return false
+		const visibleDays = new Set()
+		for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
+			const text = String(candidate || '').trim()
+			const day = parseDayOnlyDateCandidate(text)
+			if (!day) continue
+			if (failed?.has(normalizeText(text))) continue
+			visibleDays.add(day)
+		}
+		return visibleDays.has(startParts.day) && visibleDays.has(endParts.day)
+	}
+
 	function parseDayOnlyDateCandidate(value) {
 		const text = normalizeText(value)
 		const match = text.match(/^(\d{1,2})(?:日|号|今天|今)?$/)
@@ -3969,10 +4197,45 @@
 
 	function normalizeDateCandidate(value) {
 		const text = String(value || '').trim()
-		let match = text.match(/(\d{4})\s*[-/]\s*(\d{1,2})\s*[-/]\s*(\d{1,2})/)
+		let match = text.match(/(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})/)
 		if (!match) match = text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})/)
+		if (!match) match = text.match(/\b(\d{4})(\d{2})(\d{2})\b/)
 		if (!match) return ''
-		return `${match[1]}-${pad2(match[2])}-${pad2(match[3])}`
+		return buildDateFromParts(match[1], match[2], match[3])
+	}
+
+	function timeCandidatesOverlap(a, b) {
+		const left = extractTimeCandidates(a)
+		const right = new Set(extractTimeCandidates(b))
+		if (!left.length || !right.size) return false
+		return left.some((item) => right.has(item))
+	}
+
+	function extractTimeCandidates(value) {
+		const text = String(value || '').trim()
+		const out = []
+		const seen = new Set()
+		for (const match of text.matchAll(/(?:^|[^\d])(\d{1,2})\s*:\s*(\d{2})(?:\s*:\s*(\d{2}))?(?=$|[^\d])/g)) {
+			const normalized = normalizeTimeParts(match[1], match[2], match[3])
+			if (!normalized || seen.has(normalized)) continue
+			seen.add(normalized)
+			out.push(normalized)
+		}
+		return out
+	}
+
+	function normalizeTimeCandidate(value) {
+		return extractTimeCandidates(value)[0] || ''
+	}
+
+	function normalizeTimeParts(hour, minute, second = '') {
+		const h = Number(hour)
+		const m = Number(minute)
+		const s = second === undefined || second === '' ? 0 : Number(second)
+		if (!Number.isFinite(h) || !Number.isFinite(m) || !Number.isFinite(s)) return ''
+		if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59) return ''
+		const base = `${pad2(h)}:${pad2(m)}`
+		return s ? `${base}:${pad2(s)}` : base
 	}
 
 	function pad2(value) {
@@ -3983,6 +4246,37 @@
 		const control = String(field?.selectionControl || field?.control || '').toLowerCase()
 		const fieldType = String(field?.fieldType || '').toLowerCase()
 		return /(checkbox|multi|multiple)/i.test(control) || /(checkbox|multi|multiple)/i.test(fieldType)
+	}
+
+	function isCascaderLikeField(field) {
+		const control = String(field?.selectionControl || field?.control || '').toLowerCase()
+		const fieldType = String(field?.fieldType || '').toLowerCase()
+		return /(cascader|tree|hierarchy)/i.test(control) ||
+			/(cascader|tree|hierarchy)/i.test(fieldType)
+	}
+
+	function parseSearchCascaderCandidatePath(value) {
+		const text = String(value || '').trim()
+		if (!text) return []
+		const separatorPattern = getCascaderPathSeparatorPattern(text)
+		const parts = text
+			.split(separatorPattern)
+			.map((part) => part.trim())
+			.filter(Boolean)
+		const path = parts.length > 1 ? parts : [text]
+		return path
+			.map((part) => String(part || '').trim())
+			.filter((part) => {
+				const key = normalizeText(part)
+				return key && key.length <= 40 && !/^(请选择|选择|全部|不限|未知|empty|\(empty\))$/i.test(key)
+			})
+	}
+
+	function getCascaderPathSeparatorPattern(text) {
+		const source = String(text || '')
+		const allowBareDash = /[\u4e00-\u9fff][\-–—－][\u4e00-\u9fff]/.test(source)
+		const dash = allowBareDash ? '|[-–—－]' : '|\\s+[-–—－]\\s+'
+		return new RegExp(`\\s*(?:->|=>|→|＞|>|/|\\\\|,|，|、|;|；|\\|${dash})\\s*`, 'g')
 	}
 
 	function normalizeText(value) {

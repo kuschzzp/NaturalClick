@@ -51,6 +51,7 @@
 		publishSession,
 	} = sessionLifecycle
 	const {
+		classifyLoopGuardReason,
 		countRecentLoopGuardFailures,
 		detectActionLoop,
 		detectRedundantInputRewrite,
@@ -481,7 +482,7 @@
 	}
 
 	function buildWorkflowStepActivityText(workflowStep, input) {
-		const label = cleanActivityFragment(input?.target_label || input?.workflow_field_label || input?.label || input?.text)
+		const label = getWorkflowActivityTitleLabel(workflowStep, input)
 		const templates = {
 			fill_username: '填写登录账号',
 			fill_password: '填写登录密码',
@@ -506,6 +507,7 @@
 			resolve_duplicate_field_conflict: '替换重复字段内容',
 			resolve_field_validation_error: '修正校验失败字段',
 			open_create_form_timeout_recovery: '打开创建入口',
+			finish_create_after_submit_no_form: '确认创建提交完成',
 		}
 		const base = templates[workflowStep] || ''
 		if (!base) return ''
@@ -514,10 +516,39 @@
 		return `${title}${detail}`
 	}
 
+	function getWorkflowActivityTitleLabel(workflowStep, input) {
+		const fieldLabel = cleanActivityFragment(input?.workflow_field_label)
+		if (fieldLabel && isFieldScopedWorkflowActivity(workflowStep)) return fieldLabel
+		if (workflowStep === 'open_create_form_timeout_recovery') {
+			return cleanActivityFragment(input?.workflow_create_label || input?.target_label || input?.label || input?.text)
+		}
+		if (workflowStep === 'submit_form_timeout_recovery') {
+			return cleanActivityFragment(input?.workflow_submit_label || input?.target_label || input?.label || input?.text)
+		}
+		return cleanActivityFragment(input?.target_label || fieldLabel || input?.label || input?.text)
+	}
+
+	function isFieldScopedWorkflowActivity(workflowStep) {
+		return [
+			'fill_field',
+			'open_dropdown',
+			'select_option',
+			'clear_field',
+			'skip_field',
+			'fill_form_field_timeout_recovery',
+			'open_form_dropdown_timeout_recovery',
+			'choose_form_dropdown_timeout_recovery',
+			'select_cascader_path_timeout_recovery',
+			'select_visible_cascader_option_timeout_recovery',
+			'resolve_duplicate_field_conflict',
+			'resolve_field_validation_error',
+		].includes(String(workflowStep || '').trim())
+	}
+
 	function buildWorkflowActivityDetail(workflowStep, input) {
 		if (!workflowStep || !input || typeof input !== 'object') return ''
 		const parts = []
-		const value = cleanActivityFragment(input.workflow_test_value || input.text || input.label)
+		const value = formatWorkflowActivityValue(input)
 		const source = cleanActivityFragment(input.workflow_value_source)
 		const basis = cleanActivityFragment(input.workflow_value_basis)
 		if (['fill_field', 'select_option'].includes(workflowStep) && value) {
@@ -525,6 +556,19 @@
 		}
 		if (workflowStep === 'submit_search' && value) {
 			parts.push(`验证值=${value}`)
+		}
+		if ([
+			'fill_form_field_timeout_recovery',
+			'choose_form_dropdown_timeout_recovery',
+			'select_visible_cascader_option_timeout_recovery',
+			'resolve_duplicate_field_conflict',
+			'resolve_field_validation_error',
+		].includes(workflowStep) && value) {
+			parts.push(`值=${value}`)
+		}
+		const path = formatActionExecutionPath(input.path, input)
+		if (path) {
+			parts.push(`路径=${path}`)
 		}
 		if (source) parts.push(`来源=${formatWorkflowValueSource(source)}`)
 		if (basis) parts.push(`依据=${basis}`)
@@ -537,6 +581,12 @@
 		if (workflowStep === 'skip_field') {
 			parts.push('缺少真实样本/候选证据')
 		}
+		if (workflowStep === 'open_create_form_timeout_recovery') {
+			parts.push('点击后复核表单是否出现')
+		}
+		if (workflowStep === 'finish_create_after_submit_no_form') {
+			parts.push('提交后表单已消失，避免重复创建')
+		}
 		const navTarget = cleanActivityFragment(input.workflow_nav_key || input.workflow_nav_alias)
 		if (navTarget && !parts.includes(`目标=${navTarget}`)) parts.push(`目标=${navTarget}`)
 		const region = cleanActivityFragment(input.target_region || input.region)
@@ -546,6 +596,21 @@
 		const resultStatus = cleanActivityFragment(input.workflow_result_status)
 		if (resultStatus) parts.push(`结果=${resultStatus}`)
 		return parts.length ? `（${parts.join('，')}）` : ''
+	}
+
+	function formatWorkflowActivityValue(input) {
+		const raw = [
+			input.workflow_test_value,
+			input.workflow_requested_text,
+			input.text,
+			input.value,
+			input.selected_text,
+			input.option,
+			input.label,
+		].map((value) => String(value ?? '').trim()).find(Boolean)
+		if (!raw) return ''
+		if (isSensitiveActionInput(input)) return '已隐藏'
+		return cleanActivityFragment(raw)
 	}
 
 	function formatWorkflowValueSource(source) {
@@ -622,16 +687,59 @@
 		const forms = Array.isArray(observation?.forms) ? observation.forms : []
 		const items = []
 		const seen = new Set()
+		const addField = (field, form = null) => {
+			const item = normalizeObservedFieldInventoryItem(field, form)
+			if (!item || seen.has(item.key)) return false
+			seen.add(item.key)
+			items.push(item)
+			return items.length >= 120
+		}
 		for (const form of forms) {
 			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
-				const item = normalizeObservedFieldInventoryItem(field, form)
-				if (!item || seen.has(item.key)) continue
-				seen.add(item.key)
-				items.push(item)
-				if (items.length >= 120) return items
+				if (addField(field, form)) return items
 			}
 		}
+		for (const field of collectStandaloneObservedFieldInventorySources(observation)) {
+			if (addField(field, null)) return items
+		}
 		return items
+	}
+
+	function collectStandaloneObservedFieldInventorySources(observation) {
+		const sources = [
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.popups) ? observation.popups : []),
+		]
+		return sources.filter(isStandaloneObservedFieldInventorySource)
+	}
+
+	function isStandaloneObservedFieldInventorySource(item) {
+		if (!item || typeof item !== 'object') return false
+		if (String(item.actionIntent || '').trim()) return false
+		return hasObservedFieldInventorySignal(item)
+	}
+
+	function hasObservedFieldInventorySignal(item) {
+		if (!item || typeof item !== 'object') return false
+		if (item.editable === true) return true
+		const role = String(item.role || '').trim().toLowerCase()
+		const tag = String(item.tag || '').trim().toLowerCase()
+		const type = String(item.type || '').trim().toLowerCase()
+		const descriptor = normalizeInventoryText([
+			item.kind,
+			item.controlKind,
+			item.selectionControl,
+			item.control,
+			item.fieldType,
+			role,
+			tag,
+			type,
+		].filter(Boolean).join(' '))
+		if (/^(input|textarea|select)$/.test(tag)) return true
+		if (/^(textbox|searchbox|combobox|spinbutton|checkbox|radio|switch)$/.test(role)) return true
+		if (/^(text|search|email|tel|url|number|password|date|time|datetime-local|month|week)$/.test(type)) return true
+		return /(input|textarea|textbox|searchbox|select|dropdown|combobox|tree-?select|cascader|picker|calendar|date|time|checkbox|radio|switch|toggle)/i.test(descriptor)
 	}
 
 	function normalizeObservedFieldInventoryItem(field, form) {
@@ -659,7 +767,7 @@
 			role: role || '',
 			type: String(field.type || '').trim().toLowerCase(),
 			fieldType: String(field.fieldType || '').trim(),
-			control: String(field.selectionControl || field.control || '').trim(),
+			control: String(field.selectionControl || field.control || field.controlKind || field.kind || '').trim(),
 			region: String(field.region || form?.region || '').trim(),
 			form: String(form?.name || form?.id || '').trim(),
 			valueState: String(field.valueState || '').trim().replace(/:.+$/, ''),
@@ -668,17 +776,27 @@
 
 	function classifyObservedFieldKind(field) {
 		const role = String(field?.role || '').trim().toLowerCase()
+		const tag = String(field?.tag || '').trim().toLowerCase()
 		const type = String(field?.type || '').trim().toLowerCase()
 		const fieldType = String(field?.fieldType || '').trim().toLowerCase()
 		const control = String(field?.selectionControl || field?.control || '').trim().toLowerCase()
-		const combined = `${role} ${type} ${fieldType} ${control}`
-		if (/(select|dropdown|combobox|listbox|option|cascader|date|time|picker|calendar|checkbox|radio|switch|multi)/i.test(combined)) {
+		const kind = String(field?.kind || field?.controlKind || '').trim().toLowerCase()
+		const combined = `${role} ${tag} ${type} ${fieldType} ${control} ${kind}`
+		if (/(checkbox|radio|switch|toggle)/i.test(combined)) {
+			if (/radio/i.test(combined)) return 'radio'
+			if (/switch|toggle/i.test(combined)) return 'switch'
+			return 'checkbox'
+		}
+		if (/(select|dropdown|combobox|listbox|option|cascader|date|time|picker|calendar|multi)/i.test(combined)) {
 			return 'selection'
 		}
 		if (
+			field?.editable === true ||
+			tag === 'input' ||
+			tag === 'textarea' ||
 			role === 'textbox' ||
 			/^(text|search|email|tel|url|number|password|textarea)$/i.test(type) ||
-			/(input|textarea|text|name|email|phone|tel|url|number|password|account|username|comment|remark)/i.test(fieldType)
+			/(input|textarea|textbox|text|name|email|phone|tel|url|number|password|account|username|comment|remark)/i.test(combined)
 		) {
 			return 'input'
 		}
@@ -737,15 +855,140 @@
 		const step = Number(session?.step) || 0
 		const base = buildDecisionActivityText({ step }, { action }).replace(/\.\.\.$/, '')
 		const seconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000))
-		return `${base}，仍在执行，已等待 ${seconds} 秒；${buildActionExecutionWaitHint(action)}`
+		const detail = buildActionExecutionTargetDetail(action, session)
+		return `${base}${detail ? `；目标细节：${detail}` : ''}，仍在执行，已等待 ${seconds} 秒；${buildActionExecutionWaitHint(action)}`
+	}
+
+	function buildActionExecutionTargetDetail(action, session = null) {
+		const input = action?.input || {}
+		if (!input || typeof input !== 'object') return ''
+		const parts = []
+		const index = Number(input.index ?? input.workflow_field_index)
+		if (Number.isFinite(index)) parts.push(`index=${index}`)
+		const label = cleanActivityFragment(input.workflow_field_label || input.target_label || input.label || input.name || input.placeholder)
+		if (label) parts.push(`字段=${label}`)
+		const path = formatActionExecutionPath(input.path, input)
+		if (path) parts.push(`路径=${path}`)
+		const value = formatActionExecutionValue(input)
+		if (value) parts.push(`值=${value}`)
+		const source = cleanActivityFragment(input.workflow_value_source || input.value_source)
+		if (source) parts.push(`来源=${formatWorkflowValueSource(source)}`)
+		const candidates = formatActionExecutionCandidatePreview(action, session)
+		if (candidates) parts.push(`候选=${candidates}`)
+		return parts.slice(0, 6).join('，')
+	}
+
+	function formatActionExecutionCandidatePreview(action, session = null) {
+		const input = action?.input || {}
+		if (isSensitiveActionInput(input)) return ''
+		const direct = collectActionCandidateValues([
+			input.workflow_visible_candidates,
+			input.visibleOptions,
+			input.candidates,
+			input.options,
+		])
+		const candidates = direct.length ? direct : collectSessionPendingCandidatesForAction(action, session)
+		if (!candidates.length) return ''
+		return candidates.slice(0, 4).join('|')
+	}
+
+	function collectActionCandidateValues(values) {
+		const out = []
+		const seen = new Set()
+		for (const value of Array.isArray(values) ? values : []) {
+			const items = Array.isArray(value)
+				? value
+				: String(value || '').split(/\s*(?:\||,|，|、)\s*/g)
+			for (const item of items) {
+				const text = cleanActivityFragment(item)
+				const key = normalizeInventoryText(text)
+				if (!key || seen.has(key)) continue
+				seen.add(key)
+				out.push(text)
+			}
+		}
+		return out
+	}
+
+	function collectSessionPendingCandidatesForAction(action, session = null) {
+		const input = action?.input || {}
+		if (!isSelectionExecutionAction(action)) return []
+		const state = session?.workflowState?.search
+		if (!state || typeof state !== 'object') return []
+		const actionKey = buildActionExecutionFieldKey(input)
+		const activeKey = String(state.activeFieldKey || state.lastSearchedFieldKey || '')
+		if (actionKey && activeKey && actionKey !== activeKey) return []
+		return collectActionCandidateValues([state.pendingDropdownCandidates])
+	}
+
+	function isSelectionExecutionAction(action) {
+		const name = String(action?.name || '')
+		const step = String(action?.input?.workflow_step || '')
+		return /dropdown|option|cascader|select|checkbox/i.test(name) ||
+			/open_dropdown|select_option|cascader|checkbox/i.test(step)
+	}
+
+	function buildActionExecutionFieldKey(input) {
+		const index = Number(input?.workflow_field_index ?? input?.index)
+		if (Number.isFinite(index)) return `index:${index}`
+		const label = normalizeInventoryText(input?.workflow_field_label || input?.target_label || input?.label || '')
+		return label ? `label:${label}` : ''
+	}
+
+	function formatActionExecutionPath(path, input) {
+		const values = Array.isArray(path)
+			? path
+			: String(path || '').split(/\s*(?:->|→|＞|>|\/|\\|,|，|、|\|)\s*/g)
+		const cleaned = values
+			.map((item) => cleanActivityFragment(item))
+			.filter(Boolean)
+			.slice(0, 6)
+		if (!cleaned.length) return ''
+		if (isSensitiveActionInput(input)) return '已隐藏'
+		return cleaned.join(' / ')
+	}
+
+	function formatActionExecutionValue(input) {
+		const raw = [
+			input.workflow_test_value,
+			input.workflow_requested_text,
+			input.text,
+			input.value,
+			input.selected_text,
+			input.option,
+		].map((value) => String(value ?? '').trim()).find(Boolean)
+		if (!raw) return ''
+		if (isSensitiveActionInput(input)) return '已隐藏'
+		return cleanActivityFragment(raw)
+	}
+
+	function isSensitiveActionInput(input) {
+		const descriptor = [
+			input?.target_label,
+			input?.workflow_field_label,
+			input?.label,
+			input?.name,
+			input?.placeholder,
+			input?.type,
+			input?.fieldType,
+			input?.workflow_field_type,
+			input?.inputMode,
+		].filter(Boolean).join(' ')
+		return /(password|passwd|pwd|secret|token|api[_-]?key|csrf|otp|verify|verification|captcha|code|密码|口令|密钥|秘钥|令牌|验证码|校验码|动态码|短信码)/i.test(descriptor)
 	}
 
 	function buildActionExecutionWaitHint(action) {
 		const name = String(action?.name || '').trim()
 		const step = String(action?.input?.workflow_step || '').trim()
 		if (name === 'locate_by_vision') return '正在等待视觉定位或截图分析结果。'
-		if (/dropdown|option|cascader|select/i.test(name) || /open_dropdown|select_option|cascader/i.test(step)) {
-			return '正在等待候选弹层、选项列表或页面联动完成。'
+		if (/cascader/i.test(name) || /cascader/i.test(step)) {
+			return '正在等待级联菜单逐级展开、滚动定位真实候选并写入字段。'
+		}
+		if (/open_dropdown/i.test(name) || step === 'open_dropdown') {
+			return '正在等待候选弹层出现，并读取目标字段范围内的真实候选。'
+		}
+		if (/dropdown|option|select|checkbox/i.test(name) || /select_option|checkbox/i.test(step)) {
+			return '正在等待目标字段范围内的候选匹配、滚动查找、归属确认或页面联动完成。'
 		}
 		if (step === 'clear_field') return '正在等待字段置空并校验清空结果。'
 		if (name === 'input_text' || /fill|input/i.test(step)) return '正在等待输入写入和页面校验完成。'
@@ -852,12 +1095,18 @@
 
 	function recordLoopGuardReplan(session, decision, loopGuard, sessions) {
 		const reason = String(loopGuard?.reason || '检测到可能重复动作，已阻断并要求重规划。')
+		const diagnostic = typeof classifyLoopGuardReason === 'function'
+			? classifyLoopGuardReason(reason)
+			: { kind: 'loop_guard', guidance: '重新观察页面状态，换证据、换目标或换工具。' }
+		const loopGuardKind = String(diagnostic?.kind || 'loop_guard').trim()
+		const loopGuardGuidance = String(diagnostic?.guidance || '').trim()
 		const outcome = createActionOutcome('no_effect', {
 			progress: false,
 			reason,
 		})
+		const guidanceText = loopGuardGuidance ? ` 类型=${loopGuardKind}；建议=${loopGuardGuidance}` : ` 类型=${loopGuardKind}`
 		const output = appendOutcomeSummary(
-			`${reason} 已记录为失败反馈，下一轮将重新观察并规划不同动作。`,
+			`${reason}${guidanceText} 已记录为失败反馈，下一轮将重新观察并规划不同动作。`,
 			outcome
 		)
 		const replanGoal = '重新规划，避免重复动作'
@@ -872,6 +1121,8 @@
 			success: false,
 			output,
 			outcome,
+			loopGuardKind,
+			loopGuardGuidance,
 		})
 		appendTrace(session, {
 			title: `步骤 ${session.step}: 循环保护`,
@@ -887,6 +1138,8 @@
 				input: decision?.action?.input || {},
 				output,
 				outcome,
+				loopGuardKind,
+				loopGuardGuidance,
 			},
 		})
 		recordWorkflowOutcome(session, decision, {
@@ -895,6 +1148,8 @@
 			outcome,
 			reason,
 			stage: 'loop_guard',
+			loopGuardKind,
+			loopGuardGuidance,
 		})
 		session.planItems = derivePlanItems(session)
 		session.consecutiveFailures += 1
@@ -941,6 +1196,7 @@
 		buildVerificationHeartbeatText,
 		buildActionExecutionWaitHint,
 		buildVerificationWaitHint,
+		buildObservedFieldInventory,
 		getObservationHeartbeatInitialMs,
 		getObservationHeartbeatIntervalMs,
 		getActionExecutionHeartbeatInitialMs,

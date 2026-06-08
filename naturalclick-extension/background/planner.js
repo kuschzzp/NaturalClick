@@ -22,6 +22,7 @@
 		buildInvalidActionInputContext,
 		buildInvalidModelOutputContext,
 		buildObservationText,
+		classifyInvalidActionInput,
 		planningRequestSignature,
 		resolvePlanningContextRequest,
 	} = plannerContext
@@ -311,6 +312,11 @@
 			const normalized = normalizeDecision(parsed)
 			if (!normalized) {
 				planningContext.push(buildInvalidModelOutputContext(content, planningContext.length))
+				notifyPlanningProgress(session, options, {
+					stage: 'invalid_model_output',
+					round: round + 1,
+					text: buildInvalidModelOutputProgressText(session, content),
+				})
 				continue
 			}
 			lastDecision = normalized
@@ -338,14 +344,22 @@
 						return workflowValidationRecovery
 					}
 					planningContext.push(buildInvalidActionInputContext(normalized.action, planningContext.length, validationError))
+					const validationDiagnostic = getValidationFeedbackDiagnostic(validationError)
 					notifyPlanningProgress(session, options, {
 						stage: 'validation_feedback',
 						round: round + 1,
-						text: buildValidationFeedbackProgressText(session, normalized.action, validationError),
+						validationKind: validationDiagnostic.kind,
+						validationGuidance: validationDiagnostic.guidance,
+						text: buildValidationFeedbackProgressText(session, normalized.action, validationError, validationDiagnostic),
 					})
 					continue
 				}
 				planningContext.push(buildInvalidActionContext(normalized.action, planningContext.length, availableActionNames))
+				notifyPlanningProgress(session, options, {
+					stage: 'invalid_action_name',
+					round: round + 1,
+					text: buildInvalidActionProgressText(session, normalized.action, availableActionNames),
+				})
 				continue
 			}
 			const requestSig = planningRequestSignature(normalized.action)
@@ -805,8 +819,10 @@
 		const status = cleanSearchProgressFragment(extractAttr(requirementLine, 'status'))
 		if (status === 'detail_action_missing') {
 			const rows = cleanSearchProgressFragment(extractAttr(requirementLine, 'tableRows'))
+			const pagination = cleanSearchProgressFragment(extractAttr(requirementLine, 'pagination'))
 			const rowText = rows ? `，已看到 ${rows} 行列表数据` : ''
-			return `第 ${session?.step || 0} 步：列表详情任务正在定位第一条记录入口${rowText}；当前没有稳定的第一行详情/查看按钮，将请求动作上下文或使用受限视觉定位，不会点击列表外按钮。`
+			const paginationText = pagination ? `，分页显示 ${pagination}` : ''
+			return `第 ${session?.step || 0} 步：列表详情任务正在定位第一条记录入口${rowText}${paginationText}；当前没有稳定的第一行详情/查看按钮，将请求动作上下文或使用受限视觉定位，不会点击列表外按钮。`
 		}
 		return `第 ${session?.step || 0} 步：列表详情任务正在先确认第一条记录；当前缺少可见列表/表格行证据，将补充 tables/content 上下文，不会直接点击工具栏、页头或列表外的详情/查看按钮。`
 	}
@@ -914,12 +930,16 @@
 		if (!workflow && !name) return ''
 			const searchProgressText = buildSearchWorkflowProgressText(session, decision, input)
 			if (searchProgressText) return searchProgressText
-			const navigationProgressText = buildNavigationWorkflowProgressText(session, decision, input)
-			if (navigationProgressText) return navigationProgressText
-			const fieldTestProgressText = buildFieldTestWorkflowProgressText(session, decision, input)
-			if (fieldTestProgressText) return fieldTestProgressText
-			const target = [
-				input.target_label,
+		const navigationProgressText = buildNavigationWorkflowProgressText(session, decision, input)
+		if (navigationProgressText) return navigationProgressText
+		const fieldTestProgressText = buildFieldTestWorkflowProgressText(session, decision, input)
+		if (fieldTestProgressText) return fieldTestProgressText
+		const formFillProgressText = buildFormFillWorkflowProgressText(session, decision, input)
+		if (formFillProgressText) return formFillProgressText
+		const createTaskProgressText = buildCreateTaskWorkflowProgressText(session, decision, input)
+		if (createTaskProgressText) return createTaskProgressText
+		const target = [
+			input.target_label,
 			input.workflow_field_label,
 			input.workflow_nav_key,
 			input.text,
@@ -957,10 +977,107 @@
 			const indexText = Number.isFinite(index) ? `，index=${index}` : ''
 			const type = cleanSearchProgressFragment(input.workflow_field_type || '')
 			const typeText = type ? `，类型=${type}` : ''
-			return `第 ${session?.step || 0} 步：正在测试页面输入框${ordinal}${label ? `：填写「${label}」` : ''}${indexText}${typeText}。`
-		}
+		return `第 ${session?.step || 0} 步：正在测试页面输入框${ordinal}${label ? `：填写「${label}」` : ''}${indexText}${typeText}。`
+	}
 
-		function buildNavigationWorkflowProgressText(session, decision, input) {
+	function buildFormFillWorkflowProgressText(session, decision, input) {
+		const workflowStep = String(input?.workflow_step || '').trim()
+		if (!isFormFillWorkflowStep(workflowStep)) return ''
+		const label = cleanSearchProgressFragment(input.workflow_field_label || input.target_label || '')
+		const index = Number(input.index)
+		const indexText = Number.isFinite(index) ? `，index=${index}` : ''
+		const value = cleanSearchProgressFragment(input.workflow_test_value || input.text || input.label || input.workflow_requested_text || '')
+		const valueText = value ? `，目标值=${value}` : ''
+		const path = formatWorkflowPath(input.path)
+		const pathText = path ? `，路径=${path}` : ''
+		const submitLabel = cleanSearchProgressFragment(input.workflow_submit_label || input.target_label || input.label || '')
+		const retryReason = cleanSearchProgressFragment(input.workflow_retry_reason || '')
+		const retryText = retryReason ? `，原因=${retryReason}` : ''
+		let phrase = ''
+		if (workflowStep === 'fill_form_field_timeout_recovery') {
+			phrase = `表单 workflow 正在根据任务文本填写字段${label ? `「${label}」` : ''}`
+		} else if (workflowStep === 'open_form_dropdown_timeout_recovery') {
+			phrase = `表单 workflow 正在展开选择字段${label ? `「${label}」` : ''}以读取真实候选`
+		} else if (workflowStep === 'choose_form_dropdown_timeout_recovery') {
+			phrase = `表单 workflow 正在选择字段${label ? `「${label}」` : ''}的真实候选`
+		} else if (workflowStep === 'select_cascader_path_timeout_recovery') {
+			phrase = `表单 workflow 正在选择级联路径${label ? `「${label}」` : ''}`
+		} else if (workflowStep === 'select_visible_cascader_option_timeout_recovery') {
+			phrase = `表单 workflow 正在点击已展开级联菜单中的真实候选${label ? `（字段「${label}」）` : ''}`
+		} else if (workflowStep === 'submit_form_timeout_recovery') {
+			phrase = `表单 workflow 正在提交当前表单${submitLabel ? `：${submitLabel}` : ''}`
+		} else if (workflowStep === 'resolve_duplicate_field_conflict') {
+			phrase = `表单 workflow 正在处理重复值冲突${label ? `：${label}` : ''}`
+		} else if (workflowStep === 'resolve_field_validation_error') {
+			phrase = `表单 workflow 正在修正字段校验错误${label ? `：${label}` : ''}`
+		}
+		if (!phrase) return ''
+		return `第 ${session?.step || 0} 步：${phrase}${indexText}${valueText}${pathText}${retryText}；本地已用任务文本、字段标签和当前页面状态限定动作范围。`
+	}
+
+	function isFormFillWorkflowStep(workflowStep) {
+		return [
+			'fill_form_field_timeout_recovery',
+			'open_form_dropdown_timeout_recovery',
+			'choose_form_dropdown_timeout_recovery',
+			'select_cascader_path_timeout_recovery',
+			'select_visible_cascader_option_timeout_recovery',
+			'submit_form_timeout_recovery',
+			'resolve_duplicate_field_conflict',
+			'resolve_field_validation_error',
+		].includes(String(workflowStep || '').trim())
+	}
+
+	function buildCreateTaskWorkflowProgressText(session, decision, input) {
+		const workflowStep = String(input?.workflow_step || '').trim()
+		if (!isCreateTaskWorkflowStep(workflowStep)) return ''
+		const actionName = String(decision?.action?.name || '').trim()
+		const label = cleanSearchProgressFragment(
+			input.workflow_create_label ||
+			input.target_label ||
+			input.label ||
+			input.text ||
+			input.workflow_submit_label ||
+			''
+		)
+		const targetDescription = cleanSearchProgressFragment(input.target_description || '')
+		const region = cleanSearchProgressFragment(input.target_region || input.region || '')
+		const index = Number(input.index)
+		const indexText = Number.isFinite(index) ? `，index=${index}` : ''
+		const regionText = region ? `，region=${region}` : ''
+		if (workflowStep === 'finish_create_after_submit_no_form') {
+			return `第 ${session?.step || 0} 步：创建 workflow 已确认提交后当前观察中不再存在创建表单，正在结束任务；不再重新点击创建入口，避免重复创建。`
+		}
+		if (workflowStep === 'open_create_form_timeout_recovery' && actionName === 'locate_by_vision') {
+			const targetText = targetDescription || label || '当前页面主体内的创建入口'
+			return `第 ${session?.step || 0} 步：创建 workflow 正在用受限视觉定位打开创建入口：${targetText}${regionText}；只查找当前页面主体/工具栏内的新增、新建、创建或添加入口，排除表格行和导航区域。`
+		}
+		if (workflowStep === 'open_create_form_timeout_recovery') {
+			const labelText = label ? `「${label}」` : '当前页面主体内的创建入口'
+			return `第 ${session?.step || 0} 步：创建 workflow 正在打开创建入口${label ? `：${labelText}` : ''}${indexText}${regionText}；点击后会重新观察是否出现表单，不会把创建入口当成页面导航。`
+		}
+		return ''
+	}
+
+	function isCreateTaskWorkflowStep(workflowStep) {
+		return [
+			'open_create_form_timeout_recovery',
+			'finish_create_after_submit_no_form',
+		].includes(String(workflowStep || '').trim())
+	}
+
+	function formatWorkflowPath(path) {
+		const values = Array.isArray(path)
+			? path
+			: String(path || '').split(/\s*(?:->|→|＞|>|\/|\\|,|，|、|\|)\s*/g)
+		return values
+			.map(cleanSearchProgressFragment)
+			.filter(Boolean)
+			.slice(0, 6)
+			.join(' / ')
+	}
+
+	function buildNavigationWorkflowProgressText(session, decision, input) {
 		const workflowStep = String(input?.workflow_step || '').trim()
 		if (!['navigate_to_task_target', 'reveal_navigation_options', 'request_missing_target_url'].includes(workflowStep)) return ''
 		const actionName = String(decision?.action?.name || '').trim()
@@ -1321,7 +1438,7 @@
 		return '下一轮会基于新证据继续规划可校验动作'
 	}
 
-	function buildValidationFeedbackProgressText(session, action, reason) {
+	function buildValidationFeedbackProgressText(session, action, reason, diagnostic = null) {
 		const name = String(action?.name || '').trim() || 'unknown_action'
 		const input = action?.input || {}
 		const index = input.index === undefined || input.index === null || input.index === ''
@@ -1329,7 +1446,35 @@
 			: ` index=${input.index}`
 		const target = String(input.target_label || input.workflow_field_label || input.label || '').trim()
 		const targetText = target ? ` target=${target}` : ''
-		return `第 ${session?.step || 0} 步：执行前校验拦截 ${name}${index}${targetText}；原因=${cleanSearchProgressFragment(reason)}。已把原因补给模型，下一轮会改选工具、目标或请求更多上下文。`
+		const classified = diagnostic || getValidationFeedbackDiagnostic(reason)
+		const kind = cleanSearchProgressFragment(classified.kind || '')
+		const guidance = cleanSearchProgressFragment(classified.guidance || '')
+		const parts = [
+			`原因=${cleanSearchProgressFragment(reason)}`,
+			kind ? `类型=${kind}` : '',
+			guidance ? `建议=${guidance}` : '',
+		].filter(Boolean)
+		return `第 ${session?.step || 0} 步：执行前校验拦截 ${name}${index}${targetText}；${parts.join('；')}。已把原因和建议补给模型，下一轮会改选工具、目标或请求更多上下文。`
+	}
+
+	function buildInvalidModelOutputProgressText(session, content) {
+		const preview = cleanSearchProgressFragment(content).slice(0, 180)
+		return `第 ${session?.step || 0} 步：模型输出不是可执行 JSON，已拦截并要求下一轮只返回 action.name/action.input${preview ? `；片段=${preview}` : ''}。页面尚未执行动作。`
+	}
+
+	function buildInvalidActionProgressText(session, action, availableActionNames) {
+		const name = String(action?.name || '').trim() || '(empty)'
+		const available = Array.from(availableActionNames || []).sort().slice(0, 12).join(', ')
+		return `第 ${session?.step || 0} 步：模型输出了不可用工具 "${name}"，已拦截并要求改用可用工具${available ? `；可用=${available}` : ''}。页面尚未执行动作。`
+	}
+
+	function getValidationFeedbackDiagnostic(reason) {
+		const diagnostic = typeof classifyInvalidActionInput === 'function'
+			? classifyInvalidActionInput(reason)
+			: null
+		const kind = cleanSearchProgressFragment(diagnostic?.kind || '')
+		const guidance = cleanSearchProgressFragment(diagnostic?.guidance || '')
+		return { kind, guidance }
 	}
 
 	function buildPlanningContextPurposeText(decision) {
@@ -1507,6 +1652,10 @@
 				stage: event?.stage || '',
 				round: Number(event?.round) || 0,
 				text: String(event?.text || '').trim(),
+				elapsedMs: Math.max(0, Number(event?.elapsedMs) || 0),
+				timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
+				validationKind: String(event?.validationKind || '').trim(),
+				validationGuidance: String(event?.validationGuidance || '').trim(),
 				stream: event?.stream || undefined,
 			})
 		} catch (_) {}
@@ -1548,13 +1697,16 @@
 		let timer = null
 		const publishHeartbeat = () => {
 			if (finished) return
+			const elapsedMs = Date.now() - startedAt
 			notifyPlanningProgress(session, progressOptions, {
 				stage: 'model_wait_heartbeat',
 				round: Number(heartbeat.round) || 1,
+				elapsedMs,
+				timeoutMs,
 				text: buildModelWaitHeartbeatText(session, {
 					...heartbeat,
 					timeoutMs,
-					elapsedMs: Date.now() - startedAt,
+					elapsedMs,
 					streamSeen: lastStreamAt > 0,
 					sinceStreamMs: lastStreamAt > 0 ? Date.now() - lastStreamAt : 0,
 				}),
@@ -1613,6 +1765,14 @@
 	}
 
 	function buildWorkflowHeartbeatCheckpoint(session) {
+		const navigation = buildNavigationWorkflowHeartbeatCheckpoint(session)
+		if (navigation) return navigation
+		const recordView = buildRecordViewWorkflowHeartbeatCheckpoint(session)
+		if (recordView) return recordView
+		return buildSearchWorkflowHeartbeatCheckpoint(session)
+	}
+
+	function buildSearchWorkflowHeartbeatCheckpoint(session) {
 		const search = session?.workflowState?.search
 		if (!search || typeof search !== 'object' || !Array.isArray(search.fieldOrder) || !search.fieldOrder.length) return ''
 		const total = search.fieldOrder.length
@@ -1633,6 +1793,111 @@
 		].filter(Boolean)
 		if (!details.length) return ''
 		return `${details.join('，')}；逐项测试，提交后复核并清空，不猜选项。`
+	}
+
+	function buildNavigationWorkflowHeartbeatCheckpoint(session) {
+		const navigation = session?.workflowState?.navigation
+		const targets = getHeartbeatActiveNavigationTargets(session, navigation)
+		if (!targets.length) return ''
+		const attempted = Array.isArray(navigation?.attemptedKeys) ? navigation.attemptedKeys.length : 0
+		const failed = Array.isArray(navigation?.failedKeys) ? navigation.failedKeys.length : 0
+		const reveal = Array.isArray(navigation?.revealAttemptKeys) ? navigation.revealAttemptKeys.length : 0
+		const vision = Array.isArray(navigation?.visionAttemptKeys) ? navigation.visionAttemptKeys.length : 0
+		const parts = [
+			'当前导航工作流',
+			targets.length ? `目标=${targets.slice(0, 4).join('、')}${targets.length > 4 ? `等 ${targets.length} 个` : ''}` : '',
+			attempted ? `已尝试 ${attempted} 次` : '',
+			failed ? `失败 ${failed} 次` : '',
+			reveal ? `已展开导航 ${reveal} 次` : '',
+			vision ? `视觉定位 ${vision} 次` : '',
+		].filter(Boolean)
+		if (parts.length <= 1) return ''
+		return `${parts.join('，')}；目标到达前不测试当前页面内搜索、表单或列表动作。`
+	}
+
+	function getHeartbeatActiveNavigationTargets(session, navigation) {
+		const targets = getHeartbeatNavigationTargets(session, navigation)
+		if (!targets.length) return []
+		const reached = new Set([
+			...(Array.isArray(navigation?.succeededKeys) ? navigation.succeededKeys : []),
+			...(Array.isArray(navigation?.concreteSucceededKeys) ? navigation.concreteSucceededKeys : []),
+		].map(normalizeHeartbeatKey).filter(Boolean))
+		if (!reached.size) return targets
+		return targets.filter((target) => !reached.has(normalizeHeartbeatKey(target)))
+	}
+
+	function buildRecordViewWorkflowHeartbeatCheckpoint(session) {
+		const operation = getHeartbeatTaskOperation(session)
+		const recent = findRecentWorkflowInput(session, ['view_first_record_detail', 'finish_record_view'])
+		if (operation !== 'view_first_record_detail' && !recent) return ''
+		const selector = getHeartbeatRecordSelector(session)
+		const target = [
+			selector.position ? `位置=${selector.position}` : '位置=第一条',
+			selector.entity ? `对象=${selector.entity}` : '',
+		].filter(Boolean).join('，')
+		const recentText = recent
+			? formatRecentWorkflowInput(recent)
+			: ''
+		return `当前列表详情工作流：${target || '位置=第一条'}${recentText ? `，最近动作=${recentText}` : ''}；需要先确认列表/分页/第一行入口，入口不稳定时只补上下文或受限视觉定位。`
+	}
+
+	function getHeartbeatNavigationTargets(session, navigation) {
+		const values = []
+		for (const key of Array.isArray(navigation?.plannedKeys) ? navigation.plannedKeys : []) {
+			if (key) values.push(key)
+		}
+		const intent = session?.workflowState?.taskIntent?.intent || {}
+		for (const target of Array.isArray(intent.navigationTargets) ? intent.navigationTargets : []) {
+			for (const value of [target?.canonical, target?.raw, ...(Array.isArray(target?.aliases) ? target.aliases : [])]) {
+				if (value) values.push(value)
+			}
+		}
+		const seen = new Set()
+		return values
+			.map(cleanSearchProgressFragment)
+			.filter(Boolean)
+			.filter((value) => {
+				const key = value.replace(/\s+/g, '').toLowerCase()
+				if (!key || seen.has(key)) return false
+				seen.add(key)
+				return true
+			})
+	}
+
+	function getHeartbeatTaskOperation(session) {
+		return String(session?.workflowState?.taskIntent?.intent?.operation || '').trim()
+	}
+
+	function normalizeHeartbeatKey(value) {
+		return String(value || '').replace(/\s+/g, '').trim().toLowerCase()
+	}
+
+	function getHeartbeatRecordSelector(session) {
+		const selector = session?.workflowState?.taskIntent?.intent?.recordSelector || {}
+		return {
+			position: cleanSearchProgressFragment(selector.position || ''),
+			entity: cleanSearchProgressFragment(selector.entity || ''),
+		}
+	}
+
+	function findRecentWorkflowInput(session, workflowSteps) {
+		const allowed = new Set((Array.isArray(workflowSteps) ? workflowSteps : []).map((item) => String(item || '').trim()).filter(Boolean))
+		const history = Array.isArray(session?.history) ? session.history : []
+		for (let i = history.length - 1; i >= 0; i -= 1) {
+			const input = history[i]?.input || history[i]?.action?.input || {}
+			const step = String(input.workflow_step || '').trim()
+			if (allowed.has(step)) return input
+		}
+		return null
+	}
+
+	function formatRecentWorkflowInput(input) {
+		const parts = [
+			cleanSearchProgressFragment(input.workflow_step || ''),
+			Number.isFinite(Number(input.index)) ? `index=${Number(input.index)}` : '',
+			cleanSearchProgressFragment(input.target_label || input.workflow_field_label || input.workflow_nav_key || ''),
+		].filter(Boolean)
+		return parts.slice(0, 3).join('/')
 	}
 
 	function formatSearchWorkflowHeartbeatPhase(phase) {

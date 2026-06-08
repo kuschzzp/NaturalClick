@@ -375,12 +375,23 @@
 				const prevStatus = state.status
 				const nextTraceItems = mergeTraceItemsFromRuntime(payload)
 				const hasPayloadResultSummary = Object.prototype.hasOwnProperty.call(payload, 'resultSummary')
+				const nextDiagnostics = hasPayloadResultSummary ? buildSessionDiagnostics(nextTraceItems) : null
+				const nextResultSummary = hasPayloadResultSummary
+					? mergeSessionDiagnosticsIntoResultSummary(payload.resultSummary, nextDiagnostics, {
+						sensitiveValues: collectExportSensitiveValues({
+							session: payload,
+							traceItems: nextTraceItems,
+							diagnostics: nextDiagnostics,
+							activityText: payload.activityText || state.activityText,
+						}),
+					})
+					: state.resultSummary
 				Object.assign(state, {
 					status: payload.status || state.status,
 					currentTask: payload.currentTask || state.currentTask,
 					activityText: payload.activityText || state.activityText,
 					planItems: Array.isArray(payload.planItems) ? payload.planItems : state.planItems,
-					resultSummary: hasPayloadResultSummary ? payload.resultSummary : state.resultSummary,
+					resultSummary: nextResultSummary,
 					traceItems: nextTraceItems,
 				})
 
@@ -395,6 +406,9 @@
 				el.confirmTitle.textContent = String(payload.title || '请确认')
 				el.confirmDesc.textContent = String(payload.description || '')
 				el.confirmOverlay.style.display = 'flex'
+				state.activityText = buildConfirmationActivityText(payload)
+				state.planItems = upsertConfirmationPlanItem(state.planItems, payload)
+				render()
 				sendResponse({ ok: true })
 				return
 			}
@@ -509,7 +523,52 @@
 		const confirmId = activeConfirmId
 		activeConfirmId = ''
 		el.confirmOverlay.style.display = 'none'
+		state.activityText = approved ? '已确认高风险动作，等待 Agent 继续执行...' : '已拒绝高风险动作，等待 Agent 停止任务...'
+		state.planItems = completeConfirmationPlanItem(state.planItems, approved)
+		render()
 		await sendRuntimeMessage({ type: TYPES.CONFIRM_RESPONSE, confirmId, approved: !!approved })
+	}
+
+	function buildConfirmationActivityText(payload) {
+		const title = String(payload?.title || '请确认').trim()
+		const reason = getConfirmationReason(payload)
+		return reason ? `等待用户确认：${title}（${reason}）` : `等待用户确认：${title}`
+	}
+
+	function getConfirmationReason(payload) {
+		const direct = String(payload?.reason || payload?.purpose || '').trim()
+		if (direct) return direct
+		const description = String(payload?.description || '').replace(/\r/g, '').trim()
+		const reasonLine = description
+			.split('\n')
+			.map((line) => line.trim())
+			.find((line) => /^(原因|reason)\s*[:：]/i.test(line))
+		if (reasonLine) return reasonLine.replace(/^(原因|reason)\s*[:：]\s*/i, '').trim()
+		return ''
+	}
+
+	function upsertConfirmationPlanItem(planItems, payload) {
+		const items = (Array.isArray(planItems) ? planItems : []).filter((item) => item?.id !== 'pending_user_confirmation')
+		const title = buildConfirmationActivityText(payload)
+		return [
+			{
+				id: 'pending_user_confirmation',
+				title,
+				status: 'pending',
+			},
+			...items,
+		]
+	}
+
+	function completeConfirmationPlanItem(planItems, approved) {
+		return (Array.isArray(planItems) ? planItems : []).map((item) => {
+			if (item?.id !== 'pending_user_confirmation') return item
+			return {
+				...item,
+				title: approved ? '用户已确认高风险动作，等待继续执行' : '用户已拒绝高风险动作，等待任务停止',
+				status: approved ? 'done' : 'stopped',
+			}
+		})
 	}
 
 	function showAskUserDialog(payload) {
@@ -736,7 +795,7 @@
 	}
 
 	function renderPlanItemsCard(planItems) {
-		const items = normalizePlanItems(planItems)
+		const items = normalizePlanItems(planItems, { maxTitleLength: 360 })
 		if (!items.length) return null
 		const card = document.createElement('div')
 		card.className = 'sp-card sp-plan-card'
@@ -765,11 +824,12 @@
 		return card
 	}
 
-	function normalizePlanItems(planItems) {
+	function normalizePlanItems(planItems, options = {}) {
+		const maxTitleLength = Math.max(80, Number(options.maxTitleLength) || 220)
 		return (Array.isArray(planItems) ? planItems : [])
 			.map((item, index) => ({
 				id: String(item?.id || `plan_${index}`),
-				title: clampText(String(item?.title || item?.label || item?.text || '').trim(), 220),
+				title: clampText(String(item?.title || item?.label || item?.text || '').trim(), maxTitleLength),
 				status: normalizePlanStatus(item?.status),
 			}))
 			.filter((item) => item.title)
@@ -860,7 +920,7 @@
 			if (items.length > 8) {
 				const more = document.createElement('div')
 				more.className = 'sp-result-more'
-				more.textContent = `另有 ${items.length - 8} 项已记录，可在导出信息中查看完整结果。`
+				more.textContent = `另有 ${items.length - 8} 项明细，可在导出信息中查看完整结果。`
 				card.appendChild(more)
 			}
 		}
@@ -877,7 +937,7 @@
 			card.appendChild(issueWrap)
 		}
 		const skippedDetails = Array.isArray(summary.skippedDetails) ? summary.skippedDetails : []
-		if (skippedDetails.length > 3) {
+		if (skippedDetails.length) {
 			const skippedWrap = document.createElement('div')
 			skippedWrap.className = 'sp-result-issues'
 			const skippedTitle = document.createElement('div')
@@ -893,35 +953,82 @@
 			}
 			card.appendChild(skippedWrap)
 		}
+		const remainingDetails = buildResultRemainingDetails(summary)
+		if (remainingDetails.length) {
+			const remainingWrap = document.createElement('div')
+			remainingWrap.className = 'sp-result-issues'
+			const remainingTitle = document.createElement('div')
+			remainingTitle.className = 'sp-result-issues-title'
+			remainingTitle.textContent = '未完成明细'
+			remainingWrap.appendChild(remainingTitle)
+			remainingDetails.slice(0, 6).forEach((item) => remainingWrap.appendChild(renderResultIssueLine(item)))
+			if (remainingDetails.length > 6) {
+				const more = document.createElement('div')
+				more.className = 'sp-result-more'
+				more.textContent = `另有 ${remainingDetails.length - 6} 个未完成项目，可在导出信息中查看完整结果。`
+				remainingWrap.appendChild(more)
+			}
+			card.appendChild(remainingWrap)
+		}
 		return card
+	}
+
+	function buildResultRemainingDetails(summary) {
+		const explicitDetails = Array.isArray(summary?.remainingDetails)
+			? summary.remainingDetails.map(normalizeResultRemainingDetail).filter(Boolean)
+			: []
+		if (explicitDetails.length) return explicitDetails
+		const items = Array.isArray(summary?.items) ? summary.items : []
+		const remainingLabels = Array.isArray(summary?.remaining) ? summary.remaining.filter(Boolean).map((item) => String(item).trim()).filter(Boolean) : []
+		const remainingKeys = new Set(remainingLabels.map((item) => item.replace(/\s+/g, '').toLowerCase()))
+		const details = []
+		for (const item of items) {
+			const label = String(item?.label || item?.key || '').trim()
+			const key = label.replace(/\s+/g, '').toLowerCase()
+			if (!label || (!item || item.recorded !== false) && !remainingKeys.has(key)) continue
+			details.push({
+				label,
+				status: item?.status || 'unknown',
+				statusLabel: item?.statusLabel || '未完成',
+				summary: item?.summary || '该项目尚未形成完整测试记录。',
+				neededEvidence: item?.neededEvidence || '',
+			})
+			remainingKeys.delete(key)
+		}
+		for (const label of remainingLabels) {
+			const key = label.replace(/\s+/g, '').toLowerCase()
+			if (!key || !remainingKeys.has(key)) continue
+			details.push({
+				label,
+				status: 'unknown',
+				statusLabel: '未完成',
+				summary: '该项目尚未形成完整测试记录。',
+			})
+			remainingKeys.delete(key)
+		}
+		return details
+	}
+
+	function normalizeResultRemainingDetail(item) {
+		const label = String(item?.label || item?.key || '').trim()
+		if (!label) return null
+		return {
+			label,
+			status: item?.status || 'unknown',
+			statusLabel: item?.statusLabel || '未完成',
+			summary: item?.summary || '该项目尚未形成完整测试记录。',
+			neededEvidence: item?.neededEvidence || '',
+			sourceLabel: item?.sourceLabel || '',
+			sourceTitle: item?.sourceTitle || '',
+			basis: item?.basis || '',
+		}
 	}
 
 	function renderResultStats(stats) {
 		if (!stats || typeof stats !== 'object') return null
-		const entries = [
-			['total', '总数'],
-			['tested', '已测'],
-			['passed', '通过'],
-			['failed', '异常'],
-			['cleanupFailed', '清空异常'],
-			['cleanupUnverified', '清空未确认'],
-			['dateCandidateOwnership', '日期候选归属'],
-			['contextRequestLimit', '上下文补证上限'],
-			['verificationRecoveryIncomplete', '校验恢复未完成'],
-			['terminalFailed', '终态异常'],
-			['unknown', '未确认'],
-			['recoveredFailures', '失败后成功'],
-			['retried', '重试'],
-			['skipped', '安全跳过'],
-			['remaining', '未完成'],
-			['completed', '成功动作'],
-			['modelErrors', '模型错误'],
-			['timeouts', '超时'],
-			['loopGuards', '循环保护'],
-			['verificationFailures', '校验失败'],
-		]
+		const entries = getResultSummaryStatEntries()
 			.map(([key, label]) => ({ key, label, value: Number(stats[key]) }))
-			.filter((item) => Number.isFinite(item.value))
+			.filter((item) => shouldShowResultStat(item.key, item.value, stats))
 		if (!entries.length) return null
 		const wrap = document.createElement('div')
 		wrap.className = 'sp-result-stats'
@@ -946,10 +1053,15 @@
 		].filter(Boolean).join(' · ')
 		row.appendChild(head)
 		const summary = String(issue?.summary || '').trim()
-		if (summary) {
+		const neededEvidence = String(issue?.neededEvidence || '').trim()
+		const detail = [
+			summary,
+			neededEvidence ? `需要补充：${neededEvidence}` : '',
+		].filter(Boolean).join(' ')
+		if (detail) {
 			const body = document.createElement('div')
 			body.className = 'sp-result-issue-summary'
-			body.textContent = clampText(summary, 220)
+			body.textContent = clampText(detail, 320)
 			row.appendChild(body)
 		}
 		return row
@@ -1011,6 +1123,7 @@
 				item?.valueSourceLabel ? `取值：${item.valueSourceLabel}` : '',
 				item?.basis ? `依据说明：${item.basis}` : '',
 				item?.clearStatusLabel ? `清空：${item.clearStatusLabel}` : '',
+				item?.neededEvidence ? `需要补充：${item.neededEvidence}` : '',
 			].filter(Boolean).join(' · ')
 		if (meta) {
 			const metaLine = document.createElement('div')
@@ -1339,8 +1452,14 @@
 			lines.push('安全跳过明细：')
 			for (const item of skippedDetails) lines.push(`- ${formatResultSkippedDetailExport(item)}`)
 		}
-		const remaining = Array.isArray(summary.remaining) ? summary.remaining.filter(Boolean) : []
-		if (remaining.length) lines.push(`未完成：${remaining.join('、')}`)
+		const remainingDetails = buildResultRemainingDetails(summary)
+		if (remainingDetails.length) {
+			lines.push('未完成明细：')
+			for (const item of remainingDetails) lines.push(`- ${formatResultRemainingDetailExport(item)}`)
+		} else {
+			const remaining = Array.isArray(summary.remaining) ? summary.remaining.filter(Boolean) : []
+			if (remaining.length) lines.push(`未完成：${remaining.join('、')}`)
+		}
 	}
 
 	function getResultSummarySourceLabel(summary) {
@@ -1365,18 +1484,45 @@
 
 	function formatResultSummaryStats(stats) {
 		if (!stats || typeof stats !== 'object') return ''
-		const entries = [
+		return getResultSummaryStatEntries()
+			.map(([key, label]) => ({ key, label, value: Number(stats[key]) }))
+			.filter((item) => shouldShowResultStat(item.key, item.value, stats))
+			.map((item) => `${item.label} ${item.value}`)
+			.join('，')
+	}
+
+	function getResultSummaryStatEntries() {
+		return [
 			['total', '总数'],
 			['tested', '已测'],
 			['passed', '通过'],
+			['reached', '已到达'],
 			['failed', '异常'],
+			['clickedUnverified', '点击未确认'],
+			['cleanupPassed', '清空完成'],
 			['cleanupFailed', '清空异常'],
 			['cleanupUnverified', '清空未确认'],
+			['candidateDiagnostics', '候选诊断'],
 			['dateCandidateOwnership', '日期候选归属'],
 			['contextRequestLimit', '上下文补证上限'],
 			['verificationRecoveryIncomplete', '校验恢复未完成'],
+			['userInputRequired', '需要用户补充'],
 			['terminalFailed', '终态异常'],
 			['unknown', '未确认'],
+			['formFields', '表单字段'],
+			['fieldTested', '字段已测'],
+			['fieldPassed', '字段通过'],
+			['fieldFailed', '字段异常'],
+			['fieldUnknown', '字段未确认'],
+			['fieldRemaining', '字段未完成'],
+			['submitted', '已提交'],
+			['submitFailed', '提交异常'],
+			['submitUnknown', '提交未确认'],
+			['submitMissing', '缺少提交'],
+			['formCompleted', '表单完成'],
+			['completionUnknown', '完成未确认'],
+			['revealAttempts', '展开导航'],
+			['visionAttempts', '视觉导航'],
 			['recoveredFailures', '失败后成功'],
 			['retried', '重试'],
 			['skipped', '安全跳过'],
@@ -1387,11 +1533,13 @@
 			['loopGuards', '循环保护'],
 			['verificationFailures', '校验失败'],
 		]
-		return entries
-			.map(([key, label]) => ({ key, label, value: Number(stats[key]) }))
-			.filter((item) => Number.isFinite(item.value))
-			.map((item) => `${item.label} ${item.value}`)
-			.join('，')
+	}
+
+	function shouldShowResultStat(key, value, stats) {
+		const numeric = Number(value)
+		if (!Number.isFinite(numeric)) return false
+		if (numeric !== 0) return true
+		return String(key || '') === 'total' && Object.prototype.hasOwnProperty.call(stats || {}, key)
 	}
 
 	function groupResultDiagnostics(diagnostics) {
@@ -1418,6 +1566,7 @@
 				item?.valueSourceLabel ? `取值=${item.valueSourceLabel}` : '',
 				item?.basis ? `依据说明=${item.basis}` : '',
 				item?.clearStatusLabel ? `清空=${item.clearStatusLabel}` : '',
+				item?.neededEvidence ? `需要补充=${item.neededEvidence}` : '',
 			item?.attempts ? `尝试=${item.attempts}` : '',
 			item?.failedAttempts ? `失败尝试=${item.failedAttempts}` : '',
 			item?.summary ? `说明=${item.summary}` : '',
@@ -1430,6 +1579,7 @@
 			issue?.label || '未命名项',
 			issue?.statusLabel || issue?.status || '',
 			issue?.clearStatusLabel ? `清空=${issue.clearStatusLabel}` : '',
+			issue?.neededEvidence ? `需要补充=${issue.neededEvidence}` : '',
 			issue?.summary || '',
 		].filter(Boolean).join('；')
 	}
@@ -1438,14 +1588,26 @@
 		return [
 			item?.label || '未命名字段',
 			item?.statusLabel || item?.status || '未确认',
-			item?.sourceLabel ? `依据=${item.sourceLabel}` : '',
+			item?.sourceLabel ? `${item?.sourceTitle || '依据'}=${item.sourceLabel}` : '',
 			item?.basis ? `依据说明=${item.basis}` : '',
+			item?.neededEvidence ? `需要补充=${item.neededEvidence}` : '',
+			item?.summary || '',
+		].filter(Boolean).join('；')
+	}
+
+	function formatResultRemainingDetailExport(item) {
+		return [
+			item?.label || '未命名项',
+			item?.statusLabel || item?.status || '未完成',
+			item?.sourceLabel ? `${item?.sourceTitle || '依据'}=${item.sourceLabel}` : '',
+			item?.basis ? `依据说明=${item.basis}` : '',
+			item?.neededEvidence ? `需要补充=${item.neededEvidence}` : '',
 			item?.summary || '',
 		].filter(Boolean).join('；')
 	}
 
 	function appendPlanItemsExport(lines, planItems) {
-		const items = normalizePlanItems(planItems)
+		const items = normalizePlanItems(planItems, { maxTitleLength: 1200 })
 		if (!items.length) return
 		lines.push('', '当前进度')
 		items.slice(0, 12).forEach((item, index) => {
@@ -1460,23 +1622,46 @@
 			Number.isFinite(Number(diagnostics.modelCallCount)) ? `模型调用 ${Number(diagnostics.modelCallCount)}` : '',
 			Number(diagnostics.modelErrorCount) ? `模型错误 ${Number(diagnostics.modelErrorCount)}` : '',
 			Number(diagnostics.timeoutCount) ? `超时 ${Number(diagnostics.timeoutCount)}` : '',
+			Number(diagnostics.plannerCorrectionCount) ? `规划纠偏 ${Number(diagnostics.plannerCorrectionCount)}` : '',
 			Number(diagnostics.loopGuardCount) ? `循环保护 ${Number(diagnostics.loopGuardCount)}` : '',
 			Number(diagnostics.verificationFailureCount) ? `校验失败 ${Number(diagnostics.verificationFailureCount)}` : '',
 			Number(diagnostics.dateCandidateOwnershipCount) ? `日期候选归属 ${Number(diagnostics.dateCandidateOwnershipCount)}` : '',
 			Number(diagnostics.verificationRecoveryIncompleteCount) ? `校验恢复未完成 ${Number(diagnostics.verificationRecoveryIncompleteCount)}` : '',
 			Number(diagnostics.contextRequestLimitCount) ? `上下文补证上限 ${Number(diagnostics.contextRequestLimitCount)}` : '',
+			Number(diagnostics.userInputRequiredCount) ? `需要用户补充 ${Number(diagnostics.userInputRequiredCount)}` : '',
 		].filter(Boolean)
 		const lastError = diagnostics.lastError?.detail || diagnostics.lastModelError?.message || ''
 		const progressSummary = formatProgressStageSummary(diagnostics)
-		const lastPlanningProgress = diagnostics.lastPlanningProgress?.detail || ''
-		const lastRuntimeProgress = diagnostics.lastRuntimeProgress?.detail || ''
-		if (!parts.length && !lastError && !progressSummary && !lastPlanningProgress && !lastRuntimeProgress && !Array.isArray(diagnostics.candidateDiagnostics)) return
+		const lastPlanningProgress = formatLastProgressExport(diagnostics.lastPlanningProgress)
+		const lastRuntimeProgress = formatLastProgressExport(diagnostics.lastRuntimeProgress)
+		const plannerCorrectionSummary = formatPlannerCorrectionSummary(diagnostics)
+		const lastPlannerCorrection = diagnostics.lastPlannerCorrection || null
+		const validationFeedbackSummary = formatStageCountMap(diagnostics.validationFeedbackKindCounts, VALIDATION_FEEDBACK_KIND_LABELS)
+		const lastValidationFeedback = diagnostics.lastValidationFeedback || null
+		const loopGuardSummary = formatStageCountMap(diagnostics.loopGuardKindCounts, LOOP_GUARD_KIND_LABELS)
+		const lastLoopGuard = diagnostics.lastLoopGuard || null
+		const modelThoughts = Array.isArray(diagnostics.modelThoughts) ? diagnostics.modelThoughts.filter((item) => item && String(item.thought || '').trim()) : []
+		if (!parts.length && !lastError && !progressSummary && !lastPlanningProgress && !lastRuntimeProgress && !plannerCorrectionSummary && !lastPlannerCorrection && !validationFeedbackSummary && !lastValidationFeedback && !loopGuardSummary && !lastLoopGuard && !Array.isArray(diagnostics.candidateDiagnostics) && !modelThoughts.length) return
 		lines.push('', '诊断概览')
 		if (parts.length) lines.push(parts.join('，'))
 		if (progressSummary) lines.push(`进度阶段：${progressSummary}`)
+		if (plannerCorrectionSummary) lines.push(`规划纠偏：${plannerCorrectionSummary}`)
+		if (lastPlannerCorrection?.detail) lines.push(`最近规划纠偏：${clampText(lastPlannerCorrection.detail, 500)}`)
+		if (validationFeedbackSummary) lines.push(`动作校验反馈：${validationFeedbackSummary}`)
+		if (lastValidationFeedback?.guidance) lines.push(`最近校验建议：${clampText(lastValidationFeedback.guidance, 500)}`)
+		if (loopGuardSummary) lines.push(`循环保护类型：${loopGuardSummary}`)
+		if (lastLoopGuard?.guidance) lines.push(`最近循环保护建议：${clampText(lastLoopGuard.guidance, 500)}`)
 		if (lastPlanningProgress) lines.push(`最后规划进度：${clampText(lastPlanningProgress, 500)}`)
 		if (lastRuntimeProgress) lines.push(`最后运行进度：${clampText(lastRuntimeProgress, 500)}`)
 		if (lastError) lines.push(`最后错误：${clampText(lastError, 500)}`)
+		if (modelThoughts.length) {
+			lines.push('最近模型分析：')
+			modelThoughts.slice(-3).forEach((item, index) => {
+				const title = String(item.title || '').trim()
+				const prefix = title ? `${index + 1}. ${title}` : `${index + 1}. 模型分析`
+				lines.push(`${prefix}：${clampText(String(item.thought || ''), 700)}`)
+			})
+		}
 		const candidateDiagnostics = Array.isArray(diagnostics.candidateDiagnostics) ? diagnostics.candidateDiagnostics : []
 		if (candidateDiagnostics.length) {
 			lines.push('候选定位诊断：')
@@ -1494,6 +1679,41 @@
 		].filter(Boolean).join('；')
 	}
 
+	function formatPlannerCorrectionSummary(diagnostics) {
+		if (!diagnostics || typeof diagnostics !== 'object') return ''
+		const counts = diagnostics.plannerCorrectionCounts || {
+			invalid_model_output: Number(diagnostics?.planningStageCounts?.invalid_model_output || 0),
+			invalid_action_name: Number(diagnostics?.planningStageCounts?.invalid_action_name || 0),
+		}
+		return formatStageCountMap(counts, {
+			invalid_model_output: '模型输出格式',
+			invalid_action_name: '工具名',
+		})
+	}
+
+	function formatLastProgressExport(progress) {
+		if (!progress || typeof progress !== 'object') return ''
+		const detail = String(progress.detail || '').trim()
+		const elapsed = formatProgressElapsedForExport(progress)
+		return [elapsed, detail].filter(Boolean).join('：')
+	}
+
+	function formatProgressElapsedForExport(progress) {
+		const elapsedMs = Math.max(0, Number(progress?.elapsedMs) || 0)
+		if (!elapsedMs) return ''
+		const timeoutMs = Math.max(0, Number(progress?.timeoutMs) || 0)
+		if (timeoutMs) return `耗时 ${formatDurationForExport(elapsedMs)}/${formatDurationForExport(timeoutMs)}`
+		return `耗时 ${formatDurationForExport(elapsedMs)}`
+	}
+
+	function formatDurationForExport(ms) {
+		const seconds = Math.max(1, Math.round(Number(ms || 0) / 1000))
+		if (seconds < 60) return `${seconds} 秒`
+		const minutes = Math.floor(seconds / 60)
+		const rest = seconds % 60
+		return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`
+	}
+
 	const PLANNING_STAGE_EXPORT_LABELS = {
 		observation_summary: '页面观察',
 		task_intent_request: '任务理解请求',
@@ -1508,6 +1728,8 @@
 		compact_retry: '压缩重试',
 		planning_context_request: '上下文请求',
 		planning_context: '上下文结果',
+		invalid_model_output: '模型输出纠偏',
+		invalid_action_name: '工具名纠偏',
 		validation_feedback: '动作校验反馈',
 		timeout_recovery: '超时恢复',
 		timeout_no_recovery: '超时无恢复',
@@ -1519,6 +1741,28 @@
 		execution_recovery: '执行恢复',
 		verification_heartbeat: '动作复核',
 		verification_recovery: '校验恢复',
+	}
+
+	const VALIDATION_FEEDBACK_KIND_LABELS = {
+		bad_index: '索引无效',
+		control_mismatch: '控件类型不匹配',
+		covered_target: '目标被遮挡',
+		declared_target_mismatch: '声明目标不匹配',
+		invalid_input: '参数不可执行',
+		missing_action_context: '缺少动作语义',
+		missing_required_parameter: '缺少必填参数',
+		repeat_selection_attempt: '重复选择尝试',
+		selection_bypass_attempt: '绕过选择归属',
+		unowned_selection_candidate: '候选未归属',
+	}
+
+	const LOOP_GUARD_KIND_LABELS = {
+		hover_no_effect: '悬浮无效果',
+		loop_guard: '循环保护',
+		repeated_failed_action: '重复失败动作',
+		repeated_no_progress_action: '重复无进展动作',
+		repeated_wait: '重复等待',
+		scroll_no_progress: '滚动无进展',
 	}
 
 	function formatStageCountMap(counts, labels) {
@@ -1804,7 +2048,8 @@
 		const traceItems = Array.isArray(session?.traceItems) ? session.traceItems : []
 		const diagnostics = buildSessionDiagnostics(traceItems)
 		const activityText = String(session?.activityText || state.activityText || '')
-		const resultSummary = resolveSessionResultSummary(session, traceItems, diagnostics, activityText)
+		const sensitiveValues = collectExportSensitiveValues({ session, traceItems, diagnostics, activityText })
+		const resultSummary = resolveSessionResultSummary(session, traceItems, diagnostics, activityText, { sensitiveValues })
 		return {
 			source: meta.source || 'unknown',
 			id: String(session?.id || ''),
@@ -1824,10 +2069,111 @@
 		}
 	}
 
-	function resolveSessionResultSummary(session, traceItems, diagnostics, activityText = '') {
+	function resolveSessionResultSummary(session, traceItems, diagnostics, activityText = '', options = {}) {
 		const existing = cloneJson(session?.resultSummary || null)
-		if (existing && typeof existing === 'object' && String(existing.headline || '').trim()) return existing
-		return buildFallbackResultSummary(session, traceItems, diagnostics, activityText)
+		if (existing && typeof existing === 'object' && String(existing.headline || '').trim()) {
+			return mergeSessionDiagnosticsIntoResultSummary(existing, diagnostics, options)
+		}
+		return mergeSessionDiagnosticsIntoResultSummary(
+			buildFallbackResultSummary(session, traceItems, diagnostics, activityText),
+			diagnostics,
+			options
+		)
+	}
+
+	function mergeSessionDiagnosticsIntoResultSummary(summary, diagnostics, options = {}) {
+		if (!summary || typeof summary !== 'object') return summary
+		const additions = buildCandidateDiagnosticResultItems(diagnostics, options)
+		if (!additions.length) return summary
+		const out = cloneJson(summary) || {}
+		const current = Array.isArray(out.diagnostics) ? out.diagnostics : []
+		const seen = new Set(current.map((item) => `${String(item?.kind || '')}\n${String(item?.text || '')}`))
+		out.diagnostics = [...current]
+		for (const item of additions) {
+			const key = `${String(item?.kind || '')}\n${String(item?.text || '')}`
+			if (seen.has(key)) continue
+			seen.add(key)
+			out.diagnostics.push(item)
+		}
+		out.stats = mergeCandidateDiagnosticsStats(out.stats, additions)
+		out.headline = appendCandidateDiagnosticsToSummaryHeadline(out.headline, additions)
+		out.text = appendMergedDiagnosticsToSummaryText(out.text, additions)
+		return out
+	}
+
+	function buildCandidateDiagnosticResultItems(diagnostics, options = {}) {
+		const sections = Array.isArray(diagnostics?.candidateDiagnostics)
+			? diagnostics.candidateDiagnostics.map(formatCandidateDiagnosticSnippet).filter(Boolean)
+			: []
+		if (!sections.length) return []
+		const sensitiveValues = options.sensitiveValues || []
+		const text = redactExportText(`候选定位诊断：${sections.slice(0, 2).join('；')}`, sensitiveValues)
+		const recommendation = redactExportText('建议：复查目标候选是否被索引、是否被遮挡、是否归属当前字段或弹层；必要时重新观察页面，或请求对应区域/候选上下文后再动作。', sensitiveValues)
+		return [
+			{
+				kind: 'candidate_diagnostics',
+				severity: 'warning',
+				count: sections.length,
+				text,
+			},
+			{
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: recommendation,
+			},
+		]
+	}
+
+	function mergeCandidateDiagnosticsStats(stats, additions) {
+		const count = getMergedCandidateDiagnosticCount(additions)
+		if (!count) return stats
+		const out = { ...(stats && typeof stats === 'object' ? stats : {}) }
+		out.candidateDiagnostics = Math.max(Number(out.candidateDiagnostics || 0), count)
+		return out
+	}
+
+	function appendCandidateDiagnosticsToSummaryHeadline(headline, additions) {
+		const base = String(headline || '').trim()
+		if (/候选诊断/.test(base)) return base
+		const count = getMergedCandidateDiagnosticCount(additions)
+		if (!count) return base
+		const suffix = `候选诊断：候选定位 ${count} 条。`
+		return base ? `${base} ${suffix}` : suffix
+	}
+
+	function getMergedCandidateDiagnosticCount(additions) {
+		const candidate = (Array.isArray(additions) ? additions : [])
+			.find((item) => String(item?.kind || '').trim() === 'candidate_diagnostics')
+		return Math.max(0, Number(candidate?.count || 0))
+	}
+
+	function appendMergedDiagnosticsToSummaryText(text, additions) {
+		const lines = String(text || '')
+			.split('\n')
+			.map((line) => line.trim())
+			.filter(Boolean)
+		const seen = new Set(lines)
+		for (const item of (Array.isArray(additions) ? additions : [])) {
+			const detail = String(item?.text || '').trim()
+			if (!detail) continue
+			const line = `诊断：${detail}`
+			if (seen.has(line)) continue
+			seen.add(line)
+			lines.push(line)
+		}
+		return lines.join('\n')
+	}
+
+	function formatCandidateDiagnosticSnippet(value) {
+		return clampText(
+			String(value || '')
+				.replace(/<\/?candidate_diagnostics[^>]*>/gi, ' ')
+				.replace(/<[^>]+>/g, ' ')
+				.replace(/\s+/g, ' ')
+				.trim(),
+			260
+		)
 	}
 
 	function buildFallbackResultSummary(session, traceItems, diagnostics, activityText = '') {
@@ -1848,18 +2194,20 @@
 				: status === 'stopped'
 					? 'stopped'
 					: status === 'error'
-						? 'failed'
+						? (Number(diagnostics?.userInputRequiredCount || 0) ? 'inconclusive' : 'failed')
 						: 'inconclusive'
 		const stats = {
 			total: items.length,
 			modelErrors: Number(diagnostics?.modelErrorCount || 0),
 			timeouts: Number(diagnostics?.timeoutCount || 0),
+			plannerCorrections: Number(diagnostics?.plannerCorrectionCount || 0),
 			loopGuards: Number(diagnostics?.loopGuardCount || 0),
 			verificationFailures: Number(diagnostics?.verificationFailureCount || 0),
 			dateCandidateOwnership: Number(diagnostics?.dateCandidateOwnershipCount || 0),
 			verificationRecoveryIncomplete: Number(diagnostics?.verificationRecoveryIncompleteCount || 0),
 			contextRequestLimit: Number(diagnostics?.contextRequestLimitCount || 0),
-			terminalFailed: issue && status === 'error' ? 1 : 0,
+			userInputRequired: Number(diagnostics?.userInputRequiredCount || 0),
+			terminalFailed: issue && status === 'error' && !Number(diagnostics?.userInputRequiredCount || 0) ? 1 : 0,
 		}
 		const headline = buildFallbackResultHeadline(status, items.length, stats)
 		const fallbackDiagnostics = buildFallbackResultDiagnostics(status, issue, diagnostics, { sensitiveValues })
@@ -1916,11 +2264,13 @@
 		const extras = [
 			Number(stats.modelErrors) ? `模型错误 ${Number(stats.modelErrors)} 次` : '',
 			Number(stats.timeouts) ? `超时 ${Number(stats.timeouts)} 次` : '',
+			Number(stats.plannerCorrections) ? `规划纠偏 ${Number(stats.plannerCorrections)} 次` : '',
 			Number(stats.loopGuards) ? `循环保护 ${Number(stats.loopGuards)} 次` : '',
 			Number(stats.verificationFailures) ? `校验失败 ${Number(stats.verificationFailures)} 次` : '',
 			Number(stats.dateCandidateOwnership) ? `日期候选归属 ${Number(stats.dateCandidateOwnership)} 次` : '',
 			Number(stats.verificationRecoveryIncomplete) ? `校验恢复未完成 ${Number(stats.verificationRecoveryIncomplete)} 次` : '',
 			Number(stats.contextRequestLimit) ? `上下文补证上限 ${Number(stats.contextRequestLimit)} 次` : '',
+			Number(stats.userInputRequired) ? `需要用户补充 ${Number(stats.userInputRequired)} 次` : '',
 		].filter(Boolean)
 		return `${label}：已记录 ${traceCount} 条轨迹${extras.length ? `，${extras.join('，')}` : ''}。`
 	}
@@ -1928,7 +2278,13 @@
 	function buildFallbackResultDiagnostics(status, issue, diagnostics, options = {}) {
 		const out = []
 		const text = String(issue || '').trim()
-		if (text) {
+		const userInputRequired = Number(diagnostics?.userInputRequiredCount || 0)
+		const modelThoughts = Array.isArray(diagnostics?.modelThoughts)
+			? diagnostics.modelThoughts
+				.filter((item) => item && String(item.thought || '').trim())
+				.slice(-3)
+			: []
+		if (text && !userInputRequired) {
 			out.push({
 				kind: status === 'stopped' ? 'task_stopped' : 'task_terminal_failure',
 				severity: status === 'stopped' ? 'warning' : 'error',
@@ -1952,12 +2308,81 @@
 				text: `等待或请求超时：${Number(diagnostics.timeoutCount || 0)} 次。`,
 			})
 		}
+		const plannerCorrectionSummary = formatPlannerCorrectionSummary(diagnostics)
+		if (plannerCorrectionSummary) {
+			const count = Number(diagnostics?.plannerCorrectionCount || 0) || countMapValues(diagnostics?.plannerCorrectionCounts)
+			out.push({
+				kind: 'planner_correction',
+				severity: 'warning',
+				count,
+				text: `规划输出纠偏：${plannerCorrectionSummary}；这些纠偏发生在执行页面动作前，Agent 已要求模型按可用工具和 JSON 契约重试。`,
+			})
+			const detail = String(diagnostics?.lastPlannerCorrection?.detail || '').trim()
+			if (detail) {
+				out.push({
+					kind: 'planner_correction_detail',
+					severity: 'info',
+					count: 1,
+					text: `最近规划纠偏：${clampText(detail, 420)}`,
+				})
+			}
+			out.push({
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: '建议：查看最近模型输出、可用工具列表和规划提示词；若频繁出现，可调小任务拆分粒度，或检查模型与工具 schema 配置。',
+			})
+		}
 		if (Number(diagnostics?.loopGuardCount || 0)) {
+			const loopGuardSummary = diagnostics?.loopGuardKindCounts
+				? formatStageCountMap(diagnostics.loopGuardKindCounts, LOOP_GUARD_KIND_LABELS)
+				: ''
 			out.push({
 				kind: 'loop_guard',
 				severity: 'warning',
 				count: Number(diagnostics.loopGuardCount || 0),
-				text: `循环保护触发：${Number(diagnostics.loopGuardCount || 0)} 次。`,
+				text: `循环保护触发：${Number(diagnostics.loopGuardCount || 0)} 次${loopGuardSummary ? `，类型：${loopGuardSummary}` : ''}。`,
+			})
+			const guidance = String(diagnostics?.lastLoopGuard?.guidance || '').trim()
+			if (guidance) {
+				out.push({
+					kind: 'next_step_recommendation',
+					severity: 'info',
+					count: 1,
+					text: `建议：${guidance}`,
+				})
+			}
+		}
+		const validationFeedbackSummary = diagnostics?.validationFeedbackKindCounts
+			? formatStageCountMap(diagnostics.validationFeedbackKindCounts, VALIDATION_FEEDBACK_KIND_LABELS)
+			: ''
+		if (validationFeedbackSummary) {
+			out.push({
+				kind: 'validation_feedback',
+				severity: 'warning',
+				count: countMapValues(diagnostics?.validationFeedbackKindCounts),
+				text: `执行前校验拦截：${validationFeedbackSummary}。`,
+			})
+			const guidance = String(diagnostics?.lastValidationFeedback?.guidance || '').trim()
+			if (guidance) {
+				out.push({
+					kind: 'next_step_recommendation',
+					severity: 'info',
+					count: 1,
+					text: `建议：${guidance}`,
+				})
+			}
+		}
+		if (modelThoughts.length) {
+			out.push({
+				kind: 'recent_model_analysis',
+				severity: 'info',
+				count: modelThoughts.length,
+				text: `最近模型分析：${modelThoughts.map((item) => {
+					const title = String(item.title || '').trim()
+					const thought = clampText(String(item.thought || ''), 220)
+					return title ? `${title}: ${thought}` : thought
+				}).filter(Boolean).join('；')}`,
 			})
 		}
 		if (Number(diagnostics?.dateCandidateOwnershipCount || 0)) {
@@ -2002,10 +2427,29 @@
 				text: '建议：先查看最后的补充上下文，确认是缺少页面证据、候选归属不稳定，还是目标字段定位不稳定，再重新规划。',
 			})
 		}
+		if (Number(diagnostics?.userInputRequiredCount || 0)) {
+			out.push({
+				kind: 'user_input_required',
+				severity: 'warning',
+				count: Number(diagnostics.userInputRequiredCount || 0),
+				text: `需要用户补充信息：${Number(diagnostics.userInputRequiredCount || 0)} 条轨迹显示 Agent 已请求用户确认、验证码、缺失账号信息或冲突字段新值。`,
+			})
+			out.push({
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: '建议：先补充 Agent 请求的验证码、账号、确认信息或替代字段值，再从等待用户回答前的步骤继续。',
+			})
+		}
 		return out.map((item) => ({
 			...item,
 			text: redactExportText(item.text, options.sensitiveValues),
 		}))
+	}
+
+	function countMapValues(counts) {
+		return Object.values(counts && typeof counts === 'object' ? counts : {})
+			.reduce((sum, value) => sum + (Number(value) || 0), 0)
 	}
 
 	function buildSessionDiagnostics(traceItems) {
@@ -2022,17 +2466,26 @@
 			.slice(-6)
 		const lastError = [...errorItems].reverse()[0] || null
 		const lastModelErrorItem = [...modelItems].reverse().find((item) => getModelErrorSummary(item))
+		const plannerCorrectionCounts = countPlannerCorrectionStages(items)
 		return {
 			modelCallCount: modelItems.length,
 			modelErrorCount: modelItems.filter((item) => item.kind === 'error').length,
 			timeoutCount: items.filter((item) => /超时|timeout/i.test(`${item?.title || ''} ${item?.detail || ''}`)).length,
 			loopGuardCount: items.filter((item) => /循环保护|loop_guard/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
+			loopGuardKindCounts: countLoopGuardKinds(items),
+			lastLoopGuard: getLastLoopGuardTrace(items),
 			verificationFailureCount: items.filter((item) => /校验失败|verify/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
 			dateCandidateOwnershipCount: items.filter(isDateCandidateOwnershipTrace).length,
 			verificationRecoveryIncompleteCount: items.filter(isVerificationRecoveryIncompleteTrace).length,
 			contextRequestLimitCount: items.filter(isContextRequestLimitTrace).length,
+			userInputRequiredCount: items.filter(isUserInputRequiredTrace).length,
 			planningStageCounts: countProgressStages(items, 'planning'),
 			runtimeStageCounts: countProgressStages(items, 'runtime'),
+			plannerCorrectionCount: countMapValues(plannerCorrectionCounts),
+			plannerCorrectionCounts,
+			lastPlannerCorrection: getLastPlannerCorrectionTrace(items),
+			validationFeedbackKindCounts: countValidationFeedbackKinds(items),
+			lastValidationFeedback: getLastValidationFeedbackTrace(items),
 			lastPlanningProgress: getLastProgressTrace(items, 'planning'),
 			lastRuntimeProgress: getLastProgressTrace(items, 'runtime'),
 			candidateDiagnostics: extractCandidateDiagnostics(modelItems),
@@ -2060,6 +2513,22 @@
 			input.workflow_planning_context_diagnostic,
 		].map((value) => String(value || '')).join(' ')
 		return /(内部\s*(?:ReAct\s*)?上下文请求次数达到上限|上下文请求次数达到上限|planning_context_limit|context[-_\s]?request[-_\s]?limit|context[-_\s]?round[-_\s]?limit|补充上下文.*上限|上下文补证.*上限)/i.test(text)
+	}
+
+	function isUserInputRequiredTrace(item) {
+		const input = item?.action?.input && typeof item.action.input === 'object' ? item.action.input : {}
+		const action = String(item?.action?.name || '').replace(/\..*$/, '').trim()
+		const text = [
+			item?.title,
+			item?.detail,
+			item?.action?.name,
+			item?.action?.output,
+			input.question,
+			input.reason,
+			input.purpose,
+			input.text,
+		].map((value) => String(value || '')).join(' ')
+		return action === 'ask_user' || /(ask_user|等待用户回答|用户未提供回答|询问用户失败|用户介入|需要你确认|需要用户|用户确认|验证码|校验码|动态码|短信码|缺少.*(?:账号|手机号|验证码|校验码|动态码|确认|信息)|无法判断.*(?:用户|选项|意图)|确认新值|提供.*新值)/i.test(text)
 	}
 
 	function isVerificationRecoveryIncompleteTrace(item) {
@@ -2103,6 +2572,78 @@
 		return out
 	}
 
+	function countValidationFeedbackKinds(items) {
+		const out = {}
+		for (const item of (Array.isArray(items) ? items : [])) {
+			const kind = String(item?.progress?.validationKind || '').trim()
+			if (!kind) continue
+			out[kind] = Number(out[kind] || 0) + 1
+		}
+		return out
+	}
+
+	function countPlannerCorrectionStages(items) {
+		const out = {}
+		for (const item of (Array.isArray(items) ? items : [])) {
+			const stage = String(item?.progress?.stage || '').trim()
+			if (stage !== 'invalid_model_output' && stage !== 'invalid_action_name') continue
+			out[stage] = Number(out[stage] || 0) + 1
+		}
+		return out
+	}
+
+	function getLastPlannerCorrectionTrace(items) {
+		for (const item of [...(Array.isArray(items) ? items : [])].reverse()) {
+			const stage = String(item?.progress?.stage || '').trim()
+			if (stage !== 'invalid_model_output' && stage !== 'invalid_action_name') continue
+			return {
+				stage,
+				detail: clampText(String(item?.detail || item?.progress?.detail || ''), 800),
+				elapsedMs: Math.max(0, Number(item?.progress?.elapsedMs) || 0),
+				timeoutMs: Math.max(0, Number(item?.progress?.timeoutMs) || 0),
+			}
+		}
+		return null
+	}
+
+	function countLoopGuardKinds(items) {
+		const out = {}
+		for (const item of (Array.isArray(items) ? items : [])) {
+			const kind = String(item?.action?.loopGuardKind || item?.loopGuardKind || '').trim()
+			if (!kind) continue
+			out[kind] = Number(out[kind] || 0) + 1
+		}
+		return out
+	}
+
+	function getLastLoopGuardTrace(items) {
+		for (const item of [...(Array.isArray(items) ? items : [])].reverse()) {
+			const kind = String(item?.action?.loopGuardKind || item?.loopGuardKind || '').trim()
+			const guidance = String(item?.action?.loopGuardGuidance || item?.loopGuardGuidance || '').trim()
+			if (!kind && !guidance) continue
+			return {
+				kind,
+				guidance: clampText(guidance, 800),
+				detail: clampText(String(item?.detail || ''), 800),
+			}
+		}
+		return null
+	}
+
+	function getLastValidationFeedbackTrace(items) {
+		for (const item of [...(Array.isArray(items) ? items : [])].reverse()) {
+			const kind = String(item?.progress?.validationKind || '').trim()
+			const guidance = String(item?.progress?.validationGuidance || '').trim()
+			if (!kind && !guidance) continue
+			return {
+				kind,
+				guidance: clampText(guidance, 800),
+				detail: clampText(String(item?.detail || ''), 800),
+			}
+		}
+		return null
+	}
+
 	function getLastProgressTrace(items, group) {
 		for (const item of [...(Array.isArray(items) ? items : [])].reverse()) {
 			if (!isProgressTraceGroup(item, group)) continue
@@ -2110,6 +2651,10 @@
 				stage: String(item?.progress?.stage || '').trim(),
 				title: String(item?.title || ''),
 				detail: clampText(String(item?.detail || ''), 800),
+				elapsedMs: Math.max(0, Number(item?.progress?.elapsedMs) || 0),
+				timeoutMs: Math.max(0, Number(item?.progress?.timeoutMs) || 0),
+				validationKind: String(item?.progress?.validationKind || '').trim(),
+				validationGuidance: String(item?.progress?.validationGuidance || '').trim(),
 			}
 		}
 		return null
@@ -2282,8 +2827,12 @@
 		el.historyDetailTaskValue.textContent = `${session.task || session.latestTask || ''}（${turns} 轮）`
 		el.historyDetailList.innerHTML = ''
 		const traceItems = Array.isArray(session.traceItems) ? session.traceItems : []
+		const historyDiagnostics = buildSessionDiagnostics(traceItems)
+		const historyActivityText = String(session.activityText || '')
 		const resultSummary = renderResultSummaryCard(
-			resolveSessionResultSummary(session, traceItems, buildSessionDiagnostics(traceItems), String(session.activityText || ''))
+			resolveSessionResultSummary(session, traceItems, historyDiagnostics, historyActivityText, {
+				sensitiveValues: collectExportSensitiveValues({ session, traceItems, diagnostics: historyDiagnostics, activityText: historyActivityText }),
+			})
 		)
 		if (resultSummary) el.historyDetailList.appendChild(resultSummary)
 		if (!traceItems.length) {
@@ -2313,6 +2862,12 @@
 		}
 		const traceItems = (Array.isArray(state.traceItems) ? state.traceItems : []).slice(-600)
 		const diagnostics = buildSessionDiagnostics(traceItems)
+		const sensitiveValues = collectExportSensitiveValues({
+			session: state,
+			traceItems,
+			diagnostics,
+			activityText: state.activityText,
+		})
 		const resultSummary = resolveSessionResultSummary(
 			{
 				status: state.status,
@@ -2322,7 +2877,8 @@
 			},
 			traceItems,
 			diagnostics,
-			state.activityText
+			state.activityText,
+			{ sensitiveValues }
 		)
 		const record = {
 			id: currentConversationId,

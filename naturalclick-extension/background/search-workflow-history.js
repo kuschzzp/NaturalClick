@@ -190,6 +190,16 @@
 				: []
 		}
 
+		function getOutcomeSelectedPath(outcome) {
+			return normalizeOutcomeList(outcome?.selectedPath || outcome?.selectedLabels)
+		}
+
+		function normalizeOutcomeList(value) {
+			return Array.isArray(value)
+				? value.map((item) => String(item || '').trim()).filter(isUsableLabel)
+				: []
+		}
+
 		function normalizeOutcomeObject(outcome) {
 			if (!outcome || typeof outcome !== 'object') return null
 			const normalized = g.NC_ACTION_CONTRACT?.normalizeOutcome
@@ -217,6 +227,7 @@
 			getHistoryFailureReason,
 			getOutcomeRequestedText,
 			getOutcomeVisibleOptions,
+			getOutcomeSelectedPath,
 			normalizeOutcomeObject,
 		}
 	}

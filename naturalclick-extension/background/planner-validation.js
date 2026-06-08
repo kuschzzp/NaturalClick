@@ -117,6 +117,8 @@
 			}
 			const selectionIntentError = validateSelectionHasDeclaredTargetLabel(name, input)
 			if (selectionIntentError) return selectionIntentError
+			const targetError = validateCascaderPathTarget(input.index, observation, name)
+			if (targetError) return targetError
 		}
 		if (name === 'open_new_tab') {
 			if (!/^https?:\/\//i.test(String(input.url || '').trim())) {
@@ -861,6 +863,32 @@
 		].join('')
 	}
 
+	function validateCascaderPathTarget(indexValue, observation, actionName) {
+		const index = Number(indexValue)
+		if (!Number.isFinite(index)) return ''
+		const matches = findObservedIndexMatches(observation, index)
+		if (!matches.length) return ''
+		if (matches.some((entry) => isCascaderParentTarget(entry.item, entry.source))) return ''
+		const textMatch = matches.find((entry) => isPlainEditableTextItem(entry.item, entry.source))
+		if (textMatch) {
+			const item = textMatch.item || {}
+			const label = item.label || item.placeholder || item.text || ''
+			return [
+				`${actionName} 目标 index=${index} 是普通可编辑输入框（label="${shortText(label, 48)}"），不能按级联路径选择。`,
+				'请使用 input_text/type 填写文本；只有层级/树形/级联选择字段才使用 select_cascader_path。',
+			].join('')
+		}
+		const selectionMatch = matches.find((entry) => isSelectionLikeItem(entry.item, entry.source))
+		if (!selectionMatch) return ''
+		const item = selectionMatch.item || {}
+		const label = item.label || item.placeholder || item.text || ''
+		const info = describeObservedControl(item, selectionMatch.source)
+		return [
+			`${actionName} 目标 index=${index} 是非层级选择控件（label="${shortText(label, 48)}", control=${info.control || '-'}, role=${info.role || '-'}, fieldType=${info.fieldType || '-'}），不能按级联路径选择。`,
+			'请使用 open_dropdown/choose_dropdown_option/select_checkbox_option 处理普通选择控件；只有层级/树形/级联选择字段才使用 select_cascader_path。',
+		].join('')
+	}
+
 	function isCascaderParentTarget(item, source) {
 		if (!item || typeof item !== 'object') return false
 		const info = describeObservedControl(item, source)
@@ -873,7 +901,7 @@
 			item.kind,
 			item.fieldType,
 		].map((value) => String(value || '').toLowerCase()).join(' ')
-		return /cascader/.test(tokens) && !/(leaf|option|candidate)/.test(tokens)
+		return /(cascader|tree|hierarchy)/.test(tokens) && !/(leaf|option|candidate)/.test(tokens)
 	}
 
 	function validateSelectionTextAgainstVisibleOptions(indexValue, selectionText, observation, actionName, input = {}) {
@@ -944,7 +972,9 @@
 			}
 			if (Number.isFinite(best)) scored.push({ item, score: best })
 		}
-		return scored.sort((a, b) => a.score - b.score).map((entry) => entry.item)
+		const scoped = scored.sort((a, b) => a.score - b.score).map((entry) => entry.item)
+		if (scoped.length) return scoped
+		return controlSemantics.collectActiveNewPopupItemsForTargets?.(visibleItems, targetItems) || []
 	}
 
 	function collectDiagnosticSelectionCandidatesForIndex(observation, index) {
@@ -967,6 +997,7 @@
 					break
 				}
 			}
+			if (!associated && controlSemantics.isActiveNewPopupItemForTargets?.(item, targetItems)) associated = true
 			if (associated) continue
 			const label = String(item?.label || item?.text || '').trim()
 			if (label) labels.push(label)
@@ -990,6 +1021,7 @@
 	function selectionRequestMatchesCandidate(rawRequested, normalizedRequested, candidate, options = {}) {
 		if (selectionMatchesCandidate(normalizedRequested, candidate)) return true
 		return dateRangeSelectionMatchesCandidate(rawRequested, candidate)
+			|| temporalRangeSelectionMatchesCandidate(rawRequested, candidate)
 			|| (options?.dateLikeTarget === true && dateSelectionMatchesDayOnlyCandidate(rawRequested, candidate))
 	}
 
@@ -1041,6 +1073,14 @@
 		return candidateDates.some((date) => requestedDates.includes(date))
 	}
 
+	function temporalRangeSelectionMatchesCandidate(rawRequested, candidate) {
+		const requestedPeriods = extractSelectionPeriodCandidates(rawRequested)
+		if (requestedPeriods.length < 2) return false
+		const candidatePeriods = extractSelectionPeriodCandidates(candidate)
+		if (!candidatePeriods.length) return false
+		return candidatePeriods.some((period) => requestedPeriods.includes(period))
+	}
+
 	function extractSelectionDateCandidates(value) {
 		const text = String(value || '').trim()
 		const out = []
@@ -1058,6 +1098,30 @@
 			push(match[1], match[2], match[3])
 		}
 		return out
+	}
+
+	function extractSelectionPeriodCandidates(value) {
+		const text = String(value || '').trim()
+		const out = []
+		const seen = new Set()
+		const push = (value) => {
+			const normalized = String(value || '').trim()
+			if (!normalized || seen.has(normalized)) return
+			seen.add(normalized)
+			out.push(normalized)
+		}
+		for (const match of text.matchAll(/(\d{4})\s*[-/]\s*(\d{1,2})(?!\s*[-/]\s*\d{1,2})/g)) {
+			push(formatSelectionMonth(match[1], match[2]))
+		}
+		for (const match of text.matchAll(/(\d{4})\s*年\s*(\d{1,2})\s*月(?!\s*\d{1,2}\s*日?)/g)) {
+			push(formatSelectionMonth(match[1], match[2]))
+		}
+		for (const match of text.matchAll(/(\d{4})\s*(?:年|-)?\s*(?:第)?\s*(?:W|w|week)?\s*(\d{1,2})\s*周/g)) {
+			push(formatSelectionWeek(match[1], match[2]))
+		}
+		const standalone = normalizeStandaloneTemporalSelectionText(text)
+		if (standalone) push(standalone)
+		return out.filter(Boolean)
 	}
 
 	function dateSelectionMatchesDayOnlyCandidate(rawRequested, candidate) {
@@ -1153,7 +1217,7 @@
 	}
 
 	function isDateLikeDeclaredSelectionTarget(input, selectionText) {
-		if (!extractSelectionDateCandidates(selectionText).length) return false
+		if (!extractSelectionDateCandidates(selectionText).length && !extractSelectionPeriodCandidates(selectionText).length) return false
 		const descriptor = [
 			input?.target_label,
 			input?.workflow_field_label,
@@ -1172,6 +1236,7 @@
 		const label = String(item.label || item.text || '').trim()
 		return role === 'option' && (
 			/^\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}/.test(label) ||
+			!!normalizeStandaloneTemporalSelectionText(label) ||
 			parseDayOnlySelectionCandidate(label) !== null
 		)
 	}
@@ -1278,7 +1343,57 @@
 	}
 
 	function normalizeSelectionText(value) {
+		const temporal = normalizeStandaloneTemporalSelectionText(value)
+		if (temporal) return temporal
 		return String(value || '').trim().replace(/\s+/g, '').toLowerCase()
+	}
+
+	function normalizeStandaloneTemporalSelectionText(value) {
+		const text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return ''
+		let match = text.match(/^(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})$/)
+		if (!match) match = text.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?$/)
+		if (match) return formatSelectionDate(match[1], match[2], match[3])
+		match = text.match(/^(\d{4})\s*[-/]\s*(\d{1,2})$/)
+		if (!match) match = text.match(/^(\d{4})\s*年\s*(\d{1,2})\s*月$/)
+		if (match) return formatSelectionMonth(match[1], match[2])
+		match = text.match(/^(\d{4})\s*(?:年|-)?\s*(?:第)?\s*(?:W|w|week)?\s*(\d{1,2})\s*周$/)
+		if (!match) match = text.match(/^(\d{4})-W(\d{1,2})$/i)
+		if (match) return formatSelectionWeek(match[1], match[2])
+		match = text.match(/^(\d{4})\s*年?$/)
+		if (!match) return ''
+		const year = Number(match[1])
+		return Number.isFinite(year) && year >= 1 && year <= 9999 ? String(year) : ''
+	}
+
+	function formatSelectionDate(year, month, day) {
+		const yearNum = Number(year)
+		const monthNum = Number(month)
+		const dayNum = Number(day)
+		if (![yearNum, monthNum, dayNum].every(Number.isFinite)) return ''
+		const date = new Date(Date.UTC(yearNum, monthNum - 1, dayNum))
+		if (
+			date.getUTCFullYear() !== yearNum ||
+			date.getUTCMonth() + 1 !== monthNum ||
+			date.getUTCDate() !== dayNum
+		) {
+			return ''
+		}
+		return `${yearNum}-${pad2(monthNum)}-${pad2(dayNum)}`
+	}
+
+	function formatSelectionMonth(year, month) {
+		const yearNum = Number(year)
+		const monthNum = Number(month)
+		if (!Number.isFinite(yearNum) || !Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return ''
+		return `${yearNum}-${pad2(monthNum)}`
+	}
+
+	function formatSelectionWeek(year, week) {
+		const yearNum = Number(year)
+		const weekNum = Number(week)
+		if (!Number.isFinite(yearNum) || !Number.isFinite(weekNum) || weekNum < 1 || weekNum > 53) return ''
+		return `${yearNum}-W${pad2(weekNum)}`
 	}
 
 	function isFailedOutcome(text) {
