@@ -3180,6 +3180,7 @@
 		const historyLoopGuards = countItems(history, (item) => isOperationalLoopGuardText(buildOperationalHistoryText(item)))
 		const traceVerificationFailures = countItems(traceItems, (item) => isOperationalVerificationFailureText(buildOperationalTraceText(item)))
 		const historyVerificationFailures = countItems(history, (item) => isOperationalVerificationFailureText(buildOperationalHistoryText(item)))
+		const candidateAssociation = collectOperationalCandidateAssociationSignals(traceItems, history, terminalReason)
 		return {
 			modelErrors: countItems(traceItems, isOperationalModelErrorTrace),
 			timeouts: Math.max(traceTimeouts, historyTimeouts, isOperationalTimeoutText(terminalReason) ? 1 : 0),
@@ -3191,6 +3192,8 @@
 			loopGuards: Math.max(traceLoopGuards, historyLoopGuards, isOperationalLoopGuardText(terminalReason) ? 1 : 0),
 			lastLoopGuardGuidance: findLastTraceValue(traceItems, (item) => isOperationalLoopGuardText(buildOperationalTraceText(item)), (item) => item?.action?.loopGuardGuidance),
 			verificationFailures: Math.max(traceVerificationFailures, historyVerificationFailures),
+			candidateAssociationAmbiguous: candidateAssociation.ambiguous,
+			candidateAssociationUnowned: candidateAssociation.unowned,
 		}
 	}
 
@@ -3201,7 +3204,8 @@
 			Number(signals?.plannerCorrections || 0) ||
 			Number(signals?.validationFeedback || 0) ||
 			Number(signals?.loopGuards || 0) ||
-			Number(signals?.verificationFailures || 0)
+			Number(signals?.verificationFailures || 0) ||
+			countCandidateAssociationIssues(signals)
 		)
 	}
 
@@ -3212,6 +3216,8 @@
 		mergeMaxStat(out, 'plannerCorrections', signals.plannerCorrections)
 		mergeMaxStat(out, 'loopGuards', signals.loopGuards)
 		mergeMaxStat(out, 'verificationFailures', signals.verificationFailures)
+		mergeMaxStat(out, 'candidateAssociationAmbiguous', signals.candidateAssociationAmbiguous)
+		mergeMaxStat(out, 'candidateAssociationUnowned', signals.candidateAssociationUnowned)
 		return out
 	}
 
@@ -3238,6 +3244,7 @@
 			formatOperationalHeadlineCount('执行前校验', signals?.validationFeedback),
 			formatOperationalHeadlineCount('循环保护', signals?.loopGuards),
 			formatOperationalHeadlineCount('校验失败', signals?.verificationFailures),
+			formatOperationalHeadlineCount('候选归属待确认', countCandidateAssociationIssues(signals)),
 		].filter(Boolean)
 	}
 
@@ -3309,6 +3316,21 @@
 				text: `动作校验失败：${Number(signals.verificationFailures || 0)} 次；页面没有出现预期变化或变化证据不足。`,
 			})
 			recommendations.push('建议：对校验失败动作先看命中目标、遮挡状态、页面反馈和候选归属，再决定是否重试。')
+		}
+		const candidateAssociationIssues = countCandidateAssociationIssues(signals)
+		if (candidateAssociationIssues) {
+			const ambiguous = Number(signals.candidateAssociationAmbiguous || 0)
+			const unowned = Number(signals.candidateAssociationUnowned || 0)
+			diagnostics.push({
+				kind: 'candidate_association',
+				severity: 'warning',
+				count: candidateAssociationIssues,
+				text: `候选归属待确认：${[
+					ambiguous ? `归属模糊 ${ambiguous} 项` : '',
+					unowned ? `未归属 ${unowned} 项` : '',
+				].filter(Boolean).join('，')}；说明当前可见候选还不能稳定绑定到目标字段。`,
+			})
+			recommendations.push('建议：先用 request_options_for/open_dropdown/inspect_region 复核当前活动字段与弹层候选归属，不要直接选择归属模糊或未归属候选。')
 		}
 		appendNextStepRecommendations(diagnostics, recommendations)
 		return diagnostics
@@ -3393,6 +3415,56 @@
 
 	function isOperationalVerificationFailureText(text) {
 		return /(校验失败|动作校验失败|验证失败|verify(?:_|\\s|-)?failed|verification(?:_|\\s|-)?failed)/i.test(String(text || ''))
+	}
+
+	function collectOperationalCandidateAssociationSignals(traceItems, history, terminalReason) {
+		const counts = { ambiguous: 0, unowned: 0 }
+		for (const item of (Array.isArray(traceItems) ? traceItems : [])) {
+			mergeStructuredCandidateAssociationCounts(counts, item?.progress)
+			mergeCandidateAssociationCounts(counts, buildOperationalTraceText(item))
+		}
+		for (const item of (Array.isArray(history) ? history : [])) {
+			mergeCandidateAssociationCounts(counts, buildOperationalHistoryText(item))
+		}
+		mergeCandidateAssociationCounts(counts, terminalReason)
+		return counts
+	}
+
+	function mergeStructuredCandidateAssociationCounts(target, progress) {
+		if (!progress || typeof progress !== 'object') return target
+		const ambiguous = Number(progress.candidateAssociationAmbiguous || 0)
+		const unowned = Number(progress.candidateAssociationUnowned || 0)
+		if (Number.isFinite(ambiguous) && ambiguous > target.ambiguous) target.ambiguous = ambiguous
+		if (Number.isFinite(unowned) && unowned > target.unowned) target.unowned = unowned
+		return target
+	}
+
+	function mergeCandidateAssociationCounts(target, text) {
+		const counts = extractCandidateAssociationCounts(text)
+		target.ambiguous = Math.max(Number(target.ambiguous || 0), counts.ambiguous)
+		target.unowned = Math.max(Number(target.unowned || 0), counts.unowned)
+		return target
+	}
+
+	function extractCandidateAssociationCounts(text) {
+		return {
+			ambiguous: extractMaxCountFromText(text, /候选归属模糊\s*(\d+)/g),
+			unowned: extractMaxCountFromText(text, /候选未归属\s*(\d+)/g),
+		}
+	}
+
+	function extractMaxCountFromText(text, pattern) {
+		const source = String(text || '')
+		let max = 0
+		for (const match of source.matchAll(pattern)) {
+			const value = Number(match?.[1] || 0)
+			if (Number.isFinite(value) && value > max) max = value
+		}
+		return max
+	}
+
+	function countCandidateAssociationIssues(signals) {
+		return Number(signals?.candidateAssociationAmbiguous || 0) + Number(signals?.candidateAssociationUnowned || 0)
 	}
 
 	function findLastTraceValue(items, predicate, reader) {

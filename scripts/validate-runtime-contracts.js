@@ -768,6 +768,24 @@ function assertObserverKeepsCrudTextActionCandidates() {
 			throw new Error(`plain CRUD text fallback should not include create/title text ${forbidden}`)
 		}
 	}
+	for (const expected of ['unindexedTextActionProbes', 'outerHTML', 'hitState: hitState.state', 'summarizeCandidateProbeStyle', 'summarizeCandidateProbeActionAncestor', 'probableInteractive', 'normalized']) {
+		if (!diagnosticsFn.includes(expected)) {
+			throw new Error(`observer should export richer unindexed text-action diagnostics for copied sessions: missing ${expected}`)
+		}
+	}
+	const observerFormatDiagnosticsFn = extractFunctionSource(observer, 'formatCandidateDiagnostics')
+	for (const expected of ['hit=${formatHitState(probe)}', 'interactive=${probe.probableInteractive', 'normalized=${probe.normalized', 'ancestor="${shortText(probe.actionAncestor', 'style="${shortText(probe.style']) {
+		if (!observerFormatDiagnosticsFn.includes(expected)) {
+			throw new Error(`observer candidate diagnostics should surface generic locator evidence: missing ${expected}`)
+		}
+	}
+	const plannerContext = read('naturalclick-extension/background/planner-context.js')
+	const plannerFormatDiagnosticsFn = extractFunctionSource(plannerContext, 'formatCandidateDiagnostics')
+	for (const expected of ['hit=${formatHitState(probe)}', 'interactive=${probe?.probableInteractive', 'normalized=${probe?.normalized', 'ancestor="${shortText(probe?.actionAncestor', 'style="${shortText(probe?.style']) {
+		if (!plannerFormatDiagnosticsFn.includes(expected)) {
+			throw new Error(`planner context candidate diagnostics should preserve generic locator evidence: missing ${expected}`)
+		}
+	}
 	if (!diagnosticsFn.includes('unindexedTextActionProbes') || !diagnosticsFn.includes('outerHTML')) {
 		throw new Error('observer should export unindexed text-action diagnostics for copied sessions')
 	}
@@ -899,6 +917,18 @@ function assertObservationActionLinesExposeRects() {
 		!observer.includes('hit=${formatHitState(action)}')
 	) {
 		throw new Error('observer observation lines should expose generic hit-test state before planning clicks')
+	}
+	const summarizeHitBlockerFn = extractFunctionSource(observer, 'summarizeHitBlocker')
+	for (const expected of ['formatHitBlockerRect', 'inferElementRegion', 'summarizeHitBlockerStyle', 'readHitBlockerAttribute', 'aria-label']) {
+		if (!summarizeHitBlockerFn.includes(expected)) {
+			throw new Error(`observer hit-test blockers should expose generic locator evidence: missing ${expected}`)
+		}
+	}
+	const summarizeHitBlockerStyleFn = extractFunctionSource(observer, 'summarizeHitBlockerStyle')
+	for (const expected of ['pointerEvents', 'zIndex', 'position', 'opacity']) {
+		if (!summarizeHitBlockerStyleFn.includes(expected)) {
+			throw new Error(`observer hit-test blocker style diagnostics should include ${expected}`)
+		}
 	}
 		if (!observer.includes('source=${action.labelSource') || !observer.includes('aliases="${(action.aliases || []).join')) {
 			throw new Error('observer action lines should expose label source and aliases for icon-only/accessible-name buttons')
@@ -2593,6 +2623,76 @@ async function assertPlannerPublishesPlanningProgress() {
 	if (!reasoningOnlyText.includes('仍在推理，尚未输出可执行动作') || !reasoningOnlyText.includes('最多等待 60 秒') || !reasoningOnlyText.includes('页面动作尚未执行')) {
 		throw new Error(`planner stream progress should explain why the model still appears busy, got ${reasoningOnlyText}`)
 	}
+	const associationObservation = {
+		forms: [{
+			fields: [
+				{ index: 4, fieldType: 'select', role: 'combobox', selectionControl: 'dropdown', rect: { left: 20, top: 80, width: 180, height: 36 }, hitState: 'covered' },
+				{ index: 5, fieldType: 'select', role: 'combobox', selectionControl: 'dropdown', rect: { left: 420, top: 80, width: 180, height: 36 }, hitState: 'hittable' },
+			],
+		}],
+		actions: [{ hitState: 'partial' }],
+		options: [
+			{ index: 41, label: '启用', role: 'option', region: 'popover', rect: { left: 20, top: 126, width: 180, height: 32 }, hitState: 'hittable' },
+			{ index: 42, label: '可能归属两个字段', role: 'option', region: 'popover', rect: { left: 160, top: 126, width: 300, height: 32 }, hitState: 'hittable' },
+			{ index: 43, label: '远处候选', role: 'option', region: 'popover', rect: { left: 1200, top: 900, width: 180, height: 32 }, hitState: 'hittable' },
+		],
+		popups: [],
+		panels: [{}],
+		tables: [{}],
+		rawCandidates: ['a', 'b', 'c'],
+		candidateDiagnostics: { unindexedTextActionProbeCount: 2 },
+	}
+	const associationSummaryText = decision.sandbox.NC_BG_PLANNER_TESTS.buildObservationSummaryProgressText(
+		{ step: 4 },
+		associationObservation,
+		'x'.repeat(80),
+		false,
+		{ fullObservationMaxChars: 262144, compactObservationMaxChars: 4200, compactElementThreshold: 120, compactRawCandidateThreshold: 80 }
+	)
+	for (const expected of ['候选已归属 1', '候选归属模糊 1', '候选未归属 1']) {
+		if (!associationSummaryText.includes(expected)) {
+			throw new Error(`planner observation summary should expose option association progress ${expected}, got ${associationSummaryText}`)
+		}
+	}
+	const associationDiagnostics = decision.sandbox.NC_BG_PLANNER_TESTS.buildObservationProgressDiagnostics(associationObservation)
+	if (
+		associationDiagnostics.candidateAssociationAssociated !== 1 ||
+		associationDiagnostics.candidateAssociationAmbiguous !== 1 ||
+		associationDiagnostics.candidateAssociationUnowned !== 1
+	) {
+		throw new Error(`planner should expose structured option association progress diagnostics, got ${JSON.stringify(associationDiagnostics)}`)
+	}
+	const associationEvents = []
+	await runPlannerWithFakeModel({
+		fetchImpl: async () => fakeJsonResponse({
+			evaluation_previous_goal: '已读取候选归属诊断。',
+			memory: '结构化诊断已发布。',
+			thought: '结束测试。',
+			next_goal: '结束。',
+			action: { name: 'done', input: { text: 'ok', success: true } },
+		}),
+		observation: associationObservation,
+		planOptions: {
+			onProgress: (event) => associationEvents.push(event),
+		},
+	})
+	const associationEvent = associationEvents.find((event) => event.stage === 'observation_summary')
+	if (
+		associationEvent?.candidateAssociationAssociated !== 1 ||
+		associationEvent?.candidateAssociationAmbiguous !== 1 ||
+		associationEvent?.candidateAssociationUnowned !== 1
+	) {
+		throw new Error(`planner should publish structured option association progress events, got ${JSON.stringify(associationEvents)}`)
+	}
+	const heartbeatObservationDigest = decision.sandbox.NC_BG_PLANNER_TESTS.buildObservationHeartbeatDigest(
+		associationObservation,
+		'x'.repeat(80)
+	)
+	for (const expected of ['字段 2', '动作 1', '候选 3', '面板 1', '表格 1', '遮挡 1', '部分命中 1', '候选已归属 1', '候选归属模糊 1', '候选未归属 1', '未索引文字动作 2', 'raw 3', '上下文≈80字']) {
+		if (!heartbeatObservationDigest.includes(expected)) {
+			throw new Error(`planner heartbeat observation digest should expose ${expected}, got ${heartbeatObservationDigest}`)
+		}
+	}
 	const heartbeatText = decision.sandbox.NC_BG_PLANNER_TESTS.buildModelWaitHeartbeatText(
 		{ step: 2 },
 		{
@@ -2602,9 +2702,10 @@ async function assertPlannerPublishesPlanningProgress() {
 			compact: true,
 			contextCount: 1,
 			streamSeen: false,
+			observationDigest: heartbeatObservationDigest,
 		}
 	)
-	for (const expected of ['已等待 16/60 秒', '使用精简观察', '已补充 1 段内部上下文', '尚未收到流式片段', '安全检查', '列表样本', '真实候选', '遮挡状态', '避免随机搜索或盲点', '页面动作尚未执行', '仍在等待模型给出可执行 JSON']) {
+	for (const expected of ['已等待 16/60 秒', '使用精简观察', '已补充 1 段内部上下文', '尚未收到流式片段', '页面观察', '字段 2', '候选 3', '候选已归属 1', '候选归属模糊 1', '候选未归属 1', '遮挡 1', '安全检查', '列表样本', '真实候选', '遮挡状态', '避免随机搜索或盲点', '页面动作尚未执行', '仍在等待模型给出可执行 JSON']) {
 		if (!heartbeatText.includes(expected)) {
 			throw new Error(`planner wait heartbeat should expose ${expected}, got ${heartbeatText}`)
 		}
@@ -6485,10 +6586,17 @@ async function assertPlannerOptionsContextScopesVisibleCandidatesToField() {
 		observation,
 	})
 	assertAction(decision.result, 'select_dropdown_option')
+	const firstUser = getUserMessageText(requestBodies[0])
+	if (!/option index=41[^\n]*label="启用"[^\n]*ownerIndex=4[^\n]*ownerLabel="状态"[^\n]*ownerEvidence=geometry/.test(firstUser)) {
+		throw new Error(`initial observation should expose visible option ownership hints for the model, got: ${firstUser}`)
+	}
 	const secondUser = getUserMessageText(requestBodies[1])
 	const planningContext = secondUser.slice(secondUser.indexOf('<planning_context>'))
 	if (!planningContext.includes('<visible_options scoped="field"') || !planningContext.includes('label="启用"')) {
 		throw new Error(`request_options_for should expose field-scoped visible options, got: ${planningContext}`)
+	}
+	if (!/option index=41[^\n]*label="启用"[^\n]*ownerIndex=4[^\n]*ownerLabel="状态"[^\n]*ownerEvidence=geometry/.test(planningContext)) {
+		throw new Error(`request_options_for should preserve option ownership hints in visible options, got: ${planningContext}`)
 	}
 	if (planningContext.includes('其他类型')) {
 		throw new Error(`request_options_for should not include options associated with a different field, got: ${planningContext}`)
@@ -10819,14 +10927,24 @@ function assertRuntimeProgressTraceDedupes() {
 		round: 1,
 		elapsedMs: 3400,
 		timeoutMs: 60000,
+		candidateAssociationTotal: 3,
+		candidateAssociationAssociated: 1,
+		candidateAssociationAmbiguous: 1,
+		candidateAssociationUnowned: 1,
 		text: '第 4 步：模型正在规划下一步动作。',
 	})
 	const planningTrace = session.traceItems.find((item) => item?.progress?.stage === 'model_wait_heartbeat')
 	if (
 		session.currentPlanningProgress?.elapsedMs !== 3400 ||
 		session.currentPlanningProgress?.timeoutMs !== 60000 ||
+		session.currentPlanningProgress?.candidateAssociationAmbiguous !== 1 ||
+		session.currentPlanningProgress?.candidateAssociationUnowned !== 1 ||
 		planningTrace?.progress?.elapsedMs !== 3400 ||
-		planningTrace?.progress?.timeoutMs !== 60000
+		planningTrace?.progress?.timeoutMs !== 60000 ||
+		planningTrace?.progress?.candidateAssociationTotal !== 3 ||
+		planningTrace?.progress?.candidateAssociationAssociated !== 1 ||
+		planningTrace?.progress?.candidateAssociationAmbiguous !== 1 ||
+		planningTrace?.progress?.candidateAssociationUnowned !== 1
 	) {
 		throw new Error(`planning progress should preserve structured elapsed time in live state and trace cards, got session=${JSON.stringify(session)}`)
 	}
@@ -12914,9 +13032,12 @@ function assertSessionLifecycleExtractedFromSessionEngine() {
 		!sessionLifecycle.includes('invalid_action_name') ||
 		!sessionLifecycle.includes('validation_feedback') ||
 		!sessionLifecycle.includes('validationKind') ||
-		!sessionLifecycle.includes('validationGuidance')
+		!sessionLifecycle.includes('validationGuidance') ||
+		!sessionLifecycle.includes('extractPlanningObservationProgress') ||
+		!sessionLifecycle.includes('candidateAssociationAmbiguous') ||
+		!sessionLifecycle.includes('candidateAssociationUnowned')
 	) {
-		throw new Error('planning progress trace should include timeout and ReAct context-request stages')
+		throw new Error('planning progress trace should include timeout, ReAct context-request stages, and structured observation diagnostics')
 	}
 	if (!sessionLifecycle.includes('function markTerminalWorkflowState') || !sessionLifecycle.includes('search.terminalReason') || !sessionLifecycle.includes("search.phase = 'failed'")) {
 		throw new Error('session lifecycle should persist terminal workflow reasons into active search workflow state')
@@ -13164,12 +13285,14 @@ function assertResultSummaryBehavior() {
 			'verificationRecoveryIncompleteCount',
 			'contextRequestLimitCount',
 				'isVerificationRecoveryIncompleteTrace',
-				'isContextRequestLimitTrace',
+			'isContextRequestLimitTrace',
 				'isUserInputRequiredTrace',
 				'isDateCandidateOwnershipTrace',
 			"'cleanupPassed', '清空完成'",
 			"'cleanupUnverified', '清空未确认'",
 			"'candidateDiagnostics', '候选诊断'",
+			"'candidateAssociationAmbiguous', '候选归属模糊'",
+			"'candidateAssociationUnowned', '候选未归属'",
 			"'verificationRecoveryIncomplete', '校验恢复未完成'",
 			"'terminalFailed', '终态异常'",
 		"'modelErrors', '模型错误'",
@@ -13177,6 +13300,8 @@ function assertResultSummaryBehavior() {
 		"'loopGuards', '循环保护'",
 		"'verificationFailures', '校验失败'",
 		'校验恢复未完成 ${Number(diagnostics.verificationRecoveryIncompleteCount)}',
+		'候选归属模糊 ${Number(diagnostics.candidateAssociationAmbiguousCount)}',
+		'候选未归属 ${Number(diagnostics.candidateAssociationUnownedCount)}',
 		'上下文补证上限 ${Number(diagnostics.contextRequestLimitCount)}',
 		"'skipped', '安全跳过'",
 		"'recoveredFailures', '失败后成功'",
@@ -13958,7 +14083,7 @@ function assertResultSummaryBehavior() {
 	if (
 		!/function renderResultStats[\s\S]*getResultSummaryStatEntries\(\)[\s\S]*shouldShowResultStat/.test(sidepanel) ||
 		!/function formatResultSummaryStats[\s\S]*getResultSummaryStatEntries\(\)[\s\S]*shouldShowResultStat/.test(sidepanel) ||
-		!/function getResultSummaryStatEntries[\s\S]*\['reached', '已到达'\][\s\S]*\['clickedUnverified', '点击未确认'\][\s\S]*\['cleanupPassed', '清空完成'\][\s\S]*\['cleanupUnverified', '清空未确认'\][\s\S]*\['dateCandidateOwnership', '日期候选归属'\][\s\S]*\['contextRequestLimit', '上下文补证上限'\][\s\S]*\['verificationRecoveryIncomplete', '校验恢复未完成'\][\s\S]*\['userInputRequired', '需要用户补充'\][\s\S]*\['terminalFailed', '终态异常'\][\s\S]*\['submitted', '已提交'\][\s\S]*\['revealAttempts', '展开导航'\][\s\S]*\['visionAttempts', '视觉导航'\][\s\S]*\['modelErrors', '模型错误'\][\s\S]*\['timeouts', '超时'\][\s\S]*\['loopGuards', '循环保护'\][\s\S]*\['verificationFailures', '校验失败'\]/.test(sidepanel)
+		!/function getResultSummaryStatEntries[\s\S]*\['reached', '已到达'\][\s\S]*\['clickedUnverified', '点击未确认'\][\s\S]*\['cleanupPassed', '清空完成'\][\s\S]*\['cleanupUnverified', '清空未确认'\][\s\S]*\['candidateAssociationAmbiguous', '候选归属模糊'\][\s\S]*\['candidateAssociationUnowned', '候选未归属'\][\s\S]*\['dateCandidateOwnership', '日期候选归属'\][\s\S]*\['contextRequestLimit', '上下文补证上限'\][\s\S]*\['verificationRecoveryIncomplete', '校验恢复未完成'\][\s\S]*\['userInputRequired', '需要用户补充'\][\s\S]*\['terminalFailed', '终态异常'\][\s\S]*\['submitted', '已提交'\][\s\S]*\['revealAttempts', '展开导航'\][\s\S]*\['visionAttempts', '视觉导航'\][\s\S]*\['modelErrors', '模型错误'\][\s\S]*\['timeouts', '超时'\][\s\S]*\['loopGuards', '循环保护'\][\s\S]*\['verificationFailures', '校验失败'\]/.test(sidepanel)
 	) {
 		throw new Error('result summary cards and exports should share terminal failure, user-input-required, and fallback diagnostic stat definitions')
 	}
@@ -15686,6 +15811,16 @@ function assertResultSummaryBehavior() {
 				progress: { stage: 'invalid_model_output' },
 			},
 			{
+				title: '模型等待状态',
+				detail: '页面观察：字段 2，候选 3；页面动作尚未执行。',
+				progress: {
+					stage: 'model_wait_heartbeat',
+					candidateAssociationAssociated: 1,
+					candidateAssociationAmbiguous: 1,
+					candidateAssociationUnowned: 2,
+				},
+			},
+			{
 				title: '规划进度',
 				detail: '执行前校验拦截 click_element_by_index。',
 				progress: {
@@ -15715,6 +15850,8 @@ function assertResultSummaryBehavior() {
 		genericOperationalDiagnostics.stats?.plannerCorrections !== 1 ||
 		genericOperationalDiagnostics.stats?.loopGuards !== 1 ||
 		genericOperationalDiagnostics.stats?.verificationFailures !== 1 ||
+		genericOperationalDiagnostics.stats?.candidateAssociationAmbiguous !== 1 ||
+		genericOperationalDiagnostics.stats?.candidateAssociationUnowned !== 2 ||
 		!String(genericOperationalDiagnostics.headline || '').includes('运行诊断') ||
 		!String(genericOperationalDiagnostics.headline || '').includes('模型错误 1 次') ||
 		!String(genericOperationalDiagnostics.headline || '').includes('超时 1 次') ||
@@ -15722,6 +15859,7 @@ function assertResultSummaryBehavior() {
 		!String(genericOperationalDiagnostics.headline || '').includes('执行前校验 1 次') ||
 		!String(genericOperationalDiagnostics.headline || '').includes('循环保护 1 次') ||
 		!String(genericOperationalDiagnostics.headline || '').includes('校验失败 1 次') ||
+		!String(genericOperationalDiagnostics.headline || '').includes('候选归属待确认 3 次') ||
 		!genericOperationalDiagnostics.issues?.some((item) => item.statusLabel === '失败动作' && String(item.label || '').includes('点击元素') && String(item.label || '').includes('目标按钮')) ||
 		!genericOperationalDiagnostics.issues?.some((item) => item.statusLabel === '失败动作' && String(item.summary || '').includes('动作执行超时') && String(item.neededEvidence || '').includes('复核动作是否已在页面上生效')) ||
 		!genericOperationalDiagnostics.issues?.some((item) => item.statusLabel === '失败动作' && String(item.summary || '').includes('循环保护') && String(item.neededEvidence || '').includes('停止重复同一动作')) ||
@@ -15731,12 +15869,15 @@ function assertResultSummaryBehavior() {
 		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'validation_feedback' && String(item.text || '').includes('covered_target 1')) ||
 		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'loop_guard') ||
 		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'verification_failure') ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'candidate_association' && String(item.text || '').includes('归属模糊 1 项') && String(item.text || '').includes('未归属 2 项')) ||
 		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('不要再次执行同一动作')) ||
+		!genericOperationalDiagnostics.diagnostics?.some((item) => item.kind === 'next_step_recommendation' && String(item.text || '').includes('request_options_for/open_dropdown/inspect_region')) ||
 		!String(genericOperationalDiagnostics.text || '').includes('诊断：模型调用异常') ||
 		!String(genericOperationalDiagnostics.text || '').includes('诊断：规划输出纠偏') ||
 		!String(genericOperationalDiagnostics.text || '').includes('诊断：执行前校验拦截') ||
 		!String(genericOperationalDiagnostics.text || '').includes('诊断：循环保护触发') ||
 		!String(genericOperationalDiagnostics.text || '').includes('诊断：动作校验失败') ||
+		!String(genericOperationalDiagnostics.text || '').includes('诊断：候选归属待确认') ||
 		!String(genericOperationalDiagnostics.text || '').includes('诊断：建议：不要再次执行同一动作') ||
 		!String(genericOperationalDiagnostics.text || '').includes('失败动作：点击元素：目标按钮')
 	) {
@@ -16711,6 +16852,10 @@ function assertPlannerPromptExtractedFromPlanner() {
 		!prompt.includes('也不能用 click_element_by_index 或 locate_by_vision 直接点击/定位') ||
 		!prompt.includes('locate_by_vision 不能用于按候选文本直接定位/点击当前可见的下拉') ||
 		!prompt.includes('scoped="field" 或 scoped="explicit"') ||
+		!prompt.includes('ownerIndex/ownerLabel/ownerEvidence') ||
+		!prompt.includes('ownerIndex 与目标字段 index 一致') ||
+		!prompt.includes('owner=ambiguous') ||
+		!prompt.includes('缺少 ownerIndex') ||
 		!prompt.includes('empty_context') ||
 		!prompt.includes('按 guidance 更换 source/region/query') ||
 		!prompt.includes('done(false) 说明 reason')
@@ -22070,6 +22215,7 @@ function assertSearchWorkflowBehavior() {
 	}
 	const filteredCandidate = workflow.pickOptionCandidateForField(
 		{
+			activeFieldKey: 'index:4',
 			pendingDropdownCandidates: ['成单资料导入', '(empty)', '搜索内容', '首页个人信息退出登录', '资料等级', '核心'],
 			fields: {
 				'index:4': { label: '资料等级' },
@@ -22903,12 +23049,69 @@ function assertSearchWorkflowBehavior() {
 		},
 	})
 	const dateRangeDecision = workflow.deriveSearchWorkflowDecision(dateRangeSession, dateRangeObservation)
-	assertAction(dateRangeDecision, 'done')
+	assertAction(dateRangeDecision, 'choose_dropdown_option')
 	if (
-		dateRangeDecision.action.input.success !== false ||
-		dateRangeDecision.action.input.workflow_missing_table_samples !== true
+		dateRangeDecision.action.input.text !== '2026-06-02..2026-06-03' ||
+		dateRangeDecision.action.input.workflow_value_source !== 'visible_option' ||
+		!String(dateRangeDecision.action.input.workflow_value_basis || '').includes('日期控件真实可见候选')
 	) {
-		throw new Error(`daterange search fields should not choose arbitrary visible dates without table/task evidence, got ${JSON.stringify(dateRangeDecision)}`)
+		throw new Error(`daterange search fields should form a real range from field-scoped visible date candidates when no table/task date is available, got ${JSON.stringify(dateRangeDecision)}`)
+	}
+	const nonDateDatePopupSession = {
+		task: '测试搜索区域每一个搜索项',
+		history: [],
+		workflowState: {
+			search: {
+				version: 6,
+				phase: 'select_field',
+				activeFieldKey: 'index:7',
+				lastSearchedFieldKey: '',
+				fieldOrder: [],
+				fields: {},
+				completedKeys: [],
+				skippedKeys: [],
+				resetCompletedKeys: [],
+				resultsByKey: {},
+				clearRetryAttemptsByKey: {},
+				evidenceRequestAttemptsByKey: {},
+				failedLabelsByKey: {},
+				dropdownOpenAttemptsByKey: {},
+				pendingDateRangeStartByKey: {},
+				pendingDropdownCandidates: ['2026-06-02', '2026-06-03'],
+				pendingDropdownOutput: '',
+				baselineResetDone: false,
+				terminalFieldKey: '',
+				failedReason: '',
+				seededFromHistory: true,
+			},
+		},
+	}
+	const nonDateDatePopupObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '状态' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: '搜索/筛选区域',
+				fields: [
+					{ index: 29, label: '状态', fieldType: 'select', valueState: 'empty', role: 'combobox', selectionControl: 'dropdown', region: 'content' },
+				],
+			},
+		],
+		popups: [
+			{ index: 90, label: '2026-06-02', role: 'option', selectionControl: 'date-option', region: 'popup' },
+			{ index: 91, label: '2026-06-03', role: 'option', selectionControl: 'date-option', region: 'popup' },
+		],
+		tables: [
+			{ headers: ['状态', '名称'], rows: [['启用', '样本记录']] },
+		],
+		actions: [{ index: 30, actionIntent: 'search', label: '搜索', region: 'content' }],
+	}
+	const nonDateDatePopupDecision = workflow.deriveSearchWorkflowDecision(nonDateDatePopupSession, nonDateDatePopupObservation)
+	assertAction(nonDateDatePopupDecision, 'open_dropdown')
+	if (nonDateDatePopupDecision.action.input.index !== 29) {
+		throw new Error(`non-temporal selection fields should ignore stale/visible date-popup candidates and open their own dropdown, got ${JSON.stringify(nonDateDatePopupDecision)}`)
 	}
 	const pseudoDateSampleSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const pseudoDateSampleObservation = {
@@ -22930,13 +23133,13 @@ function assertSearchWorkflowBehavior() {
 		},
 	})
 	const pseudoDateRangeDecision = workflow.deriveSearchWorkflowDecision(pseudoDateSampleSession, pseudoDateSampleObservation)
-	assertAction(pseudoDateRangeDecision, 'done')
+	assertAction(pseudoDateRangeDecision, 'choose_dropdown_option')
 	if (
-		pseudoDateRangeDecision.action.input.success !== false ||
-		pseudoDateRangeDecision.action.input.workflow_missing_table_samples !== true ||
+		pseudoDateRangeDecision.action.input.text !== '2026-06-02..2026-06-03' ||
+		pseudoDateRangeDecision.action.input.workflow_value_source !== 'visible_option' ||
 		pseudoDateRangeDecision.action.input.workflow_option_sample_mismatch === true
 	) {
-		throw new Error(`daterange fields should ignore DOM state pseudo-samples such as active, got ${JSON.stringify(pseudoDateRangeDecision)}`)
+		throw new Error(`daterange fields should ignore DOM state pseudo-samples such as active while still using real visible date candidates, got ${JSON.stringify(pseudoDateRangeDecision)}`)
 	}
 	const sampledDateRangeSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const sampledDateRangeObservation = {
@@ -24872,15 +25075,69 @@ function assertObserverUsesCentralSemantics() {
 		throw new Error('resolveEditableTarget should delegate to shared content semantics first')
 	}
 	const snapshotFn = extractFunctionSource(observer, 'buildElementSnapshot')
+	const fieldSemanticsFn = extractFunctionSource(observer, 'buildFieldSemantics')
+	const emptyFieldSemanticsFn = extractFunctionSource(observer, 'emptyFieldSemantics')
+	const readIdRefTextsFn = extractFunctionSource(observer, 'readIdRefTexts')
+	const descriptionFn = extractFunctionSource(observer, 'collectFieldDescriptionEvidence')
+	const availabilityFn = extractFunctionSource(observer, 'readAvailabilityState')
 	const controlKindFn = extractFunctionSource(observer, 'getObservedControlKind')
 	const spatialLabelFn = extractFunctionSource(observer, 'readSpatialLabel')
 	const rankLabelFn = extractFunctionSource(observer, 'rankLabelCandidates')
 	const genericLabelFn = extractFunctionSource(observer, 'isGenericFieldLabelText')
+	const observerElementLineFn = extractFunctionSource(observer, 'formatElementLine')
 	const fieldLineFn = extractFunctionSource(plannerContext, 'formatFieldLine')
+	const availabilityLineFn = extractFunctionSource(plannerContext, 'formatAvailabilityHints')
+	const elementBriefLineFn = extractFunctionSource(plannerContext, 'formatElementBriefLine')
+	const elementDetailLineFn = extractFunctionSource(plannerContext, 'formatElementDetailLine')
 	const actionLineFn = extractFunctionSource(plannerContext, 'formatActionLine')
 	const optionLineFn = extractFunctionSource(plannerContext, 'formatOptionLine')
 	if (!/snapshot\.controlKind\s*=\s*getObservedControlKind\(snapshot\)/.test(snapshotFn)) {
 		throw new Error('observer snapshots should expose canonical observed control kind')
+	}
+	for (const expected of ['collectFieldDescriptionEvidence', 'description: description.text', 'descriptionSource: description.source']) {
+		if (!fieldSemanticsFn.includes(expected)) {
+			throw new Error(`observer field semantics should expose accessible help/description text: missing ${expected}`)
+		}
+	}
+	for (const expected of ['aria-describedby', 'aria-description', 'data-help', 'readFrameworkFieldDescriptions']) {
+		if (!descriptionFn.includes(expected)) {
+			throw new Error(`observer field descriptions should collect generic help evidence: missing ${expected}`)
+		}
+	}
+	if (!emptyFieldSemanticsFn.includes("description: ''") || !snapshotFn.includes('description: shortText(semantic.description') || !snapshotFn.includes('descriptionSource: semantic.descriptionSource')) {
+		throw new Error('observer field snapshots should preserve description text and source')
+	}
+	if (!readIdRefTextsFn.includes('findElementByIdRef(element, id)')) {
+		throw new Error('observer aria id-ref text should resolve inside the element root, including open Shadow DOM')
+	}
+	if (!observerElementLineFn.includes('desc="${shortText(item.description') || !observer.includes('desc="${field.description ||') || !observer.includes('descSource=${field.descriptionSource')) {
+		throw new Error('observer text output should expose short field descriptions')
+	}
+	if (!fieldLineFn.includes('desc="${shortText(field.description') || !fieldLineFn.includes('descSource=${field.descriptionSource') || !elementBriefLineFn.includes('desc="${shortText(item.description') || !elementDetailLineFn.includes('desc="${shortText(item.description')) {
+		throw new Error('planner context should preserve generic field descriptions')
+	}
+	for (const expected of ['readAvailabilityState', 'disabled: availabilityState.disabled', 'readOnly: availabilityState.readOnly', 'readonlyDom: availabilityState.readonlyDom', 'ariaDisabled: availabilityState.ariaDisabled', 'ariaReadonly: availabilityState.ariaReadonly']) {
+		if (!snapshotFn.includes(expected)) {
+			throw new Error(`observer snapshots should expose structured availability state: missing ${expected}`)
+		}
+	}
+	for (const expected of ['readonlyDom && !selectionLike', 'isTextEntryAvailabilityTarget', 'isSelectionLikeAvailabilityTarget']) {
+		if (!availabilityFn.includes(expected)) {
+			throw new Error(`observer availability should distinguish readonly text inputs from readonly picker/dropdown triggers: missing ${expected}`)
+		}
+	}
+	for (const expected of ['disabled=${field.disabled', 'readOnly=${field.readOnly', 'readonlyDom=${field.readonlyDom', 'disabled=${action.disabled']) {
+		if (!observer.includes(expected)) {
+			throw new Error(`observer text output should expose availability state: missing ${expected}`)
+		}
+	}
+	for (const expected of ['disabled=true', 'readOnly=true', 'readonlyDom=true', 'ariaDisabled=true', 'ariaReadonly=true']) {
+		if (!availabilityLineFn.includes(expected)) {
+			throw new Error(`planner context should preserve availability state: missing ${expected}`)
+		}
+	}
+	if (!fieldLineFn.includes('formatAvailabilityHints(field)') || !actionLineFn.includes('formatAvailabilityHints(action)') || !optionLineFn.includes('formatAvailabilityHints(option)') || !elementBriefLineFn.includes('formatAvailabilityHints(item)')) {
+		throw new Error('planner context field/action/option/element lines should include structured availability hints')
 	}
 	if (!/NC_CONTROL_SEMANTICS\?\.describeObservedControl/.test(controlKindFn)) {
 		throw new Error('observer controlKind should come from shared observed-control semantics')
@@ -27884,6 +28141,11 @@ function assertModelReasoningIsSurfaced() {
 		'modelThoughts.slice(-3)',
 		'execution_recovery',
 		'verification_recovery',
+		'candidateAssociationAmbiguousCount',
+		'candidateAssociationUnownedCount',
+		'collectCandidateAssociationDiagnosticCounts',
+		'候选归属待确认',
+		'candidate_association',
 		'dateCandidateOwnershipCount',
 		'日期候选归属 ${Number(diagnostics.dateCandidateOwnershipCount)}',
 		'verificationRecoveryIncompleteCount',

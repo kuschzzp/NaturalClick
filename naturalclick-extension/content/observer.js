@@ -1257,17 +1257,20 @@
 		const candidates = collectLabelEvidence(element, control)
 		const ranked = rankLabelCandidates(candidates)
 		const primary = ranked[0] || null
+		const description = collectFieldDescriptionEvidence(element, control, ranked.map((item) => item.text))
 		return {
 			primary: primary?.text || '',
 			source: primary?.source || '',
 			confidence: primary ? Number(primary.confidence.toFixed(2)) : 0,
 			aliases: ranked.slice(1, 5).map((item) => item.text),
 			container: inferFieldContainerName(element),
+			description: description.text,
+			descriptionSource: description.source,
 		}
 	}
 
 	function emptyFieldSemantics() {
-		return { primary: '', source: '', confidence: 0, aliases: [], container: '' }
+		return { primary: '', source: '', confidence: 0, aliases: [], container: '', description: '', descriptionSource: '' }
 	}
 
 	function canHaveFieldSemantics(element) {
@@ -1326,6 +1329,77 @@
 		pushLabelCandidate(list, element.getAttribute('data-label'), 'data-label', 0.86)
 		pushLabelCandidate(list, element.getAttribute('data-name'), 'data-name', 0.62)
 		return list
+	}
+
+	function collectFieldDescriptionEvidence(element, control, labelTexts = []) {
+		const list = []
+		const target = control instanceof HTMLElement ? control : element
+		const labels = new Set((Array.isArray(labelTexts) ? labelTexts : [])
+			.map((item) => normalizeCompactText(item))
+			.filter(Boolean))
+		pushDescriptionCandidate(list, target.getAttribute('aria-description'), 'aria-description', labels)
+		pushDescriptionCandidate(list, element.getAttribute('aria-description'), 'aria-description', labels)
+		for (const text of readIdRefTexts(target, 'aria-describedby')) {
+			pushDescriptionCandidate(list, text, 'aria-describedby', labels)
+		}
+		for (const text of readIdRefTexts(element, 'aria-describedby')) {
+			pushDescriptionCandidate(list, text, 'aria-describedby', labels)
+		}
+		for (const name of ['data-description', 'data-help', 'data-hint']) {
+			pushDescriptionCandidate(list, target.getAttribute(name), name, labels)
+			pushDescriptionCandidate(list, element.getAttribute(name), name, labels)
+		}
+		for (const item of readFrameworkFieldDescriptions(element, target)) {
+			pushDescriptionCandidate(list, item.text, item.source, labels)
+		}
+		return list[0] || { text: '', source: '' }
+	}
+
+	function pushDescriptionCandidate(list, raw, source, labels) {
+		const text = cleanFieldDescriptionText(raw)
+		if (!text || text === '(empty)') return
+		const key = normalizeCompactText(text)
+		if (labels?.has(key)) return
+		if (list.some((item) => normalizeCompactText(item.text) === key)) return
+		list.push({ text: shortText(text, 120), source })
+	}
+
+	function cleanFieldDescriptionText(value) {
+		let text = String(value || '').replace(/\s+/g, ' ').trim()
+		if (!text) return ''
+		text = text.replace(/^[*＊]\s*/, '').trim()
+		return shortText(text, 180)
+	}
+
+	function readFrameworkFieldDescriptions(element, target) {
+		const container = findValidationContainer(target) || findValidationContainer(element)
+		if (!(container instanceof HTMLElement)) return []
+		const selectors = [
+			'.ant-form-item-extra',
+			'.arco-form-extra',
+			'.n-form-item-feedback__line',
+			'.n-form-item-feedback-wrapper',
+			'.form-text',
+			'.help-text',
+			'.help-block',
+			'.field-help',
+			'.hint',
+			'.description',
+			'[class*="help"]',
+			'[class*="hint"]',
+			'[class*="description"]',
+		]
+		const descriptions = []
+		for (const selector of selectors) {
+			for (const node of querySelectorAllDeep(selector, container).slice(0, 20)) {
+				if (!(node instanceof HTMLElement) || !isElementVisible(node)) continue
+				if (node.querySelector?.('input,textarea,select,button,[role="button"]')) continue
+				const text = cleanFieldDescriptionText(getElementText(node))
+				if (!text) continue
+				descriptions.push({ text, source: selector.replace(/^[.#]/, '') })
+			}
+		}
+		return descriptions
 	}
 
 	function pushLabelCandidate(list, raw, source, confidence) {
@@ -1617,6 +1691,7 @@
 			)
 			const rect = target.getBoundingClientRect()
 			const style = window.getComputedStyle(target)
+			const hitState = getElementHitState(target)
 			probes.push({
 				text: shortText(getElementText(target), 28),
 				sourceText: shortText(text, 28),
@@ -1626,9 +1701,18 @@
 				className: shortText(String(target.className || '').replace(/\s+/g, ' '), 80),
 				parentClassName: shortText(String(target.parentElement?.className || '').replace(/\s+/g, ' '), 80),
 				cursor: String(style.cursor || ''),
+				style: summarizeCandidateProbeStyle(style),
 				actionContext: isLikelyTextActionContext(target),
 				pointer: hasPointerCursor(target),
 				inlineHandler: hasInlineEventHandler(target),
+				probableInteractive: isProbablyInteractive(target),
+				normalized: target !== node,
+				sourceRole: shortText(node.getAttribute('role') || '', 24),
+				actionAncestor: summarizeCandidateProbeActionAncestor(node, target),
+				hitState: hitState.state,
+				hitRatio: hitState.ratio,
+				hitPoints: `${hitState.hits}/${hitState.tested || 0}`,
+				hitBlocker: shortText(hitState.blocker || '', 100),
 				indexed,
 				rect: {
 					left: Math.round(rect.left),
@@ -1646,6 +1730,58 @@
 			unindexedTextActionProbeCount: unindexed.length,
 			unindexedTextActionProbes: unindexed.slice(0, 30),
 		}
+	}
+
+	function summarizeCandidateProbeStyle(style) {
+		if (!style) return ''
+		const parts = []
+		if (style.display && !['inline', 'block', 'inline-block'].includes(style.display)) parts.push(`display=${style.display}`)
+		if (style.position && style.position !== 'static') parts.push(`pos=${style.position}`)
+		if (style.pointerEvents) parts.push(`pointer=${style.pointerEvents}`)
+		if (style.zIndex && style.zIndex !== 'auto') parts.push(`z=${style.zIndex}`)
+		const opacity = Number(style.opacity)
+		if (Number.isFinite(opacity) && opacity < 0.98) parts.push(`opacity=${Number(opacity.toFixed(2))}`)
+		return parts.join(',')
+	}
+
+	function summarizeCandidateProbeActionAncestor(source, target) {
+		const ancestor = findCandidateProbeActionAncestor(source, target)
+		if (!(ancestor instanceof HTMLElement) || ancestor === target) return ''
+		const tag = ancestor.tagName.toLowerCase()
+		const role = shortText(ancestor.getAttribute('role') || '', 24)
+		const text = shortText(getElementText(ancestor), 28)
+		const cls = shortText(String(ancestor.className || '').replace(/\s+/g, ' '), 36)
+		return [
+			tag,
+			role ? `role=${role}` : '',
+			text && text !== '(empty)' ? `text=${text}` : '',
+			cls ? `class=${cls}` : '',
+		].filter(Boolean).join(' ')
+	}
+
+	function findCandidateProbeActionAncestor(source, target) {
+		const selector = [
+			'button',
+			'a',
+			'[role="button"]',
+			'[role="link"]',
+			'[role="menuitem"]',
+			'[onclick]',
+			'[tabindex]',
+			'[data-action]',
+			'[data-testid]',
+			'[data-test]',
+			'[data-cy]',
+			'.btn',
+			'[class*="button"]',
+			'[class*="action"]',
+			'[class*="operate"]',
+		].join(',')
+		for (const node of [source, target]) {
+			const match = node instanceof HTMLElement ? node.closest(selector) : null
+			if (match instanceof HTMLElement) return match
+		}
+		return null
 	}
 
 	function isElementVisibleForDiagnostics(element) {
@@ -1711,12 +1847,70 @@
 	function summarizeHitBlocker(hit) {
 		if (!(hit instanceof Element)) return ''
 		const tag = String(hit.tagName || '').toLowerCase()
-		const role = String(hit.getAttribute?.('role') || '')
-		const cls = String(hit.getAttribute?.('class') || '')
+		const id = readHitBlockerAttribute(hit, 'id', 32)
+		const role = readHitBlockerAttribute(hit, 'role', 32)
+		const aria = readHitBlockerAttribute(hit, 'aria-label', 40)
+		const title = readHitBlockerAttribute(hit, 'title', 40)
+		const cls = getHitBlockerClassText(hit)
 		const text = hit instanceof HTMLElement ? shortText(getElementText(hit), 28) : ''
-		return [tag, role ? `role=${role}` : '', text && text !== '(empty)' ? `text=${text}` : '', cls ? `class=${shortText(cls, 40)}` : '']
+		const rect = formatHitBlockerRect(hit.getBoundingClientRect?.())
+		const region = hit instanceof HTMLElement ? inferElementRegion(hit) : ''
+		const style = summarizeHitBlockerStyle(hit)
+		return [
+			tag,
+			id ? `id=${id}` : '',
+			role ? `role=${role}` : '',
+			text && text !== '(empty)' ? `text=${text}` : '',
+			aria && aria !== text ? `aria=${aria}` : '',
+			title && title !== text && title !== aria ? `title=${title}` : '',
+			region ? `region=${region}` : '',
+			rect ? `rect=${rect}` : '',
+			style,
+			cls ? `class=${shortText(cls, 40)}` : '',
+		]
 			.filter(Boolean)
 			.join(' ')
+	}
+
+	function readHitBlockerAttribute(element, name, maxLength = 60) {
+		const value = String(element?.getAttribute?.(name) || '').trim()
+		return value ? shortText(value, maxLength) : ''
+	}
+
+	function getHitBlockerClassText(element) {
+		const value = element?.className
+		if (typeof value === 'string') return value
+		if (typeof value?.baseVal === 'string') return value.baseVal
+		return ''
+	}
+
+	function formatHitBlockerRect(rect) {
+		if (!rect) return ''
+		const left = Math.round(Number(rect.left) || 0)
+		const top = Math.round(Number(rect.top) || 0)
+		const width = Math.round(Number(rect.width) || 0)
+		const height = Math.round(Number(rect.height) || 0)
+		return `${left},${top},${width}x${height}`
+	}
+
+	function summarizeHitBlockerStyle(element) {
+		if (!(element instanceof Element)) return ''
+		let style = null
+		try {
+			style = window.getComputedStyle(element)
+		} catch (_) {
+			return ''
+		}
+		if (!style) return ''
+		const parts = []
+		if (style.position && style.position !== 'static') parts.push(`pos=${style.position}`)
+		if (style.pointerEvents) parts.push(`pointer=${style.pointerEvents}`)
+		if (style.zIndex && style.zIndex !== 'auto') parts.push(`z=${style.zIndex}`)
+		const opacity = Number(style.opacity)
+		if (Number.isFinite(opacity) && opacity < 0.98) parts.push(`opacity=${Number(opacity.toFixed(2))}`)
+		if (style.visibility && style.visibility !== 'visible') parts.push(`visibility=${style.visibility}`)
+		if (style.display && style.display === 'none') parts.push(`display=${style.display}`)
+		return parts.length ? `style(${parts.join(',')})` : ''
 	}
 
 	function isComposedHitRelated(element, hit) {
@@ -1813,6 +2007,7 @@
 				const validationState = readValidationState(element)
 				const hitState = getElementHitState(element)
 				const constraintHints = readFieldConstraintHints(element)
+				const availabilityState = readAvailabilityState(element, selectionControl)
 				const snapshot = {
 				index,
 				stableId: '',
@@ -1824,6 +2019,8 @@
 			labelConfidence: semantic.confidence || 0,
 			aliases: Array.isArray(semantic.aliases) ? semantic.aliases.slice(0, 5).map((item) => shortText(item, 40)) : [],
 			semanticContainer: semantic.container || '',
+			description: shortText(semantic.description || '', 120),
+			descriptionSource: semantic.descriptionSource || '',
 			placeholder: shortText(placeholder, 48),
 			text: shortText(text, 80),
 			fieldType,
@@ -1839,6 +2036,11 @@
 			optionLabels: getNativeOptionLabels(element),
 			editable,
 			clickable,
+				disabled: availabilityState.disabled,
+				readOnly: availabilityState.readOnly,
+				readonlyDom: availabilityState.readonlyDom,
+				ariaDisabled: availabilityState.ariaDisabled,
+				ariaReadonly: availabilityState.ariaReadonly,
 				required: isRequiredFieldControl(element),
 				maxLength: constraintHints.maxLength,
 				minLength: constraintHints.minLength,
@@ -1855,7 +2057,7 @@
 				hitState: hitState.state,
 				hitRatio: hitState.ratio,
 				hitPoints: `${hitState.hits}/${hitState.tested || 0}`,
-				hitBlocker: shortText(hitState.blocker || '', 64),
+				hitBlocker: shortText(hitState.blocker || '', 140),
 				selectorHints: getSelectorHints(element),
 				domPath: shortText(getDomPath(element), 120),
 				confidence: computeElementConfidence({ element, editable, clickable, fieldType, actionIntent, label, text }),
@@ -1863,6 +2065,54 @@
 		snapshot.controlKind = getObservedControlKind(snapshot)
 		snapshot.stableId = buildStableElementId(snapshot)
 		return snapshot
+	}
+
+	function readAvailabilityState(element, selectionControl) {
+		const target = getPrimaryFieldControl(element) || element
+		const disabled = hasDisabledStateSignal(element) || hasDisabledStateSignal(target)
+		const readonlyDom = hasReadonlyStateSignal(element) || hasReadonlyStateSignal(target)
+		const selectionLike = !!selectionControl || isSelectionLikeAvailabilityTarget(element) || isSelectionLikeAvailabilityTarget(target)
+		return {
+			disabled,
+			readOnly: readonlyDom && !selectionLike && isTextEntryAvailabilityTarget(target),
+			readonlyDom,
+			ariaDisabled: !selectionLike && String(target?.getAttribute?.('aria-disabled') || element?.getAttribute?.('aria-disabled') || '').toLowerCase() === 'true',
+			ariaReadonly: !selectionLike && String(target?.getAttribute?.('aria-readonly') || element?.getAttribute?.('aria-readonly') || '').toLowerCase() === 'true',
+		}
+	}
+
+	function hasDisabledStateSignal(element) {
+		if (!(element instanceof HTMLElement)) return false
+		if (element.hasAttribute('disabled')) return true
+		if (String(element.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return true
+		if ('disabled' in element && element.disabled === true) return true
+		const cls = String(element.className || '')
+		return /(^|\s|--|__|-)(disabled|is-disabled|unavailable|not-allowed)(\s|$)/i.test(cls)
+	}
+
+	function hasReadonlyStateSignal(element) {
+		if (!(element instanceof HTMLElement)) return false
+		if (element.hasAttribute('readonly')) return true
+		if (String(element.getAttribute('aria-readonly') || '').toLowerCase() === 'true') return true
+		if ('readOnly' in element && element.readOnly === true) return true
+		const cls = String(element.className || '')
+		return /(^|\s|--|__|-)(readonly|read-only|is-readonly)(\s|$)/i.test(cls)
+	}
+
+	function isSelectionLikeAvailabilityTarget(element) {
+		if (!(element instanceof HTMLElement)) return false
+		return isDropdownLikeControl(element) || isSelectableControl(element) || isOptionLike(element) || isDatePickerOption(element)
+	}
+
+	function isTextEntryAvailabilityTarget(element) {
+		if (!(element instanceof HTMLElement)) return false
+		if (element instanceof HTMLTextAreaElement) return true
+		if (element.isContentEditable) return true
+		if (element instanceof HTMLInputElement) {
+			const type = String(element.type || 'text').toLowerCase()
+			return !['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'range', 'color', 'image', 'hidden'].includes(type)
+		}
+		return false
 	}
 
 	function isRequiredFieldControl(element) {
@@ -2667,6 +2917,7 @@
 		if (item.labelConfidence) attrs.push(`labelConf="${item.labelConfidence}"`)
 		if (Array.isArray(item.aliases) && item.aliases.length) attrs.push(`aliases="${shortText(item.aliases.join('|'), 48)}"`)
 		if (item.semanticContainer) attrs.push(`container="${shortText(item.semanticContainer, 24)}"`)
+		if (item.description) attrs.push(`desc="${shortText(item.description, 48)}"`)
 		if (item.placeholder) attrs.push(`placeholder="${shortText(item.placeholder, 24)}"`)
 		if (item.fieldType) attrs.push(`fieldType="${item.fieldType}"`)
 		if (item.actionIntent) attrs.push(`intent="${item.actionIntent}"`)
@@ -2674,6 +2925,11 @@
 		if (item.valueState && item.valueState !== 'unknown') attrs.push(`value="${item.valueState}"`)
 		if (item.controlKind) attrs.push(`kind="${item.controlKind}"`)
 		if (item.selectionControl) attrs.push(`control="${item.selectionControl}"`)
+		if (item.disabled) attrs.push('disabled="true"')
+		if (item.readOnly) attrs.push('readOnly="true"')
+		if (item.readonlyDom && !item.readOnly) attrs.push('readonlyDom="true"')
+		if (item.ariaDisabled) attrs.push('ariaDisabled="true"')
+		if (item.ariaReadonly) attrs.push('ariaReadonly="true"')
 		if (Array.isArray(item.optionLabels) && item.optionLabels.length) attrs.push(`options="${shortText(item.optionLabels.join('|'), 96)}"`)
 		if (item.expandedState) attrs.push(`expanded="${item.expandedState}"`)
 		if (item.stateHints) attrs.push(`state="${shortText(item.stateHints, 28)}"`)
@@ -2719,7 +2975,7 @@
 				sections.push(`form ${form.id}: ${form.name}`)
 					for (const field of form.fields) {
 						sections.push(
-							`  field index=${field.index} region=${field.region || '-'} rect=${formatObservationRect(field.rect)} hit=${formatHitState(field)} fieldType=${field.fieldType || 'unknown'} kind=${field.controlKind || '-'} label="${field.label || field.placeholder || field.text}" source=${field.labelSource || '-'} conf=${field.labelConfidence || '-'} aliases="${(field.aliases || []).join('|')}" container="${field.semanticContainer || '-'}" value=${field.valueState} type=${field.type || '-'} role=${field.role || '-'} control=${field.selectionControl || '-'} required=${field.required ? 'true' : 'false'} invalid=${field.invalid ? 'true' : 'false'} error="${field.validationMessage || ''}" options="${Array.isArray(field.optionLabels) ? field.optionLabels.join('|') : ''}" expanded=${field.expandedState || '-'}`
+							`  field index=${field.index} region=${field.region || '-'} rect=${formatObservationRect(field.rect)} hit=${formatHitState(field)} fieldType=${field.fieldType || 'unknown'} kind=${field.controlKind || '-'} label="${field.label || field.placeholder || field.text}" source=${field.labelSource || '-'} conf=${field.labelConfidence || '-'} aliases="${(field.aliases || []).join('|')}" container="${field.semanticContainer || '-'}" desc="${field.description || ''}" descSource=${field.descriptionSource || '-'} value=${field.valueState} type=${field.type || '-'} role=${field.role || '-'} control=${field.selectionControl || '-'} disabled=${field.disabled ? 'true' : 'false'} readOnly=${field.readOnly ? 'true' : 'false'} readonlyDom=${field.readonlyDom ? 'true' : 'false'} required=${field.required ? 'true' : 'false'} invalid=${field.invalid ? 'true' : 'false'} error="${field.validationMessage || ''}" options="${Array.isArray(field.optionLabels) ? field.optionLabels.join('|') : ''}" expanded=${field.expandedState || '-'}`
 						)
 					}
 			}
@@ -2743,7 +2999,7 @@
 			sections.push('<actions>')
 				for (const action of actions.slice(0, 60)) {
 					sections.push(
-						`  action index=${action.index} region=${action.region || '-'} rect=${formatObservationRect(action.rect)} hit=${formatHitState(action)} intent=${action.actionIntent || 'unknown'} kind=${action.controlKind || '-'} label="${action.label || action.text}" source=${action.labelSource || '-'} conf=${action.labelConfidence || '-'} aliases="${(action.aliases || []).join('|')}" role=${action.role || '-'} value=${action.valueState || 'unknown'} control=${action.selectionControl || '-'} expanded=${action.expandedState || '-'}`
+						`  action index=${action.index} region=${action.region || '-'} rect=${formatObservationRect(action.rect)} hit=${formatHitState(action)} intent=${action.actionIntent || 'unknown'} kind=${action.controlKind || '-'} label="${action.label || action.text}" source=${action.labelSource || '-'} conf=${action.labelConfidence || '-'} aliases="${(action.aliases || []).join('|')}" role=${action.role || '-'} value=${action.valueState || 'unknown'} control=${action.selectionControl || '-'} disabled=${action.disabled ? 'true' : 'false'} expanded=${action.expandedState || '-'}`
 					)
 				}
 			sections.push('</actions>')
@@ -2790,7 +3046,7 @@
 	}
 
 	function formatHitBlockerText(value) {
-		return shortText(String(value || '').replace(/["'<>]/g, '').replace(/\s+/g, '_'), 48)
+		return shortText(String(value || '').replace(/["'<>]/g, '').replace(/\s+/g, '_'), 96)
 	}
 
 	function formatCandidateDiagnostics(candidateDiagnostics) {
@@ -2801,7 +3057,7 @@
 		for (const probe of (Array.isArray(candidateDiagnostics.unindexedTextActionProbes) ? candidateDiagnostics.unindexedTextActionProbes : []).slice(0, 12)) {
 			const rect = probe.rect || {}
 			lines.push(
-				`  unindexed text="${shortText(probe.text || '', 28)}" tag=${probe.tag || '-'} role=${probe.role || '-'} cursor=${probe.cursor || '-'} context=${probe.actionContext ? 'true' : 'false'} pointer=${probe.pointer ? 'true' : 'false'} rect=${Number(rect.left) || 0},${Number(rect.top) || 0},${Number(rect.width) || 0}x${Number(rect.height) || 0} class="${shortText(probe.className || '', 60)}" html="${shortText(probe.html || '', 140)}"`
+				`  unindexed text="${shortText(probe.text || '', 28)}" source="${shortText(probe.sourceText || '', 28)}" tag=${probe.tag || '-'} role=${probe.role || '-'} sourceTag=${probe.sourceTag || '-'} sourceRole=${probe.sourceRole || '-'} hit=${formatHitState(probe)} cursor=${probe.cursor || '-'} context=${probe.actionContext ? 'true' : 'false'} pointer=${probe.pointer ? 'true' : 'false'} interactive=${probe.probableInteractive ? 'true' : 'false'} normalized=${probe.normalized ? 'true' : 'false'} style="${shortText(probe.style || '', 72)}" ancestor="${shortText(probe.actionAncestor || '', 96)}" rect=${Number(rect.left) || 0},${Number(rect.top) || 0},${Number(rect.width) || 0}x${Number(rect.height) || 0} class="${shortText(probe.className || '', 60)}" html="${shortText(probe.html || '', 140)}"`
 			)
 		}
 		lines.push('</candidate_diagnostics>')
@@ -3414,7 +3670,7 @@
 		if (!refs) return []
 		const values = []
 		for (const id of refs.split(/\s+/).filter(Boolean)) {
-			const node = document.getElementById(id)
+			const node = findElementByIdRef(element, id)
 			const text = node instanceof HTMLElement ? getElementText(node) : ''
 			if (text && text !== '(empty)') values.push(text)
 		}

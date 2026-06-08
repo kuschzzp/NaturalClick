@@ -16,6 +16,7 @@
 	if (!taskIntent) throw new Error('NC_BG_TASK_INTENT 未加载。')
 	const plannerWorkflows = g.NC_BG_PLANNER_WORKFLOWS
 	if (!plannerWorkflows) throw new Error('NC_BG_PLANNER_WORKFLOWS 未加载。')
+	const controlSemantics = g.NC_CONTROL_SEMANTICS || null
 	const {
 		buildDuplicatePlanningContext,
 		buildInvalidActionContext,
@@ -101,6 +102,8 @@
 		})
 		const startCompactObservation = shouldStartWithCompactObservation(observation, observationText, planningConfig)
 		publishObservationSummaryProgress(session, options, observation, observationText, startCompactObservation, planningConfig)
+		const observationHeartbeatDigest = buildObservationHeartbeatDigest(observation, observationText)
+		const observationProgressDiagnostics = buildObservationProgressDiagnostics(observation)
 		const toolLines = g.NC_BG_TOOLS?.getToolPromptLines?.() || []
 		const availableActionNames = getAvailableActionNames()
 		const endpoint = session.config.textLLM
@@ -201,6 +204,8 @@
 					compact: useCompactObservation,
 					contextCount: planningContext.length,
 					checkpoint: '核对任务目标是否到达、列表/表格样本、真实下拉候选、可执行按钮和遮挡命中状态，避免随机搜索或盲点。',
+					observationDigest: observationHeartbeatDigest,
+					observationProgressDiagnostics,
 				})
 				content = result.content
 				appendModelTrace(session, {
@@ -268,6 +273,8 @@
 						compact: true,
 						contextCount: planningContext.length,
 						checkpoint: '核对压缩上下文里的任务目标、列表/表格样本、真实候选和可执行目标，避免在信息不足时盲目操作。',
+						observationDigest: buildObservationHeartbeatDigest(observation, compactObservationText),
+						observationProgressDiagnostics,
 					})
 					content = retryResult.content
 					useCompactObservation = true
@@ -707,11 +714,13 @@
 			stage: 'observation_summary',
 			round: 0,
 			text,
+			observationProgress: buildObservationProgressDiagnostics(observation),
 		})
 	}
 
 	function buildObservationSummaryProgressText(session, observation, observationText, startCompactObservation, planningConfig) {
 		const summary = buildObservationProgressSummary(observation)
+		const associationCounts = countObservationOptionAssociations(observation)
 		const total = countObservationItems(observation)
 		const rawCount = countRawCandidates(observation)
 		const textChars = String(observationText || '').length
@@ -726,6 +735,7 @@
 			`表格 ${summary.tables}`,
 			`面板 ${summary.panels}`,
 			`候选 ${summary.options + summary.popups}`,
+			formatOptionAssociationProgress(associationCounts),
 			`raw ${rawCount}`,
 			`上下文≈${textChars}字`,
 			compactReason,
@@ -743,6 +753,147 @@
 			options: arrayLength(observation?.options),
 			popups: arrayLength(observation?.popups),
 		}
+	}
+
+	function buildObservationHeartbeatDigest(observation, observationText = '') {
+		const summary = buildObservationProgressSummary(observation)
+		const hitCounts = countObservationHitStates(observation)
+		const associationCounts = countObservationOptionAssociations(observation)
+		const diagnostics = observation?.candidateDiagnostics || {}
+		const unindexedTextActions = Number(diagnostics.unindexedTextActionProbeCount || 0)
+		const parts = [
+			`字段 ${summary.fields}`,
+			`动作 ${summary.actions}`,
+			`候选 ${summary.options + summary.popups}`,
+			summary.panels ? `面板 ${summary.panels}` : '',
+			summary.tables ? `表格 ${summary.tables}` : '',
+			hitCounts.covered ? `遮挡 ${hitCounts.covered}` : '',
+			hitCounts.partial ? `部分命中 ${hitCounts.partial}` : '',
+			formatOptionAssociationProgress(associationCounts),
+			unindexedTextActions ? `未索引文字动作 ${unindexedTextActions}` : '',
+			`raw ${countRawCandidates(observation)}`,
+			`上下文≈${String(observationText || '').length}字`,
+		].filter(Boolean)
+		return parts.join('，')
+	}
+
+	function buildObservationProgressDiagnostics(observation) {
+		const associationCounts = countObservationOptionAssociations(observation)
+		return {
+			candidateAssociationTotal: Number(associationCounts.total || 0),
+			candidateAssociationAssociated: Number(associationCounts.associated || 0),
+			candidateAssociationAmbiguous: Number(associationCounts.ambiguous || 0),
+			candidateAssociationUnowned: Number(associationCounts.unowned || 0),
+		}
+	}
+
+	function countObservationOptionAssociations(observation) {
+		const counts = { total: 0, associated: 0, ambiguous: 0, unowned: 0 }
+		const visibleItems = [
+			...(Array.isArray(observation?.popups) ? observation.popups : []),
+			...(Array.isArray(observation?.options) ? observation.options : []),
+		].filter(Boolean)
+		counts.total = visibleItems.length
+		if (!visibleItems.length) return counts
+		const targets = collectOptionAssociationProgressTargets(observation)
+		if (!controlSemantics?.scoreObservedOptionAssociation || !targets.length) {
+			counts.unowned = visibleItems.length
+			return counts
+		}
+		for (const item of visibleItems) {
+			const scores = []
+			for (const target of targets) {
+				if (!target || target === item) continue
+				const score = Number(controlSemantics.scoreObservedOptionAssociation(item, target))
+				if (Number.isFinite(score)) scores.push(score)
+			}
+			if (!scores.length) {
+				counts.unowned += 1
+				continue
+			}
+			scores.sort((a, b) => a - b)
+			const best = scores[0]
+			const closeCount = scores.filter((score) => isCloseOptionAssociationScore(score, best)).length
+			if (closeCount > 1) counts.ambiguous += 1
+			else counts.associated += 1
+		}
+		return counts
+	}
+
+	function collectOptionAssociationProgressTargets(observation) {
+		const targets = []
+		const seen = new Set()
+		const add = (item, source) => {
+			if (!item || typeof item !== 'object') return
+			if (!isPotentialOptionAssociationProgressTarget(item, source)) return
+			const key = item.stableId || (item.index !== undefined && item.index !== null ? `index:${item.index}` : '')
+			if (key && seen.has(key)) return
+			if (key) seen.add(key)
+			targets.push(item)
+		}
+		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) add(field, 'forms')
+		}
+		for (const action of (Array.isArray(observation?.actions) ? observation.actions : [])) add(action, 'actions')
+		for (const element of (Array.isArray(observation?.elements) ? observation.elements : [])) add(element, 'elements')
+		return targets
+	}
+
+	function isPotentialOptionAssociationProgressTarget(item, source = '') {
+		if (!item || typeof item !== 'object') return false
+		const region = String(item.region || '').toLowerCase()
+		if (region === 'popover' || region === 'popup') return false
+		if (item.disabled === true) return false
+		if (controlSemantics?.isObservedDropdownLike?.(item, source)) return true
+		if (item.selectionControl || item.controlKind) return true
+		if (Array.isArray(item.optionLabels) && item.optionLabels.length) return true
+		const role = String(item.role || '').toLowerCase()
+		if (role === 'combobox' || role === 'listbox') return true
+		const fieldType = String(item.fieldType || '').toLowerCase()
+		if (/(select|dropdown|cascader|tree|date|time|month|year|week|range|picker)/i.test(fieldType)) return true
+		const hints = [item.relationHints, item.popupHints, item.stateHints, item.expandedState]
+			.map((value) => String(value || ''))
+			.join(' ')
+		return /(aria-controls|aria-owns|haspopup|popup|listbox|expanded|open|opened|visible|active|弹层|展开)/i.test(hints)
+	}
+
+	function isCloseOptionAssociationScore(score, bestScore) {
+		const value = Number(score)
+		const best = Number(bestScore)
+		if (!Number.isFinite(value) || !Number.isFinite(best)) return false
+		if (best <= 100) return value <= 100
+		if (best < 1000) return value <= best + 150
+		return value <= best + 600
+	}
+
+	function formatOptionAssociationProgress(counts) {
+		if (!counts || Number(counts.total || 0) <= 0) return ''
+		return [
+			Number(counts.associated || 0) ? `候选已归属 ${Number(counts.associated || 0)}` : '',
+			Number(counts.ambiguous || 0) ? `候选归属模糊 ${Number(counts.ambiguous || 0)}` : '',
+			Number(counts.unowned || 0) ? `候选未归属 ${Number(counts.unowned || 0)}` : '',
+		].filter(Boolean).join('，')
+	}
+
+	function countObservationHitStates(observation) {
+		const counts = { covered: 0, partial: 0 }
+		for (const item of collectObservationHitStateItems(observation)) {
+			const state = String(item?.hitState || '').trim().toLowerCase()
+			if (state === 'covered') counts.covered += 1
+			else if (state === 'partial') counts.partial += 1
+		}
+		return counts
+	}
+
+	function collectObservationHitStateItems(observation) {
+		const items = []
+		for (const form of Array.isArray(observation?.forms) ? observation.forms : []) {
+			if (Array.isArray(form?.fields)) items.push(...form.fields)
+		}
+		for (const key of ['actions', 'options', 'popups', 'elements']) {
+			if (Array.isArray(observation?.[key])) items.push(...observation[key])
+		}
+		return items
 	}
 
 	function buildObservationCompactReason(total, rawCount, textChars, observationText, limits) {
@@ -1656,9 +1807,25 @@
 				timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
 				validationKind: String(event?.validationKind || '').trim(),
 				validationGuidance: String(event?.validationGuidance || '').trim(),
+				...formatObservationProgressEventFields(event?.observationProgress),
 				stream: event?.stream || undefined,
 			})
 		} catch (_) {}
+	}
+
+	function formatObservationProgressEventFields(progress) {
+		if (!progress || typeof progress !== 'object') return {}
+		const out = {}
+		for (const key of [
+			'candidateAssociationTotal',
+			'candidateAssociationAssociated',
+			'candidateAssociationAmbiguous',
+			'candidateAssociationUnowned',
+		]) {
+			const value = Number(progress[key])
+			if (Number.isFinite(value) && value > 0) out[key] = value
+		}
+		return out
 	}
 
 	function createModelStreamProgressPublisher(session, options, round, timeoutMs) {
@@ -1703,6 +1870,7 @@
 				round: Number(heartbeat.round) || 1,
 				elapsedMs,
 				timeoutMs,
+				observationProgress: heartbeat.observationProgressDiagnostics || heartbeat.observationProgress || {},
 				text: buildModelWaitHeartbeatText(session, {
 					...heartbeat,
 					timeoutMs,
@@ -1761,7 +1929,8 @@
 			),
 			buildWorkflowHeartbeatCheckpoint(session),
 		].filter(Boolean).join('；')
-		return `第 ${session?.step || 0} 步：${phase}（${details.join('，')}）；安全检查：${checkpoint}；页面动作尚未执行，仍在等待模型给出可执行 JSON...`
+		const observationDigest = cleanSearchProgressFragment(status.observationDigest || '')
+		return `第 ${session?.step || 0} 步：${phase}（${details.join('，')}）${observationDigest ? `；页面观察：${observationDigest}` : ''}；安全检查：${checkpoint}；页面动作尚未执行，仍在等待模型给出可执行 JSON...`
 	}
 
 	function buildWorkflowHeartbeatCheckpoint(session) {
@@ -2092,6 +2261,8 @@
 		isObservationTextTruncatedAtLimit,
 		buildModelStreamProgressText,
 		buildModelWaitHeartbeatText,
+		buildObservationHeartbeatDigest,
+		buildObservationProgressDiagnostics,
 		buildObservationSummaryProgressText,
 		getDisplayModelThought,
 		getModelRoundTimeoutMs,

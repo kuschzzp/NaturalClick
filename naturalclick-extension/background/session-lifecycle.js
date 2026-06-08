@@ -155,6 +155,7 @@
 			timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
 			validationKind: String(event?.validationKind || '').trim(),
 			validationGuidance: String(event?.validationGuidance || '').trim().slice(0, 600),
+			...extractPlanningObservationProgress(event),
 			ts: Date.now(),
 		}
 	}
@@ -194,6 +195,7 @@
 				timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
 				validationKind: String(event?.validationKind || '').trim(),
 				validationGuidance: String(event?.validationGuidance || '').trim().slice(0, 600),
+				...extractPlanningObservationProgress(event),
 			},
 		})
 	}
@@ -235,6 +237,7 @@
 			round,
 			elapsedMs: Math.max(0, Number(event?.elapsedMs) || 0),
 			timeoutMs: Math.max(0, Number(event?.timeoutMs) || 0),
+			...extractPlanningObservationProgress(event),
 		}
 		const existing = existingId
 			? session.traceItems.find((item) => item?.id === existingId)
@@ -253,6 +256,20 @@
 		const last = session.traceItems[session.traceItems.length - 1]
 		session.modelWaitTraceKey = key
 		session.modelWaitTraceId = last?.id || ''
+	}
+
+	function extractPlanningObservationProgress(event) {
+		const out = {}
+		for (const key of [
+			'candidateAssociationTotal',
+			'candidateAssociationAssociated',
+			'candidateAssociationAmbiguous',
+			'candidateAssociationUnowned',
+		]) {
+			const value = Number(event?.[key])
+			if (Number.isFinite(value) && value > 0) out[key] = value
+		}
+		return out
 	}
 
 	function appendRuntimeProgressTrace(session, event, text) {

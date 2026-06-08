@@ -1503,6 +1503,8 @@
 			['cleanupFailed', '清空异常'],
 			['cleanupUnverified', '清空未确认'],
 			['candidateDiagnostics', '候选诊断'],
+			['candidateAssociationAmbiguous', '候选归属模糊'],
+			['candidateAssociationUnowned', '候选未归属'],
 			['dateCandidateOwnership', '日期候选归属'],
 			['contextRequestLimit', '上下文补证上限'],
 			['verificationRecoveryIncomplete', '校验恢复未完成'],
@@ -1625,6 +1627,8 @@
 			Number(diagnostics.plannerCorrectionCount) ? `规划纠偏 ${Number(diagnostics.plannerCorrectionCount)}` : '',
 			Number(diagnostics.loopGuardCount) ? `循环保护 ${Number(diagnostics.loopGuardCount)}` : '',
 			Number(diagnostics.verificationFailureCount) ? `校验失败 ${Number(diagnostics.verificationFailureCount)}` : '',
+			Number(diagnostics.candidateAssociationAmbiguousCount) ? `候选归属模糊 ${Number(diagnostics.candidateAssociationAmbiguousCount)}` : '',
+			Number(diagnostics.candidateAssociationUnownedCount) ? `候选未归属 ${Number(diagnostics.candidateAssociationUnownedCount)}` : '',
 			Number(diagnostics.dateCandidateOwnershipCount) ? `日期候选归属 ${Number(diagnostics.dateCandidateOwnershipCount)}` : '',
 			Number(diagnostics.verificationRecoveryIncompleteCount) ? `校验恢复未完成 ${Number(diagnostics.verificationRecoveryIncompleteCount)}` : '',
 			Number(diagnostics.contextRequestLimitCount) ? `上下文补证上限 ${Number(diagnostics.contextRequestLimitCount)}` : '',
@@ -2203,6 +2207,8 @@
 			plannerCorrections: Number(diagnostics?.plannerCorrectionCount || 0),
 			loopGuards: Number(diagnostics?.loopGuardCount || 0),
 			verificationFailures: Number(diagnostics?.verificationFailureCount || 0),
+			candidateAssociationAmbiguous: Number(diagnostics?.candidateAssociationAmbiguousCount || 0),
+			candidateAssociationUnowned: Number(diagnostics?.candidateAssociationUnownedCount || 0),
 			dateCandidateOwnership: Number(diagnostics?.dateCandidateOwnershipCount || 0),
 			verificationRecoveryIncomplete: Number(diagnostics?.verificationRecoveryIncompleteCount || 0),
 			contextRequestLimit: Number(diagnostics?.contextRequestLimitCount || 0),
@@ -2267,6 +2273,9 @@
 			Number(stats.plannerCorrections) ? `规划纠偏 ${Number(stats.plannerCorrections)} 次` : '',
 			Number(stats.loopGuards) ? `循环保护 ${Number(stats.loopGuards)} 次` : '',
 			Number(stats.verificationFailures) ? `校验失败 ${Number(stats.verificationFailures)} 次` : '',
+			Number(stats.candidateAssociationAmbiguous) || Number(stats.candidateAssociationUnowned)
+				? `候选归属待确认 ${Number(stats.candidateAssociationAmbiguous || 0) + Number(stats.candidateAssociationUnowned || 0)} 项`
+				: '',
 			Number(stats.dateCandidateOwnership) ? `日期候选归属 ${Number(stats.dateCandidateOwnership)} 次` : '',
 			Number(stats.verificationRecoveryIncomplete) ? `校验恢复未完成 ${Number(stats.verificationRecoveryIncomplete)} 次` : '',
 			Number(stats.contextRequestLimit) ? `上下文补证上限 ${Number(stats.contextRequestLimit)} 次` : '',
@@ -2399,6 +2408,24 @@
 				text: '建议：复查日期/时间选择器的弹层归属、当前活动字段和候选坐标，优先让候选稳定归属到对应字段后再选择。',
 			})
 		}
+		const candidateAssociationIssues = Number(diagnostics?.candidateAssociationAmbiguousCount || 0) + Number(diagnostics?.candidateAssociationUnownedCount || 0)
+		if (candidateAssociationIssues) {
+			out.push({
+				kind: 'candidate_association',
+				severity: 'warning',
+				count: candidateAssociationIssues,
+				text: `候选归属待确认：${[
+					Number(diagnostics?.candidateAssociationAmbiguousCount || 0) ? `归属模糊 ${Number(diagnostics.candidateAssociationAmbiguousCount)} 项` : '',
+					Number(diagnostics?.candidateAssociationUnownedCount || 0) ? `未归属 ${Number(diagnostics.candidateAssociationUnownedCount)} 项` : '',
+				].filter(Boolean).join('，')}；说明当前可见候选还不能稳定绑定到目标字段。`,
+			})
+			out.push({
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: '建议：先用 request_options_for/open_dropdown/inspect_region 复核当前活动字段与弹层候选归属，不要直接选择归属模糊或未归属候选。',
+			})
+		}
 		if (Number(diagnostics?.verificationRecoveryIncompleteCount || 0)) {
 			out.push({
 				kind: 'verification_recovery_incomplete',
@@ -2452,6 +2479,38 @@
 			.reduce((sum, value) => sum + (Number(value) || 0), 0)
 	}
 
+	function collectCandidateAssociationDiagnosticCounts(items) {
+		const counts = { ambiguous: 0, unowned: 0 }
+		for (const item of (Array.isArray(items) ? items : [])) {
+			counts.ambiguous = Math.max(counts.ambiguous, readPositiveProgressCount(item?.progress?.candidateAssociationAmbiguous))
+			counts.unowned = Math.max(counts.unowned, readPositiveProgressCount(item?.progress?.candidateAssociationUnowned))
+			const text = [
+				item?.title,
+				item?.detail,
+				item?.progress?.stage,
+				item?.action?.output,
+				item?.action?.input?.workflow_result_summary,
+			].filter(Boolean).join(' ')
+			counts.ambiguous = Math.max(counts.ambiguous, extractMaxDiagnosticCount(text, /候选归属模糊\s*(\d+)/g))
+			counts.unowned = Math.max(counts.unowned, extractMaxDiagnosticCount(text, /候选未归属\s*(\d+)/g))
+		}
+		return counts
+	}
+
+	function readPositiveProgressCount(value) {
+		const number = Number(value || 0)
+		return Number.isFinite(number) && number > 0 ? number : 0
+	}
+
+	function extractMaxDiagnosticCount(text, pattern) {
+		let max = 0
+		for (const match of String(text || '').matchAll(pattern)) {
+			const value = Number(match?.[1] || 0)
+			if (Number.isFinite(value) && value > max) max = value
+		}
+		return max
+	}
+
 	function buildSessionDiagnostics(traceItems) {
 		const items = Array.isArray(traceItems) ? traceItems : []
 		const modelItems = items.filter((item) => item?.io)
@@ -2467,6 +2526,7 @@
 		const lastError = [...errorItems].reverse()[0] || null
 		const lastModelErrorItem = [...modelItems].reverse().find((item) => getModelErrorSummary(item))
 		const plannerCorrectionCounts = countPlannerCorrectionStages(items)
+		const candidateAssociationCounts = collectCandidateAssociationDiagnosticCounts(items)
 		return {
 			modelCallCount: modelItems.length,
 			modelErrorCount: modelItems.filter((item) => item.kind === 'error').length,
@@ -2475,6 +2535,8 @@
 			loopGuardKindCounts: countLoopGuardKinds(items),
 			lastLoopGuard: getLastLoopGuardTrace(items),
 			verificationFailureCount: items.filter((item) => /校验失败|verify/i.test(`${item?.title || ''} ${item?.detail || ''} ${item?.action?.name || ''}`)).length,
+			candidateAssociationAmbiguousCount: candidateAssociationCounts.ambiguous,
+			candidateAssociationUnownedCount: candidateAssociationCounts.unowned,
 			dateCandidateOwnershipCount: items.filter(isDateCandidateOwnershipTrace).length,
 			verificationRecoveryIncompleteCount: items.filter(isVerificationRecoveryIncompleteTrace).length,
 			contextRequestLimitCount: items.filter(isContextRequestLimitTrace).length,

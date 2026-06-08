@@ -361,6 +361,10 @@
 	function buildFieldTestDecision(session, state, field, observation) {
 		const key = getFieldKey(field)
 		if (!key) return null
+		if (String(state?.activeFieldKey || '').trim() !== key) {
+			state.pendingDropdownOutput = ''
+			state.pendingDropdownCandidates = []
+		}
 		const value = buildSearchFieldTestValue(session, field, observation)
 		rememberFieldMetadata(state, key, {
 			...buildFieldWorkflowInput(field),
@@ -3078,6 +3082,17 @@
 					basis: `任务文本明确指定的日期：${date}`,
 				}
 			}
+			if (hasRejectedTemporalSampleForField(observation, planningContext, field)) {
+				return { text: '', source: '', basis: '' }
+			}
+			const visibleRange = pickVisibleDateRangeCandidate(candidates, failed)
+			if (visibleRange) {
+				return {
+					text: visibleRange,
+					source: 'visible_option',
+					basis: `日期控件真实可见候选组成范围：${visibleRange}`,
+				}
+			}
 			return { text: '', source: '', basis: '' }
 		}
 		if (isCascaderLikeField(field)) {
@@ -3126,8 +3141,11 @@
 	}
 
 	function collectUsableOptionCandidates(state, field, observation = null) {
+		const key = getFieldKey(field)
+		const activeKey = String(state?.activeFieldKey || '').trim()
+		const pendingBelongsToField = !!key && !!activeKey && key === activeKey
 		const values = [
-			...(Array.isArray(state?.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []),
+			...(pendingBelongsToField && Array.isArray(state?.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []),
 			...(Array.isArray(field?.optionLabels) ? field.optionLabels : []),
 			...collectObservedOptionCandidatesForField(observation, field),
 		]
@@ -3152,6 +3170,7 @@
 		].filter(Boolean)
 		const scored = []
 		for (const item of visibleItems) {
+			if (!isObservedOptionCandidateCompatibleWithSearchField(item, field)) continue
 			const score = controlSemantics.scoreObservedOptionAssociation(item, field)
 			if (!Number.isFinite(score)) continue
 			const label = String(item?.label || item?.text || '').trim()
@@ -3162,9 +3181,28 @@
 		return collectActiveNewPopupOptionLabels(visibleItems, field)
 	}
 
+	function isObservedOptionCandidateCompatibleWithSearchField(item, field) {
+		const label = String(item?.label || item?.text || '').trim()
+		const descriptor = [
+			item?.selectionControl,
+			item?.controlKind,
+			item?.kind,
+			item?.fieldType,
+			item?.role,
+			item?.source,
+		].filter(Boolean).join(' ')
+		const temporalOption = String(item?.selectionControl || '').trim() === 'date-option' ||
+			/(date-option|datepicker|date-picker|timepicker|time-picker|calendar|daterange|date|time|picker)/i.test(descriptor) ||
+			!!normalizeDateCandidate(label) ||
+			!!parseMonthDayDateCandidate(label)
+		if (temporalOption && !isTemporalSearchField(field)) return false
+		return true
+	}
+
 	function collectActiveNewPopupOptionLabels(items, field) {
 		const active = controlSemantics?.collectActiveNewPopupItemsForTargets?.(items, [field]) || []
 		return active
+			.filter((item) => isObservedOptionCandidateCompatibleWithSearchField(item, field))
 			.map((item) => String(item?.label || item?.text || '').trim())
 			.filter(Boolean)
 	}
@@ -3388,6 +3426,78 @@
 			if (sample) return sample
 		}
 		return ''
+	}
+
+	function hasRejectedTemporalSampleForField(observation, planningContext, field) {
+		if (!isTemporalSearchField(field)) return false
+		const labelCandidates = getFieldLabelCandidates(field)
+		if (!labelCandidates.length) return false
+		for (const table of (Array.isArray(observation?.tables) ? observation.tables : [])) {
+			if (hasRejectedTemporalTableSample(table, labelCandidates, field)) return true
+		}
+		for (const line of collectObservationTextRows(observation)) {
+			const text = String(line || '').trim()
+			if (!isLikelyDataRow(text)) continue
+			for (const label of labelCandidates) {
+				if (isRejectedTemporalSearchSample(extractSampleAfterLabel(text, label), labelCandidates, field)) return true
+			}
+		}
+		for (const context of (Array.isArray(planningContext) ? planningContext : [])) {
+			const text = String(context?.text || '')
+			if (!isTablePlanningContext(context, text)) continue
+			if (hasRejectedTemporalContextSample(text, labelCandidates, field)) return true
+		}
+		return false
+	}
+
+	function hasRejectedTemporalTableSample(table, labelCandidates, field) {
+		const headers = (Array.isArray(table?.headers) ? table.headers : [])
+			.map((header) => String(header || '').trim())
+		const rows = Array.isArray(table?.rows) ? table.rows : []
+		if (!headers.length || !rows.length) return false
+		const index = findMatchingHeaderIndex(headers, labelCandidates)
+		if (index < 0) return false
+		return rows.some((row) => {
+			const cells = Array.isArray(row) ? row : []
+			return isRejectedTemporalSearchSample(cells[index], labelCandidates, field)
+		})
+	}
+
+	function hasRejectedTemporalContextSample(text, labelCandidates, field) {
+		let headers = []
+		for (const line of String(text || '').split(/\n+/)) {
+			const trimmed = line.replace(/\s+/g, ' ').trim()
+			if (!trimmed) continue
+			const nextHeaders = extractContextTableHeaders(trimmed)
+			if (nextHeaders.length) headers = nextHeaders
+			if (!isContextTableRowLine(trimmed)) continue
+			for (const label of labelCandidates) {
+				if (isRejectedTemporalSearchSample(extractSampleAfterLabel(trimmed, label), labelCandidates, field)) return true
+			}
+			const headerIndex = headers.length ? findMatchingHeaderIndex(headers, labelCandidates) : -1
+			if (headerIndex < 0) continue
+			const cells = parseContextTableRowCells(trimmed)
+			if (isRejectedTemporalSearchSample(cells[headerIndex], labelCandidates, field)) return true
+		}
+		return false
+	}
+
+	function isRejectedTemporalSearchSample(value, labelCandidates, field) {
+		const text = String(value || '').trim()
+		if (!text || !looksLikeTemporalSearchSample(text)) return false
+		if (isNonDataTableSample(text)) return false
+		return !isUsableTableSample(text, labelCandidates, field)
+	}
+
+	function looksLikeTemporalSearchSample(value) {
+		const text = String(value || '').trim()
+		if (!text) return false
+		if (/(\d{4})\s*[-/.]\s*(\d{1,2})\s*[-/.]\s*(\d{1,2})/.test(text)) return true
+		if (/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})/.test(text)) return true
+		if (/\b\d{8}\b/.test(text)) return true
+		if (/(?:^|[^\d])\d{1,2}\s*月\s*\d{1,2}\s*(?:日|号)?(?=$|[^\d])/.test(text)) return true
+		if (/(?:^|[^\d])\d{1,2}\s*[-/.]\s*\d{1,2}(?=$|[^\d])/.test(text)) return true
+		return /(?:^|[^\d])\d{1,2}\s*:\s*\d{2}(?:\s*:\s*\d{2})?(?=$|[^\d])/.test(text)
 	}
 
 	function isTablePlanningContext(context, text = '') {
@@ -4006,6 +4116,19 @@
 		if (!peer) return pickDateRangeFromDayOnlyCandidates(candidates, failed, anchorDate)
 		const pair = [dates[anchorIndex].date, peer.date].sort(compareDateStrings)
 		return `${pair[0]}..${pair[1]}`
+	}
+
+	function pickVisibleDateRangeCandidate(candidates, failed) {
+		const dates = collectDateCandidateEntries(candidates, failed)
+			.map((item) => String(item?.date || '').trim())
+			.filter(Boolean)
+			.sort(compareDateStrings)
+		for (let index = 0; index < dates.length - 1; index += 1) {
+			const start = dates[index]
+			const end = dates[index + 1]
+			if (start && end && start !== end) return `${start}..${end}`
+		}
+		return ''
 	}
 
 	function pickExplicitDateRangeCandidate(candidates, failed, anchorValue = '', fullDateCandidates = null) {

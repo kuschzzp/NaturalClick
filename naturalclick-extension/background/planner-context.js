@@ -12,6 +12,7 @@
 		const popups = Array.isArray(observation?.popups) ? observation.popups : []
 		const panels = Array.isArray(observation?.panels) ? observation.panels : []
 		const tables = Array.isArray(observation?.tables) ? observation.tables : []
+		const elements = Array.isArray(observation?.elements) ? observation.elements : []
 		const candidateDiagnostics = observation?.candidateDiagnostics && typeof observation.candidateDiagnostics === 'object'
 			? observation.candidateDiagnostics
 			: null
@@ -28,6 +29,13 @@
 		const rankedActions = selectObservationItems(actions, compact ? 10 : 18, taskText)
 		const rankedPopups = selectObservationItems(popups, compact ? 10 : 16, taskText)
 		const rankedOptions = selectObservationItems(optionItems, compact ? 12 : 20, taskText)
+		const optionAssociationHints = buildObservationOptionAssociationHints({
+			forms,
+			actions,
+			elements,
+			popups,
+			options: optionItems,
+		})
 		const actionCursor = getContiguousPrefixCursor(rankObservationItems(actions), rankedActions)
 		const popupCursor = getContiguousPrefixCursor(rankObservationItems(popups), rankedPopups)
 		const optionCursor = getContiguousPrefixCursor(rankObservationItems(optionItems), rankedOptions)
@@ -97,7 +105,7 @@
 		if (popups.length) {
 			parts.push('<popups>')
 			for (const popup of rankedPopups) {
-				parts.push(formatOptionLine(popup, 'popup'))
+				parts.push(formatOptionLine(popup, 'popup', optionAssociationHints.get(popup)))
 			}
 			if (popups.length > rankedPopups.length) {
 				parts.push(formatMoreContextHint('popups', popupCursor, popups.length))
@@ -108,7 +116,7 @@
 		if (optionItems.length) {
 			parts.push('<options>')
 			for (const option of rankedOptions) {
-				parts.push(formatOptionLine(option, 'option'))
+				parts.push(formatOptionLine(option, 'option', optionAssociationHints.get(option)))
 			}
 			if (optionItems.length > rankedOptions.length) {
 				parts.push(formatMoreContextHint('options', optionCursor, optionItems.length))
@@ -196,7 +204,7 @@
 		for (const probe of probes.slice(0, Math.max(0, Number(limit) || 0))) {
 			const rect = probe?.rect || {}
 			lines.push(
-				`  unindexed text="${shortText(probe?.text || '', 28)}" tag=${probe?.tag || '-'} role=${probe?.role || '-'} cursor=${probe?.cursor || '-'} context=${probe?.actionContext ? 'true' : 'false'} pointer=${probe?.pointer ? 'true' : 'false'} rect=${Number(rect.left) || 0},${Number(rect.top) || 0},${Number(rect.width) || 0}x${Number(rect.height) || 0} class="${shortText(probe?.className || '', 60)}" html="${shortText(probe?.html || '', 140)}"`
+				`  unindexed text="${shortText(probe?.text || '', 28)}" source="${shortText(probe?.sourceText || '', 28)}" tag=${probe?.tag || '-'} role=${probe?.role || '-'} sourceTag=${probe?.sourceTag || '-'} sourceRole=${probe?.sourceRole || '-'} hit=${formatHitState(probe)} cursor=${probe?.cursor || '-'} context=${probe?.actionContext ? 'true' : 'false'} pointer=${probe?.pointer ? 'true' : 'false'} interactive=${probe?.probableInteractive ? 'true' : 'false'} normalized=${probe?.normalized ? 'true' : 'false'} style="${shortText(probe?.style || '', 72)}" ancestor="${shortText(probe?.actionAncestor || '', 96)}" rect=${Number(rect.left) || 0},${Number(rect.top) || 0},${Number(rect.width) || 0}x${Number(rect.height) || 0} class="${shortText(probe?.className || '', 60)}" html="${shortText(probe?.html || '', 140)}"`
 			)
 		}
 		lines.push('</candidate_diagnostics>')
@@ -489,13 +497,14 @@
 		if (!Number.isFinite(index)) return 'inspect_index 缺少有效 index。'
 		const elements = Array.isArray(observation?.elements) ? observation.elements : []
 		const matches = findObservedIndexMatches(observation, index)
+		const optionAssociationHints = buildObservationOptionAssociationHints(observation)
 		if (!matches.length) return `未找到 index=${index} 的元素。`
 		const elementMatch = matches.find((match) => match.source === 'elements')
 		const item = elementMatch?.item || matches[0].item
 		const lines = [
 			`<index_detail index="${index}">`,
 			'<observed_matches>',
-			...matches.slice(0, 10).map(formatObservedIndexMatchLine),
+			...matches.slice(0, 10).map((match) => formatObservedIndexMatchLine(match, optionAssociationHints)),
 			'</observed_matches>',
 		]
 		const simplifiedRows = findRowsByIndex(observation?.simplifiedDom, index)
@@ -541,11 +550,12 @@
 		const index = Number(input.index)
 		const matches = Number.isFinite(index) ? findObservedIndexMatches(observation, index) : []
 		const item = chooseOptionTargetItem(matches)
+		const optionAssociationHints = buildObservationOptionAssociationHints(observation)
 		const rows = []
 		rows.push(`<options_for index="${Number.isFinite(index) ? index : '-'}">`)
 		if (matches.length) {
 			rows.push('<target_matches>')
-			rows.push(...matches.slice(0, 8).map(formatObservedIndexMatchLine))
+			rows.push(...matches.slice(0, 8).map((match) => formatObservedIndexMatchLine(match, optionAssociationHints)))
 			rows.push('</target_matches>')
 		}
 		const nativeOptions = Array.isArray(item?.optionLabels) ? item.optionLabels : []
@@ -554,8 +564,8 @@
 			rows.push(...nativeOptions.slice(0, 80).map((label, idx) => `option ${idx + 1}: ${label}`))
 			rows.push('</native_options>')
 		}
-		const popups = buildScopedOptionRows(observation, 'popups', item, 'popup', 60)
-		const options = buildScopedOptionRows(observation, 'options', item, 'option', 80)
+		const popups = buildScopedOptionRows(observation, 'popups', item, 'popup', 60, optionAssociationHints)
+		const options = buildScopedOptionRows(observation, 'options', item, 'option', 80, optionAssociationHints)
 		if (popups.rows.length) {
 			const tag = isScopedOptionContextUsable(popups.scope) ? 'visible_popups' : 'diagnostic_popups'
 			rows.push(`<${tag} scoped="${popups.scope}" total="${popups.total}"${formatDiagnosticOptionGuidance(popups.scope)}>`)
@@ -606,14 +616,14 @@
 		return score
 	}
 
-	function buildScopedOptionRows(observation, source, targetItem, kind, limit) {
+	function buildScopedOptionRows(observation, source, targetItem, kind, limit, optionAssociationHints = new Map()) {
 		const rawItems = Array.isArray(observation?.[source]) ? observation[source] : []
 		const scoped = filterOptionItemsForTarget(rawItems, targetItem)
 		const ranked = scoped.items.slice(0, limit)
 		return {
 			scope: scoped.scope,
 			total: scoped.items.length,
-			rows: ranked.map((item) => formatOptionLine(item, kind)),
+			rows: ranked.map((item) => formatOptionLine(item, kind, optionAssociationHints.get(item))),
 		}
 	}
 
@@ -660,6 +670,9 @@
 		const normalized = normalizeContextSource(source)
 		const region = String(filters.region || '').trim()
 		const rows = []
+		const optionAssociationHints = ['all', 'popups', 'options'].includes(normalized)
+			? buildObservationOptionAssociationHints(observation)
+			: new Map()
 		const pushRow = (item, formatter) => {
 			if (region && item?.region !== region) return
 			rows.push(formatter(item))
@@ -696,13 +709,13 @@
 		}
 		if (normalized === 'all' || normalized === 'popups') {
 			for (const popup of rankObservationItems(Array.isArray(observation?.popups) ? observation.popups : [])) {
-				pushRow(popup, (item) => formatOptionLine(item, 'popup'))
+				pushRow(popup, (item) => formatOptionLine(item, 'popup', optionAssociationHints.get(item)))
 			}
 			if (normalized === 'popups') return rows
 		}
 		if (normalized === 'all' || normalized === 'options') {
 			for (const option of rankObservationItems(Array.isArray(observation?.options) ? observation.options : [])) {
-				pushRow(option, (item) => formatOptionLine(item, 'option'))
+				pushRow(option, (item) => formatOptionLine(item, 'option', optionAssociationHints.get(item)))
 			}
 			if (normalized === 'options') return rows
 		}
@@ -864,14 +877,14 @@
 		return 0
 	}
 
-	function formatObservedIndexMatchLine(match) {
+	function formatObservedIndexMatchLine(match, optionAssociationHints = new Map()) {
 		const source = String(match?.source || 'unknown')
 		const item = match?.item || {}
 		let detail = ''
 		if (source.startsWith('forms:')) detail = formatFieldLine(item)
 		else if (source === 'actions') detail = formatActionLine(item)
-		else if (source === 'options') detail = formatOptionLine(item, 'option')
-		else if (source === 'popups') detail = formatOptionLine(item, 'popup')
+		else if (source === 'options') detail = formatOptionLine(item, 'option', optionAssociationHints.get(item))
+		else if (source === 'popups') detail = formatOptionLine(item, 'popup', optionAssociationHints.get(item))
 		else detail = formatElementDetailLine(item)
 		return `source=${source} ${detail}`
 	}
@@ -891,7 +904,9 @@
 		const validation = item.invalid || item.validationMessage
 			? ` invalid=${item.invalid ? 'true' : 'false'} error="${shortText(item.validationMessage || '', 96)}"`
 			: ''
-		return `element index=${item.index} region=${item.region || '-'} role=${item.role || '-'} fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} label="${shortText(item.label || item.placeholder || item.text || '', 48)}" value=${item.valueState || '-'}${validation}${options} rect=${formatRect(item.rect)} hit=${formatHitState(item)}`
+		const description = item.description ? ` desc="${shortText(item.description, 120)}"` : ''
+		const availability = formatAvailabilityHints(item)
+		return `element index=${item.index} region=${item.region || '-'} role=${item.role || '-'} fieldType=${item.fieldType || '-'} intent=${item.actionIntent || '-'} control=${item.selectionControl || '-'} label="${shortText(item.label || item.placeholder || item.text || '', 48)}"${description}${availability ? ` ${availability}` : ''} value=${item.valueState || '-'}${validation}${options} rect=${formatRect(item.rect)} hit=${formatHitState(item)}`
 	}
 
 	function formatElementDetailLine(item) {
@@ -899,7 +914,7 @@
 		return [
 			formatElementBriefLine(item),
 			`stableId=${item.stableId || '-'} tag=${item.tag || '-'} type=${item.type || '-'} labelSource=${item.labelSource || '-'} labelConf=${item.labelConfidence || '-'} aliases="${Array.isArray(item.aliases) ? item.aliases.join('|') : ''}" expanded=${item.expandedState || '-'} required=${item.required ? 'true' : 'false'} invalid=${item.invalid ? 'true' : 'false'} errorSource=${item.validationSource || '-'} conf=${item.confidence || '-'}`,
-			`placeholder="${item.placeholder || ''}" text="${shortText(item.text || '', 80)}"`,
+			`placeholder="${item.placeholder || ''}" desc="${shortText(item.description || '', 120)}" text="${shortText(item.text || '', 80)}"`,
 			`selectorHints=${JSON.stringify(hint)} domPath="${shortText(item.domPath || '', 160)}"`,
 		].join('\n')
 	}
@@ -920,10 +935,13 @@
 				? `aliases="${shortText(field.aliases.join('|'), 96)}"`
 				: '',
 			field.semanticContainer ? `container="${shortText(field.semanticContainer, 48)}"` : '',
+			field.description ? `desc="${shortText(field.description, 120)}"` : '',
+			field.descriptionSource ? `descSource=${field.descriptionSource}` : '',
 			`value=${field.valueState || 'unknown'}`,
 			`type=${field.type || '-'}`,
 			`role=${field.role || '-'}`,
 			`control=${field.selectionControl || '-'}`,
+			formatAvailabilityHints(field),
 			field.stateHints ? `state="${shortText(field.stateHints, 96)}"` : '',
 			field.relationHints ? `rel="${shortText(field.relationHints, 96)}"` : '',
 			field.popupHints ? `popup="${shortText(field.popupHints, 96)}"` : '',
@@ -953,6 +971,124 @@
 			return parts.length ? `constraints="${parts.join(' ')}"` : ''
 		}
 
+	function formatAvailabilityHints(item) {
+		const parts = []
+		if (item?.disabled === true) parts.push('disabled=true')
+		if (item?.readOnly === true || item?.readonly === true) parts.push('readOnly=true')
+		if (item?.readonlyDom === true && item?.readOnly !== true && item?.readonly !== true) parts.push('readonlyDom=true')
+		if (item?.ariaDisabled === true) parts.push('ariaDisabled=true')
+		if (item?.ariaReadonly === true) parts.push('ariaReadonly=true')
+		return parts.join(' ')
+	}
+
+	function buildObservationOptionAssociationHints(observation) {
+		const forms = Array.isArray(observation?.forms) ? observation.forms : []
+		const actions = Array.isArray(observation?.actions) ? observation.actions : []
+		const elements = Array.isArray(observation?.elements) ? observation.elements : []
+		const popups = Array.isArray(observation?.popups) ? observation.popups : []
+		const options = Array.isArray(observation?.options) ? observation.options : []
+		return buildVisibleOptionAssociationHints(
+			[...popups, ...options],
+			collectOptionAssociationTargets(forms, actions, elements)
+		)
+	}
+
+	function collectOptionAssociationTargets(forms, actions, elements) {
+		const targets = []
+		const seen = new Set()
+		const add = (item, source) => {
+			if (!item || typeof item !== 'object') return
+			if (!isPotentialOptionAssociationTarget(item, source)) return
+			const key = getObservationItemIdentity(item) || `${source}:${targets.length}`
+			if (seen.has(key)) return
+			seen.add(key)
+			targets.push(item)
+		}
+		for (const form of (Array.isArray(forms) ? forms : [])) {
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
+				add(field, 'forms')
+			}
+		}
+		for (const action of (Array.isArray(actions) ? actions : [])) add(action, 'actions')
+		for (const element of (Array.isArray(elements) ? elements : [])) add(element, 'elements')
+		return targets
+	}
+
+	function isPotentialOptionAssociationTarget(item, source = '') {
+		if (!item || typeof item !== 'object') return false
+		const region = String(item.region || '').toLowerCase()
+		if (['popover', 'popup'].includes(region)) return false
+		if (item.disabled === true) return false
+		if (controlSemantics?.isObservedDropdownLike?.(item, source)) return true
+		if (item.selectionControl || item.controlKind) return true
+		if (Array.isArray(item.optionLabels) && item.optionLabels.length) return true
+		const role = String(item.role || '').toLowerCase()
+		if (['combobox', 'listbox'].includes(role)) return true
+		const fieldType = String(item.fieldType || '').toLowerCase()
+		if (/(select|dropdown|cascader|tree|date|time|month|year|week|range|picker)/i.test(fieldType)) return true
+		const hints = [item.relationHints, item.popupHints, item.stateHints, item.expandedState]
+			.map((value) => String(value || ''))
+			.join(' ')
+		return /(aria-controls|aria-owns|haspopup|popup|listbox|expanded|open|opened|visible|active|弹层|展开)/i.test(hints)
+	}
+
+	function buildVisibleOptionAssociationHints(visibleItems, targetItems) {
+		const associations = new Map()
+		if (!controlSemantics?.scoreObservedOptionAssociation) return associations
+		const targets = Array.isArray(targetItems) ? targetItems : []
+		if (!targets.length) return associations
+		for (const item of (Array.isArray(visibleItems) ? visibleItems : [])) {
+			if (!item || typeof item !== 'object') continue
+			const scored = []
+			for (const target of targets) {
+				if (!target || target === item) continue
+				const score = Number(controlSemantics.scoreObservedOptionAssociation(item, target))
+				if (!Number.isFinite(score)) continue
+				scored.push({ target, score })
+			}
+			if (!scored.length) continue
+			scored.sort((a, b) => a.score - b.score || Number(a.target?.index ?? 999999) - Number(b.target?.index ?? 999999))
+			const best = scored[0]
+			const close = scored.filter((entry) => isCloseOptionAssociationScore(entry.score, best.score)).slice(0, 4)
+			associations.set(item, {
+				ownerIndex: best.target?.index,
+				ownerLabel: best.target?.label || best.target?.placeholder || best.target?.text || '',
+				ownerEvidence: classifyOptionAssociationScore(best.score),
+				ownerScore: Math.round(best.score),
+				ambiguous: close.length > 1,
+				alternativeOwnerIndexes: close
+					.map((entry) => entry.target?.index)
+					.filter((value) => value !== undefined && value !== null),
+			})
+		}
+		return associations
+	}
+
+	function isCloseOptionAssociationScore(score, bestScore) {
+		const value = Number(score)
+		const best = Number(bestScore)
+		if (!Number.isFinite(value) || !Number.isFinite(best)) return false
+		if (best <= 100) return value <= 100
+		if (best < 1000) return value <= best + 150
+		return value <= best + 600
+	}
+
+	function classifyOptionAssociationScore(score) {
+		const value = Number(score)
+		if (!Number.isFinite(value)) return 'unknown'
+		if (value <= 0) return 'controlled-popup'
+		if (value <= 100) return 'popup-labelledby'
+		if (value < 1000) return 'active-date-popup'
+		return 'geometry'
+	}
+
+	function getObservationItemIdentity(item) {
+		if (!item || typeof item !== 'object') return ''
+		if (item.stableId) return `sid:${item.stableId}`
+		if (item.index !== undefined && item.index !== null) return `index:${item.index}`
+		return ''
+	}
+
 	function formatActionLine(action) {
 		return [
 			`action index=${action.index}`,
@@ -972,6 +1108,7 @@
 			`role=${action.role || '-'}`,
 			`value=${action.valueState || 'unknown'}`,
 			`control=${action.selectionControl || '-'}`,
+			formatAvailabilityHints(action),
 			action.stateHints ? `state="${shortText(action.stateHints, 96)}"` : '',
 			action.relationHints ? `rel="${shortText(action.relationHints, 96)}"` : '',
 			action.popupHints ? `popup="${shortText(action.popupHints, 96)}"` : '',
@@ -981,7 +1118,7 @@
 		].filter(Boolean).join(' ')
 	}
 
-	function formatOptionLine(option, kind) {
+	function formatOptionLine(option, kind, association) {
 		return [
 			`${kind} index=${option.index}`,
 			option.stableId ? `sid=${option.stableId}` : '',
@@ -993,12 +1130,31 @@
 			`value=${option.valueState || 'unknown'}`,
 			option.controlKind ? `kind=${option.controlKind}` : '',
 			`control=${option.selectionControl || '-'}`,
+			formatAvailabilityHints(option),
 			option.relationHints ? `rel="${shortText(option.relationHints, 96)}"` : '',
 			option.popupHints ? `popup="${shortText(option.popupHints, 96)}"` : '',
+			formatOptionAssociationHint(association),
 			`expanded=${option.expandedState || '-'}`,
 			option.newSinceLastObservation ? 'new=true' : '',
 			`conf=${option.confidence || '-'}`,
 		].filter(Boolean).join(' ')
+	}
+
+	function formatOptionAssociationHint(association) {
+		if (!association || typeof association !== 'object') return ''
+		const parts = []
+		if (association.ambiguous === true) {
+			const owners = Array.isArray(association.alternativeOwnerIndexes)
+				? association.alternativeOwnerIndexes.filter((value) => value !== undefined && value !== null).join('|')
+				: ''
+			parts.push(`owner=ambiguous${owners ? `(${owners})` : ''}`)
+		} else if (association.ownerIndex !== undefined && association.ownerIndex !== null) {
+			parts.push(`ownerIndex=${association.ownerIndex}`)
+		}
+		if (association.ownerLabel) parts.push(`ownerLabel="${shortText(association.ownerLabel, 48)}"`)
+		if (association.ownerEvidence) parts.push(`ownerEvidence=${association.ownerEvidence}`)
+		if (Number.isFinite(Number(association.ownerScore))) parts.push(`ownerScore=${Number(association.ownerScore)}`)
+		return parts.join(' ')
 	}
 
 	function formatPanelLine(panel) {
@@ -1047,7 +1203,7 @@
 		const ratioText = Number.isFinite(ratio) ? `:${ratio}` : ''
 		const pointText = points ? `(${points})` : ''
 		const blocker = item?.hitBlocker
-			? ` blocker=${shortText(String(item.hitBlocker || '').replace(/["'<>]/g, '').replace(/\s+/g, '_'), 48)}`
+			? ` blocker=${shortText(String(item.hitBlocker || '').replace(/["'<>]/g, '').replace(/\s+/g, '_'), 96)}`
 			: ''
 		return `${state}${ratioText}${pointText}${blocker}`
 	}
