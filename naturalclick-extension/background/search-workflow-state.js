@@ -52,6 +52,7 @@
 				pendingDateRangeStartByKey: {},
 				pendingDropdownCandidates: [],
 				pendingDropdownOutput: '',
+				pendingDropdownFieldKey: '',
 				baselineResetDone: false,
 				terminalFieldKey: '',
 				failedReason: '',
@@ -68,6 +69,7 @@
 				if (!Array.isArray(state.skippedKeys)) state.skippedKeys = []
 				if (!state.evidenceRequestAttemptsByKey || typeof state.evidenceRequestAttemptsByKey !== 'object') state.evidenceRequestAttemptsByKey = {}
 				if (!state.pendingDateRangeStartByKey || typeof state.pendingDateRangeStartByKey !== 'object') state.pendingDateRangeStartByKey = {}
+				if (typeof state.pendingDropdownFieldKey !== 'string') state.pendingDropdownFieldKey = ''
 				if (typeof state.terminalFieldKey !== 'string') state.terminalFieldKey = ''
 				return
 			}
@@ -90,6 +92,7 @@
 			state.pendingDateRangeStartByKey = {}
 			state.pendingDropdownCandidates = []
 			state.pendingDropdownOutput = ''
+			state.pendingDropdownFieldKey = ''
 			state.baselineResetDone = false
 			state.terminalFieldKey = ''
 			state.failedReason = ''

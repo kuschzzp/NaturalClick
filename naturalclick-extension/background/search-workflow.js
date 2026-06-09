@@ -298,7 +298,7 @@
 		const key = getFieldKey(field)
 		const values = [
 			...(Array.isArray(field?.optionLabels) ? field.optionLabels : []),
-			...(key && key === String(state?.activeFieldKey || '') && Array.isArray(state?.pendingDropdownCandidates)
+			...(pendingDropdownBelongsToField(state, key) && Array.isArray(state?.pendingDropdownCandidates)
 				? state.pendingDropdownCandidates
 				: []),
 		]
@@ -362,8 +362,7 @@
 		const key = getFieldKey(field)
 		if (!key) return null
 		if (String(state?.activeFieldKey || '').trim() !== key) {
-			state.pendingDropdownOutput = ''
-			state.pendingDropdownCandidates = []
+			clearPendingDropdownState(state)
 		}
 		const value = buildSearchFieldTestValue(session, field, observation)
 		rememberFieldMetadata(state, key, {
@@ -1008,6 +1007,10 @@
 		const pendingCandidates = Array.isArray(state?.pendingDropdownCandidates)
 			? state.pendingDropdownCandidates.map((item) => String(item || '').trim()).filter(Boolean)
 			: []
+		const pendingOwnerKey = String(state?.pendingDropdownFieldKey || '').trim()
+		const pendingOwner = pendingCandidates.length && pendingOwnerKey
+			? getStateFieldSummary(state, fields, pendingOwnerKey)
+			: { index: Number.NaN, label: '' }
 		lines.push([
 			'- search_state',
 			`phase="${escapeAttr(phase)}"`,
@@ -1024,6 +1027,9 @@
 			nextField ? `nextIndex="${Number(nextField.index)}"` : '',
 			nextField ? `nextLabel="${escapeAttr(getFieldLabel(nextField))}"` : '',
 			pendingCandidates.length ? `candidates="${escapeAttr(pendingCandidates.slice(0, 8).join('|'))}"` : '',
+			pendingCandidates.length && pendingOwnerKey ? `candidateOwnerKey="${escapeAttr(pendingOwnerKey)}"` : '',
+			pendingCandidates.length && Number.isFinite(Number(pendingOwner.index)) ? `candidateOwnerIndex="${Number(pendingOwner.index)}"` : '',
+			pendingCandidates.length && pendingOwner.label ? `candidateOwnerLabel="${escapeAttr(pendingOwner.label)}"` : '',
 			'guidance="search workflow is deterministic when possible; model should only continue planning when no local decision was emitted. If allComplete=true output done with success=true and workflow_step=finish_search_fields."',
 		].filter(Boolean).join(' '))
 	}
@@ -1190,6 +1196,7 @@
 		if (!candidates.length) return state
 		return {
 			...state,
+			pendingDropdownFieldKey: getFieldKey(field) || String(state?.pendingDropdownFieldKey || ''),
 			pendingDropdownCandidates: [
 				...(Array.isArray(state?.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []),
 				...candidates,
@@ -1651,8 +1658,7 @@
 			clearPendingDateRangeStart(state, key)
 			state.activeFieldKey = ''
 			state.lastSearchedFieldKey = ''
-			state.pendingDropdownOutput = ''
-			state.pendingDropdownCandidates = []
+			clearPendingDropdownState(state)
 			state.phase = 'select_field'
 			return
 		}
@@ -1663,8 +1669,7 @@
 				markSearchWorkflowFailed(state, getHistoryFailureReason(item, '搜索字段清空失败'))
 				return
 			}
-			state.pendingDropdownOutput = ''
-			state.pendingDropdownCandidates = []
+			clearPendingDropdownState(state)
 			if (String(input.workflow_clear_context || '') === 'baseline') {
 				state.activeFieldKey = ''
 				state.lastSearchedFieldKey = ''
@@ -1702,8 +1707,7 @@
 				clearPendingDateRangeStart(state, activeKey)
 				state.activeFieldKey = activeKey
 				state.phase = 'awaiting_submit'
-				state.pendingDropdownOutput = ''
-				state.pendingDropdownCandidates = []
+				clearPendingDropdownState(state)
 				return
 			}
 			rememberFieldMetadata(state, activeKey, {
@@ -1716,8 +1720,7 @@
 			state.activeFieldKey = activeKey
 			state.phase = 'awaiting_submit'
 			clearPendingDateRangeStart(state, activeKey)
-			state.pendingDropdownOutput = ''
-			state.pendingDropdownCandidates = []
+			clearPendingDropdownState(state)
 			return
 		}
 		if (isSearchFieldAction(action)) {
@@ -1726,8 +1729,7 @@
 			state.activeFieldKey = key
 			if (isDropdownOpenHistory(item)) {
 				incrementDropdownOpenAttempt(state, key)
-				state.pendingDropdownOutput = String(item.output || '')
-				state.pendingDropdownCandidates = getOutcomeVisibleOptions(historyOutcome)
+				setPendingDropdownState(state, key, item.output, getOutcomeVisibleOptions(historyOutcome))
 				clearPendingDateRangeStart(state, key)
 				state.phase = 'awaiting_option'
 				return
@@ -1746,8 +1748,7 @@
 						clearPendingDateRangeStart(state, key)
 						state.activeFieldKey = ''
 						state.lastSearchedFieldKey = ''
-						state.pendingDropdownOutput = ''
-						state.pendingDropdownCandidates = []
+						clearPendingDropdownState(state)
 						state.phase = 'select_field'
 						return
 					}
@@ -1756,8 +1757,7 @@
 						key,
 						getOutcomeRequestedText(historyOutcome) || input.text || input.label || input.value
 					)
-					state.pendingDropdownOutput = String(item.output || '')
-					state.pendingDropdownCandidates = getOutcomeVisibleOptions(historyOutcome)
+					setPendingDropdownState(state, key, item.output, getOutcomeVisibleOptions(historyOutcome))
 					state.phase = 'awaiting_option'
 					return
 				}
@@ -1777,11 +1777,10 @@
 					})
 					state.activeFieldKey = key
 					state.lastSearchedFieldKey = ''
-					state.pendingDropdownOutput = String(item.output || '')
 					const visibleOptions = getOutcomeVisibleOptions(historyOutcome)
-					state.pendingDropdownCandidates = visibleOptions.length
+					setPendingDropdownState(state, key, item.output, visibleOptions.length
 						? visibleOptions
-						: (Array.isArray(state.pendingDropdownCandidates) ? state.pendingDropdownCandidates : [])
+						: (Array.isArray(state.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []))
 					state.phase = 'awaiting_option'
 					return
 				}
@@ -1791,15 +1790,13 @@
 			}
 			state.phase = 'awaiting_submit'
 			clearPendingDateRangeStart(state, key)
-			state.pendingDropdownOutput = ''
-			state.pendingDropdownCandidates = []
+			clearPendingDropdownState(state)
 			return
 		}
 		if (action !== 'click_element_by_index' && action !== 'click') return
 		if (isSearchPanelExpandHistory(item)) {
 			state.phase = 'select_field'
-			state.pendingDropdownOutput = ''
-			state.pendingDropdownCandidates = []
+			clearPendingDropdownState(state)
 			return
 		}
 		if (isResetHistory(item) || isResetFailureHistory(item)) {
@@ -1811,8 +1808,7 @@
 				state.baselineResetDone = true
 				state.activeFieldKey = ''
 				state.lastSearchedFieldKey = ''
-				state.pendingDropdownOutput = ''
-				state.pendingDropdownCandidates = []
+				clearPendingDropdownState(state)
 				state.phase = 'select_field'
 				return
 			}
@@ -1820,8 +1816,7 @@
 			if (completedKey) markSearchFieldCompleted(state, completedKey, { requiresClear: true })
 			state.activeFieldKey = ''
 			state.lastSearchedFieldKey = ''
-			state.pendingDropdownOutput = ''
-			state.pendingDropdownCandidates = []
+			clearPendingDropdownState(state)
 			state.phase = 'select_field'
 			return
 		}
@@ -1949,8 +1944,7 @@
 		}
 		state.activeFieldKey = resetKey
 		state.lastSearchedFieldKey = resetKey
-		state.pendingDropdownOutput = ''
-		state.pendingDropdownCandidates = []
+		clearPendingDropdownState(state)
 		state.phase = input.workflow_baseline_reset ? 'select_field' : 'awaiting_reset'
 	}
 
@@ -2117,8 +2111,7 @@
 		state.phase = 'completed'
 		state.activeFieldKey = ''
 		state.lastSearchedFieldKey = ''
-		state.pendingDropdownOutput = ''
-		state.pendingDropdownCandidates = []
+		clearPendingDropdownState(state)
 		state.terminalSuccess = success
 		state.terminalFieldKey = success ? '' : terminalFieldKey
 		state.terminalReason = getHistoryFailureReason(item, success ? '搜索工作流已完成' : '搜索工作流已终止')
@@ -3142,10 +3135,8 @@
 
 	function collectUsableOptionCandidates(state, field, observation = null) {
 		const key = getFieldKey(field)
-		const activeKey = String(state?.activeFieldKey || '').trim()
-		const pendingBelongsToField = !!key && !!activeKey && key === activeKey
 		const values = [
-			...(pendingBelongsToField && Array.isArray(state?.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []),
+			...(pendingDropdownBelongsToField(state, key) && Array.isArray(state?.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []),
 			...(Array.isArray(field?.optionLabels) ? field.optionLabels : []),
 			...collectObservedOptionCandidatesForField(observation, field),
 		]
@@ -3160,6 +3151,29 @@
 			result.push(text)
 		}
 		return result
+	}
+
+	function pendingDropdownBelongsToField(state, key) {
+		const fieldKey = String(key || '').trim()
+		if (!fieldKey) return false
+		const pendingKey = String(state?.pendingDropdownFieldKey || '').trim()
+		if (pendingKey) return pendingKey === fieldKey
+		const activeKey = String(state?.activeFieldKey || '').trim()
+		return !!activeKey && activeKey === fieldKey
+	}
+
+	function clearPendingDropdownState(state) {
+		if (!state || typeof state !== 'object') return
+		state.pendingDropdownOutput = ''
+		state.pendingDropdownCandidates = []
+		state.pendingDropdownFieldKey = ''
+	}
+
+	function setPendingDropdownState(state, key, output, candidates) {
+		if (!state || typeof state !== 'object') return
+		state.pendingDropdownOutput = String(output || '')
+		state.pendingDropdownCandidates = Array.isArray(candidates) ? candidates : []
+		state.pendingDropdownFieldKey = String(key || '').trim()
 	}
 
 	function collectObservedOptionCandidatesForField(observation, field) {

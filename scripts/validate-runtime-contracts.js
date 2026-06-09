@@ -19057,6 +19057,9 @@ function assertSearchWorkflowBehavior() {
 	if (!workflowSource.includes('NC_BG_SEARCH_WORKFLOW_STATE') || !stateSource.includes('SEARCH_STATE_VERSION') || !stateSource.includes('normalizeSearchStateVersion')) {
 		throw new Error('search workflow should keep persisted search workflow state versioned')
 	}
+	if (!stateSource.includes('pendingDropdownFieldKey') || !workflowSource.includes('pendingDropdownBelongsToField')) {
+		throw new Error('search workflow should persist the owning field key for pending dropdown candidates')
+	}
 	if (!workflowSource.includes('NC_BG_SEARCH_WORKFLOW_HISTORY') || !historySource.includes('isSearchPanelExpandHistory') || !historySource.includes('normalizeOutcomeObject')) {
 		throw new Error('search workflow should route history classification and outcome parsing through search-workflow-history.js')
 	}
@@ -22228,6 +22231,76 @@ function assertSearchWorkflowBehavior() {
 	if (filteredCandidate !== '核心') {
 		throw new Error(`search workflow should ignore global/navigation/dropdown-field labels in option candidates, got ${filteredCandidate}`)
 	}
+	const fieldScopedCandidate = workflow.pickOptionCandidateForField(
+		{
+			activeFieldKey: 'index:4',
+			pendingDropdownFieldKey: 'index:5',
+			pendingDropdownCandidates: ['核心'],
+			fields: {
+				'index:4': { label: '资料等级' },
+				'index:5': { label: '其他字段' },
+			},
+			failedLabelsByKey: {},
+		},
+		{ index: 4, label: '资料等级', fieldType: 'select', role: 'combobox', region: 'content' }
+	)
+	if (fieldScopedCandidate) {
+		throw new Error(`search workflow should not reuse pending dropdown candidates owned by a different field, got ${fieldScopedCandidate}`)
+	}
+	const pendingOwnerHints = workflow.buildSearchWorkflowHintLines(
+		{
+			task: '测试搜索区域每一个搜索项',
+			history: [],
+			workflowState: {
+				search: {
+					version: 6,
+					phase: 'awaiting_option',
+					activeFieldKey: 'index:4',
+					lastSearchedFieldKey: '',
+					fieldOrder: ['index:4'],
+					fields: {
+						'index:4': { index: 4, label: '资料等级', fieldType: 'select' },
+					},
+					completedKeys: [],
+					skippedKeys: [],
+					resetCompletedKeys: [],
+					resultsByKey: {},
+					clearRetryAttemptsByKey: {},
+					evidenceRequestAttemptsByKey: {},
+					failedLabelsByKey: {},
+					dropdownOpenAttemptsByKey: { 'index:4': 1 },
+					pendingDateRangeStartByKey: {},
+					pendingDropdownFieldKey: 'index:4',
+					pendingDropdownCandidates: ['核心', '重要'],
+					pendingDropdownOutput: '已展开下拉框。',
+					baselineResetDone: true,
+					terminalFieldKey: '',
+					failedReason: '',
+					seededFromHistory: true,
+				},
+			},
+		},
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '资料等级' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 4, label: '资料等级', fieldType: 'select', valueState: 'empty', role: 'combobox', selectionControl: 'dropdown', region: 'content' },
+					],
+				},
+			],
+			actions: [{ index: 8, actionIntent: 'search', label: '搜索', region: 'content' }],
+		}
+	).join('\n')
+	for (const expected of ['candidates="核心|重要"', 'candidateOwnerKey="index:4"', 'candidateOwnerIndex="4"', 'candidateOwnerLabel="资料等级"']) {
+		if (!pendingOwnerHints.includes(expected)) {
+			throw new Error(`search state hints should expose pending dropdown candidate ownership ${expected}, got ${pendingOwnerHints}`)
+		}
+	}
 	const nativeOptionHints = workflow.buildSearchWorkflowHintLines(
 		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
 		{
@@ -23077,6 +23150,7 @@ function assertSearchWorkflowBehavior() {
 				failedLabelsByKey: {},
 				dropdownOpenAttemptsByKey: {},
 				pendingDateRangeStartByKey: {},
+				pendingDropdownFieldKey: 'index:7',
 				pendingDropdownCandidates: ['2026-06-02', '2026-06-03'],
 				pendingDropdownOutput: '',
 				baselineResetDone: false,
