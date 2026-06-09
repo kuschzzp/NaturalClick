@@ -3562,6 +3562,32 @@
 		return /^(重置|清空|清除|清理|恢复默认|清空全部|全部清空|重置全部|全部重置|reset|clear|clearall|resetall)$/.test(text)
 	}
 
+	function normalizeActionCueText(value) {
+		return String(value || '')
+			.replace(/([a-z])([A-Z])/g, '$1 $2')
+			.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+			.toLowerCase()
+	}
+
+	function hasEnglishActionCueToken(haystack, tokens) {
+		const text = normalizeActionCueText(haystack)
+		if (!text) return false
+		const tokenList = (Array.isArray(tokens) ? tokens : [])
+			.map((token) => String(token || '').trim().toLowerCase())
+			.filter(Boolean)
+			.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+		if (!tokenList.length) return false
+		return new RegExp(`(?:^|[^a-z0-9])(?:${tokenList.join('|')})(?:$|[^a-z0-9])`, 'i').test(text)
+	}
+
+	function hasCreateActionIntentText(haystack) {
+		const text = String(haystack || '')
+		if (!text) return false
+		if (/新增|新建|创建|添加|增加/.test(text)) return true
+		if (/(?:^|[^a-z0-9])(?:el-icon-plus|icon-plus|fa-plus|plus)(?:$|[^a-z0-9])/i.test(normalizeActionCueText(text))) return true
+		return hasEnglishActionCueToken(text, ['add', 'create', 'new'])
+	}
+
 	function inferActionIntent({ label, text, role, type, element }) {
 		const className = element instanceof HTMLElement ? String(element.className || '') : ''
 		const iconText = getIconClassText(element)
@@ -3588,7 +3614,7 @@
 		if (/立即登录|登录|signin|sign in|login/.test(haystack)) return 'login'
 		if (/忘记密码|找回密码|reset password|forgot/.test(haystack)) return 'reset_password'
 		if (/获取验证码|发送验证码|send code|get code|验证码/.test(haystack)) return 'get_otp'
-		if (/新增|新建|创建|添加|增加|add|create|new|plus|el-icon-plus|icon-plus/.test(haystack)) return 'create'
+		if (hasCreateActionIntentText(haystack)) return 'create'
 		if (isCrudSearchToggle(element) && /搜索|search|el-icon-search|icon-search|fa-search|magnify/.test(haystack)) {
 			return 'open_filter'
 		}

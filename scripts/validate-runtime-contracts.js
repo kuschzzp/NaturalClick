@@ -14097,7 +14097,7 @@ function assertResultSummaryBehavior() {
 	) {
 		throw new Error('live plan/progress items should keep enough explanatory text on screen and export longer details')
 	}
-	for (const expected of ['buildSearchResultSummary', 'buildNavigationResultSummary', 'buildLoginResultSummary', 'buildFieldActionResultSummary', 'collectFieldActionSummaryItems', 'collectExpectedFieldActionCoverage', 'getFieldActionCoverageMode', 'getFieldActionCoverageScope', 'isFieldExplicitlyMentionedInTask', 'getFieldCoverageLabelKeys', 'matchesFieldActionCoverageMode', 'isDropdownCoverageField', 'isSelectableCoverageField', 'getFieldActionSelectedPathValue', 'isFieldSelectionFailureItem', 'formatDiagnosticFieldList', 'mergeFieldActionCoverageItems', 'field_action_coverage_incomplete', 'buildSearchSkippedDetails', 'buildSummaryRemainingDetails', 'buildSearchUntestedNeededEvidence', 'resultsByKey', 'unknown_not_recorded', 'unknown_missing_sample', 'failed_terminal', 'missing_sample_evidence', 'date_candidate_ownership', 'dateCandidateOwnership', 'context_request_limit', 'contextRequestLimit', 'countGenericContextRequestLimit', 'isContextRequestLimitReason', 'user_input_required', 'userInputRequired', 'countGenericUserInputRequired', 'isUserInputRequiredReason', 'verification_recovery_incomplete', 'verificationRecoveryIncomplete', 'countSearchVerificationRecoveryIncomplete', 'countFieldActionVerificationRecoveryIncomplete', 'hasVerificationRecoveryIncompleteDetail', 'task_terminal_failure', 'buildGenericFailedActionIssues', 'collectGenericSensitiveValues', 'isLikelyGenericSecretToken', '失败动作', 'cleanup_unverified', 'navigation_failed', 'navigation_unconfirmed', 'navigation_reached', 'navigation_reveal_attempt', 'navigation_vision_attempt', '导航结果总结', '导航到达未确认', 'login_step_failed', 'login_incomplete', 'login_submitted', '登录结果总结', '登录步骤失败', 'field_action_failed', 'field_selection_failed', 'field_action_recovered_failure', 'enrichResultSummaryWithOperationalDiagnostics', 'collectOperationalResultSignals', 'appendOperationalSignalsToHeadline', '运行诊断', 'model_error', 'timeout', 'planner_correction', 'loop_guard', 'verification_failure', 'next_step_recommendation', 'appendNextStepRecommendations', 'diagnostics', 'issues', 'skippedDetails', 'remainingDetails', '搜索测试结果总结', '输入框测试结果总结', 'isSensitiveSearchSummaryField', 'collectSensitiveSearchSummaryValues', 'collectSensitiveLoginValues', 'maskSensitiveValuesInText', 'maskSensitiveSearchSummaryText']) {
+	for (const expected of ['buildSearchResultSummary', 'buildInformationResultSummary', 'isInformationSeekingSummaryTask', 'missing_final_answer', '信息查询结果总结', 'buildNavigationResultSummary', 'buildLoginResultSummary', 'buildFieldActionResultSummary', 'collectFieldActionSummaryItems', 'collectExpectedFieldActionCoverage', 'getFieldActionCoverageMode', 'getFieldActionCoverageScope', 'isFieldExplicitlyMentionedInTask', 'getFieldCoverageLabelKeys', 'matchesFieldActionCoverageMode', 'isDropdownCoverageField', 'isSelectableCoverageField', 'getFieldActionSelectedPathValue', 'isFieldSelectionFailureItem', 'formatDiagnosticFieldList', 'mergeFieldActionCoverageItems', 'field_action_coverage_incomplete', 'buildSearchSkippedDetails', 'buildSummaryRemainingDetails', 'buildSearchUntestedNeededEvidence', 'resultsByKey', 'unknown_not_recorded', 'unknown_missing_sample', 'failed_terminal', 'missing_sample_evidence', 'date_candidate_ownership', 'dateCandidateOwnership', 'context_request_limit', 'contextRequestLimit', 'countGenericContextRequestLimit', 'isContextRequestLimitReason', 'user_input_required', 'userInputRequired', 'countGenericUserInputRequired', 'isUserInputRequiredReason', 'verification_recovery_incomplete', 'verificationRecoveryIncomplete', 'countSearchVerificationRecoveryIncomplete', 'countFieldActionVerificationRecoveryIncomplete', 'hasVerificationRecoveryIncompleteDetail', 'task_terminal_failure', 'buildGenericFailedActionIssues', 'collectGenericSensitiveValues', 'isLikelyGenericSecretToken', '失败动作', 'cleanup_unverified', 'navigation_failed', 'navigation_unconfirmed', 'navigation_reached', 'navigation_reveal_attempt', 'navigation_vision_attempt', '导航结果总结', '导航到达未确认', 'login_step_failed', 'login_incomplete', 'login_submitted', '登录结果总结', '登录步骤失败', 'field_action_failed', 'field_selection_failed', 'field_action_recovered_failure', 'enrichResultSummaryWithOperationalDiagnostics', 'collectOperationalResultSignals', 'appendOperationalSignalsToHeadline', '运行诊断', 'model_error', 'timeout', 'planner_correction', 'loop_guard', 'verification_failure', 'next_step_recommendation', 'appendNextStepRecommendations', 'diagnostics', 'issues', 'skippedDetails', 'remainingDetails', '搜索测试结果总结', '输入框测试结果总结', 'isSensitiveSearchSummaryField', 'collectSensitiveSearchSummaryValues', 'collectSensitiveLoginValues', 'maskSensitiveValuesInText', 'maskSensitiveSearchSummaryText']) {
 		if (!resultSummary.includes(expected)) {
 			throw new Error(`result summary module should build structured search reports: missing ${expected}`)
 		}
@@ -15474,6 +15474,37 @@ function assertResultSummaryBehavior() {
 		!String(genericNavigationFailureSummary.text || '').includes('建议：优先查看最后失败动作')
 	) {
 		throw new Error(`generic result summaries should include actionable next-step recommendations, got ${JSON.stringify(genericNavigationFailureSummary)}`)
+	}
+	const informationStoppedSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'stopped',
+		activityText: '任务已中止。',
+		task: '用谷歌搜索一下最新的黄金价格，然后帮我总结一下现在是不是买入的最佳时间',
+		latestTask: '用谷歌搜索一下最新的黄金价格，然后帮我总结一下现在是不是买入的最佳时间',
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: { index: 30, target_label: '显示更多 AI 概览' },
+				success: true,
+				output: '点击/切换控件已成功：已点击索引 30。 | 动作结果: state_changed progress=true',
+				outcome: { kind: 'state_changed', progress: true },
+			},
+			{
+				action: 'scroll',
+				input: { direction: 'down' },
+				success: true,
+				output: '已滚动页面：实际移动 500px。 | 动作结果: scrolled progress=true',
+			},
+		],
+	})
+	if (
+		informationStoppedSummary?.type !== 'information' ||
+		informationStoppedSummary.title !== '信息查询结果总结' ||
+		informationStoppedSummary.stats?.missingFinalAnswer !== 1 ||
+		!String(informationStoppedSummary.headline || '').includes('尚未形成最终答复') ||
+		String(informationStoppedSummary.title || '').includes('字段操作') ||
+		!informationStoppedSummary.diagnostics?.some((item) => item.kind === 'missing_final_answer')
+	) {
+		throw new Error(`information-seeking tasks should not be summarized as field actions just because a toggle-like page action ran, got ${JSON.stringify(informationStoppedSummary)}`)
 	}
 	const toggleFieldActionSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'completed',
@@ -25288,6 +25319,27 @@ function assertObserverFieldInferenceStaysStructural() {
 	}
 	if (!observer.includes('function isResetActionIntentText') || !inferActionIntentFn.includes("return 'reset'")) {
 		throw new Error('observer should classify generic clear/reset controls with a reset action intent')
+	}
+	if (!observer.includes('function hasCreateActionIntentText') || !observer.includes('function hasEnglishActionCueToken')) {
+		throw new Error('observer create intent should use bounded action-token helpers instead of bare substring matching')
+	}
+	{
+		const sandbox = {}
+		vm.runInNewContext([
+			extractFunctionSource(observer, 'normalizeActionCueText'),
+			extractFunctionSource(observer, 'hasEnglishActionCueToken'),
+			extractFunctionSource(observer, 'hasCreateActionIntentText'),
+			'globalThis.hasCreateActionIntentText = hasCreateActionIntentText;',
+		].join('\n'), sandbox)
+		const ordinaryNewsLink = '交易黄金的最佳时机 market-news trading-education when-to-trade-xau-usd'
+		if (sandbox.hasCreateActionIntentText(ordinaryNewsLink)) {
+			throw new Error('observer create intent should not match bare new/add/create substrings inside ordinary news/trading links')
+		}
+		for (const createCue of ['新增', '新建', 'btn add', 'data-action=create', 'el-icon-plus']) {
+			if (!sandbox.hasCreateActionIntentText(createCue)) {
+				throw new Error(`observer create intent should still classify explicit create cues: ${createCue}`)
+			}
+		}
 	}
 	if (!extractFunctionSource(observer, 'normalizeCompactText').includes('_\\-')) {
 		throw new Error('observer compact action text should normalize separators in icon/test-id action cues')

@@ -43,6 +43,8 @@
 	function buildResultSummary(session) {
 		const search = buildSearchResultSummary(session)
 		if (search) return enrichResultSummaryWithOperationalDiagnostics(search, session)
+		const information = buildInformationResultSummary(session)
+		if (information) return enrichResultSummaryWithOperationalDiagnostics(information, session)
 		const formTask = buildFormTaskResultSummary(session)
 		if (formTask) return enrichResultSummaryWithOperationalDiagnostics(formTask, session)
 		const fieldActions = buildFieldActionResultSummary(session)
@@ -2815,6 +2817,104 @@
 		const text = String(session?.latestTask || session?.task || '').trim()
 		return /(字段|表单|控件|下拉|选择器|复选|单选|开关|field|form|control|dropdown|select|checkbox|radio|switch)/i.test(text) &&
 			/(测试|验证|检查|每个|每一个|所有|全部|test|verify|check)/i.test(text)
+	}
+
+	function isInformationSeekingSummaryTask(session) {
+		const text = String(session?.latestTask || session?.task || '').trim()
+		if (!text || isFieldActionSummaryTask(session)) return false
+		if (/(测试|验证|检查|每个|每一个|所有|全部|功能是否|是否正常|test|verify|check)/i.test(text)) return false
+		return /(搜索一下|搜一下|查一下|查询一下|谷歌搜索|百度搜索|必应搜索|网上搜索|搜索最新|最新|价格|行情|新闻|资讯|资料|总结|分析|是否|是不是|值得|买入|卖出|search\s+(?:for|the\s+web|google|bing)|look\s*up|research|latest|price|news|summari[sz]e|analy[sz]e|whether|worth)/i.test(text)
+	}
+
+	function buildInformationResultSummary(session) {
+		if (!isInformationSeekingSummaryTask(session)) return null
+		const status = String(session?.status || '').trim()
+		if (!status || status === 'idle') return null
+		const history = Array.isArray(session?.history) ? session.history : []
+		if (status === 'running' && !history.length) return null
+		const failed = history.filter((item) => item?.success === false).length
+		const completed = history.filter((item) => item?.success === true).length
+		const sensitiveValues = collectGenericSensitiveValues(session, history)
+		const finalAnswer = maskSensitiveValuesInText(extractInformationFinalAnswer(history), sensitiveValues)
+		const terminalReason = maskSensitiveValuesInText(extractSessionTerminalReason(session), sensitiveValues)
+		const contextRequestLimit = countGenericContextRequestLimit(history, terminalReason)
+		const verificationRecoveryIncomplete = countGenericVerificationRecoveryIncomplete(history, terminalReason)
+		const userInputRequired = countGenericUserInputRequired(history, terminalReason)
+		const missingFinalAnswer = finalAnswer ? 0 : 1
+		const prefix = status === 'completed' && finalAnswer
+			? '信息查询已完成'
+			: status === 'running'
+				? '信息查询进行中'
+				: status === 'stopped'
+					? '信息查询已中止'
+					: '信息查询未完成'
+		const headline = [
+			prefix,
+			`已执行 ${history.length} 个动作`,
+			completed ? `成功 ${completed} 个` : '',
+			failed ? `失败 ${failed} 个` : '',
+			missingFinalAnswer ? '尚未形成最终答复' : '已形成最终答复',
+			contextRequestLimit ? `上下文补证上限 ${contextRequestLimit} 个` : '',
+			verificationRecoveryIncomplete ? `校验恢复未完成 ${verificationRecoveryIncomplete} 个` : '',
+			userInputRequired ? `需要用户补充 ${userInputRequired} 个` : '',
+		].filter(Boolean).join('，') + '。'
+		const diagnostics = buildGenericDiagnostics(status, terminalReason, {
+			contextRequestLimit,
+			verificationRecoveryIncomplete,
+			userInputRequired,
+		})
+		if (missingFinalAnswer) {
+			diagnostics.unshift({
+				kind: 'missing_final_answer',
+				severity: status === 'completed' ? 'warning' : 'error',
+				count: 1,
+				text: '信息查询任务尚未记录给用户的最终答复，不能只用页面点击或展开动作作为任务结果。',
+			})
+			diagnostics.push({
+				kind: 'next_step_recommendation',
+				severity: 'info',
+				count: 1,
+				text: '建议：先整理已观察到的来源、关键事实和时间点，再用最终答复明确回答用户问题。',
+			})
+		}
+		const actionIssues = buildGenericFailedActionIssues(history, { sensitiveValues })
+		const issue = status === 'completed' ? '' : terminalReason
+		const issueLabel = status === 'stopped' ? '终止原因' : '最后问题'
+		return {
+			type: 'information',
+			title: '信息查询结果总结',
+			status: status === 'completed' && finalAnswer ? 'passed' : status === 'running' ? 'running' : status === 'stopped' ? 'stopped' : userInputRequired ? 'inconclusive' : 'failed',
+			headline,
+			stats: { total: history.length, completed, failed, missingFinalAnswer, contextRequestLimit, verificationRecoveryIncomplete, userInputRequired, terminalFailed: issue && status === 'error' && !userInputRequired ? 1 : 0 },
+			diagnostics,
+			items: finalAnswer ? [{ order: 1, label: '最终答复', status: 'passed', statusLabel: '已记录', summary: finalAnswer }] : [],
+			issues: [
+				missingFinalAnswer ? { label: '最终答复', status: 'unknown', statusLabel: '未形成', summary: '任务过程没有记录面向用户的最终总结或结论。' } : null,
+				issue ? { label: issueLabel, status: status === 'stopped' ? 'stopped' : 'failed', statusLabel: status === 'stopped' ? '已中止' : '失败', summary: issue } : null,
+				...actionIssues,
+			].filter(Boolean),
+			remaining: missingFinalAnswer ? ['最终答复'] : [],
+			reason: issue || (missingFinalAnswer ? '任务过程没有记录面向用户的最终总结或结论。' : ''),
+			text: [
+				headline,
+				finalAnswer ? `最终答复：${finalAnswer}` : '',
+				...diagnostics.map((item) => `诊断：${item.text}`),
+				issue ? `${issueLabel}：${issue}` : '',
+				...actionIssues.map(formatGenericFailedActionIssueLine),
+			].filter(Boolean).join('\n'),
+			generatedAt: Date.now(),
+		}
+	}
+
+	function extractInformationFinalAnswer(history) {
+		for (let index = (Array.isArray(history) ? history.length : 0) - 1; index >= 0; index -= 1) {
+			const item = history[index]
+			if (normalizeActionName(item?.action) !== 'done' || item?.success === false) continue
+			const input = item?.input && typeof item.input === 'object' ? item.input : {}
+			const text = String(input.text || input.summary || item?.output || '').trim()
+			if (text) return text.length > 1200 ? `${text.slice(0, 1197)}...` : text
+		}
+		return ''
 	}
 
 	function buildSearchHeadline(session, status, counts) {
