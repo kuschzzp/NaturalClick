@@ -221,9 +221,27 @@
 					detail: String(error?.message || error || '模型请求失败'),
 					io: error?.io || null,
 				})
-				if (!(round === 0 && isModelTimeoutError(error))) throw error
+				if (!isModelTimeoutError(error)) throw error
+				if (round > 0) {
+					const timeoutRecovery = deriveTimeoutRecoveryWorkflowDecision(session, observation, { tabsSummary, planningContext })
+					if (timeoutRecovery) {
+						notifyPlanningProgress(session, options, {
+							stage: 'timeout_recovery',
+							round: round + 1,
+							text: `第 ${session.step} 步：补充上下文后的模型规划超时，使用受限 workflow 恢复策略...`,
+						})
+						publishWorkflowDecisionProgress(session, options, timeoutRecovery)
+						return timeoutRecovery
+					}
+					notifyPlanningProgress(session, options, {
+						stage: 'timeout_no_recovery',
+						round: round + 1,
+						text: `第 ${session.step} 步：补充上下文后的模型规划超时，且没有可用确定性恢复动作。`,
+					})
+					return buildModelTimeoutFailureDecision(error)
+				}
 				if (useCompactObservation) {
-					const timeoutRecovery = deriveTimeoutRecoveryWorkflowDecision(session, observation, { tabsSummary })
+					const timeoutRecovery = deriveTimeoutRecoveryWorkflowDecision(session, observation, { tabsSummary, planningContext })
 					if (timeoutRecovery) {
 						notifyPlanningProgress(session, options, {
 							stage: 'timeout_recovery',
@@ -292,7 +310,7 @@
 						io: retryError?.io || null,
 					})
 					const timeoutRecovery = isModelTimeoutError(retryError)
-						? deriveTimeoutRecoveryWorkflowDecision(session, observation, { tabsSummary })
+						? deriveTimeoutRecoveryWorkflowDecision(session, observation, { tabsSummary, planningContext })
 						: null
 					if (timeoutRecovery) {
 						notifyPlanningProgress(session, options, {
@@ -1089,6 +1107,8 @@
 		if (formFillProgressText) return formFillProgressText
 		const createTaskProgressText = buildCreateTaskWorkflowProgressText(session, decision, input)
 		if (createTaskProgressText) return createTaskProgressText
+		const informationProgressText = buildInformationWorkflowProgressText(session, decision, input)
+		if (informationProgressText) return informationProgressText
 		const target = [
 			input.target_label,
 			input.workflow_field_label,
@@ -1106,6 +1126,21 @@
 		].filter(Boolean).join('，')
 		const summary = nextGoal || '执行本地确定性动作'
 			return `第 ${session.step} 步：本地 workflow 接管：${summary}${details ? `（${details}）` : ''}。`
+		}
+
+		function buildInformationWorkflowProgressText(session, decision, input) {
+			const workflow = String(input?.workflow || '').trim()
+			const workflowStep = String(input?.workflow_step || '').trim()
+			if (workflow !== 'information-query' && !workflowStep.startsWith('information_query_')) return ''
+			if (workflowStep === 'information_query_alternate_source') {
+				const target = cleanSearchProgressFragment(input.target_label || input.target_title || input.target_url || '')
+				return `第 ${session?.step || 0} 步：当前信息来源缺少可读证据，正在切换到相关来源${target ? `：${target}` : ''}，继续收集证据后再总结。`
+			}
+			if (workflowStep === 'information_query_unreadable_source') {
+				return `第 ${session?.step || 0} 步：信息来源仍不可读且没有可靠替代来源，正在结束并说明证据缺口。`
+			}
+			const nextGoal = cleanSearchProgressFragment(decision?.next_goal || '')
+			return `第 ${session?.step || 0} 步：正在按信息查询流程收集证据${nextGoal ? `：${nextGoal}` : ''}。`
 		}
 
 		function buildFieldTestWorkflowProgressText(session, decision, input) {
@@ -2248,6 +2283,7 @@
 	g.NC_BG_PLANNER_TESTS = {
 		deriveFastPathDecision,
 		derivePreModelWorkflowDecision,
+		derivePostContextWorkflowDecision,
 		deriveTimeoutRecoveryWorkflowDecision,
 		extractTargetUrl,
 		buildWorkflowContextText,

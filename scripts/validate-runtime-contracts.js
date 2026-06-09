@@ -94,6 +94,7 @@ async function main() {
 	await assertPlannerRejectsInvisibleDropdownTextWhenScopedOptionsVisible()
 	await assertPlannerTimeoutRecoveryStopsUnresolvedTaskNavigation()
 	await assertPlannerReactContextRound()
+	await assertPlannerContextRoundTimeoutUsesInformationRecovery()
 	assertPlannerObservationOmissionHints()
 	assertPlannerObservationIncludesCandidateDiagnostics()
 	await assertPlannerRequestContextPaginationBounds()
@@ -215,6 +216,8 @@ async function main() {
 	assertSessionRecoverySkipsSubmitVerificationVisionRecovery()
 	assertSessionTimingExtractedFromSessionEngine()
 	assertSessionLifecycleExtractedFromSessionEngine()
+	assertSidepanelStartsTasksOptimistically()
+	assertSidepanelMarkdownRendering()
 	assertResultSummaryBehavior()
 	assertResultSummaryFailureFallbackPublished()
 	assertPlannerContextExtractedFromPlanner()
@@ -1389,6 +1392,40 @@ function assertPlannerFastPathBehavior() {
 		throw new Error('planner fast path should hand same-origin auth/SPA redirects back to AI planning after opening target URL once')
 	}
 
+	const startupAlreadyOpenedTarget = plannerTests.deriveFastPathDecision(
+		{
+			task: '打开 http://example.test/#/module/account 并完成页面任务。',
+			workflowState: {
+				initialNavigation: {
+					targetUrl: 'http://example.test/#/module/account',
+					openedTabId: 45,
+					source: 'explicit-url',
+				},
+			},
+		},
+		{ url: 'chrome://newtab/' },
+		[]
+	)
+	if (startupAlreadyOpenedTarget !== null) {
+		throw new Error(`planner fast path should not open a duplicate tab after startup already opened the task URL, got ${JSON.stringify(startupAlreadyOpenedTarget)}`)
+	}
+
+	const startupOpenedTargetButOtherTabCurrent = plannerTests.deriveFastPathDecision(
+		{
+			task: '打开 http://example.test/#/module/account 并完成页面任务。',
+			workflowState: {
+				initialNavigation: {
+					targetUrl: 'http://example.test/#/module/account',
+					openedTabId: 46,
+					source: 'explicit-url',
+				},
+			},
+		},
+		{ url: 'chrome://newtab/' },
+		[{ id: 46, url: 'http://example.test/#/module/account', current: false, title: 'Target' }]
+	)
+	assertAction(startupOpenedTargetButOtherTabCurrent, 'switch_to_tab')
+
 	for (const decision of [openTarget, wrongSameOriginPath, switchTarget, wrongSpaHashRoute]) {
 		if (/click|input|select/i.test(String(decision?.action?.name || ''))) {
 			throw new Error(`planner fast path leaked a page action: ${decision.action.name}`)
@@ -1433,9 +1470,10 @@ function assertInitialNavigationBehavior() {
 	}
 	if (
 		!/prepareControllerTab\(controllerTabId,\s*windowId,\s*task\)/.test(background) ||
-		!/deriveInitialAutomationTarget\(taskText\)/.test(background)
+		!/deriveInitialAutomationTarget\(taskText\)/.test(background) ||
+		!/workflowState: preparedTab\.initialNavigation[\s\S]*initialNavigation: preparedTab\.initialNavigation/.test(background)
 	) {
-		throw new Error('startup should derive the initial target from the user task before opening a fallback tab')
+		throw new Error('startup should derive and remember the initial target from the user task before opening a fallback tab')
 	}
 	const taskIntentPrompt = read('naturalclick-extension/background/task-intent.js')
 	if (!taskIntentPrompt.includes('公共搜索任务') || !taskIntentPrompt.includes('未明确给出的应用或后台地址禁止猜测')) {
@@ -2936,6 +2974,99 @@ async function assertPlannerPublishesPlanningProgress() {
 	for (const expected of ['列表详情任务正在先确认第一条记录', '缺少可见列表/表格行证据', '不会直接点击工具栏']) {
 		if (!recordViewAnalysisText.includes(expected)) {
 			throw new Error(`record-view missing list evidence should publish visible progress with ${expected}, got ${JSON.stringify(recordViewEvents)}`)
+		}
+	}
+	const chainedRecordTask = '进入资料页面，查看列表第一条资料详情，然后回到资料列表测试每一个搜索项是否正常'
+	const chainedRecordDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			throw new Error('record-view continuation with a visible return entry should be handled locally without model planning')
+		},
+		observation: {
+			url: 'http://example.test/app#/records/detail',
+			title: '资料详情',
+			forms: [],
+			actions: [
+				{ index: 12, region: 'content', role: 'button', label: '返回列表', rect: { left: 48, top: 96, width: 88, height: 32 } },
+			],
+			tables: [{ region: 'dialog', rows: [['名称', '星火资料']] }],
+			popups: [],
+			elements: [],
+			panels: [],
+			options: [],
+			simplifiedDom: ['<button index="12" region="content">返回列表</button>'],
+			rawCandidates: [],
+		},
+		sessionOverrides: {
+			step: 7,
+			task: chainedRecordTask,
+			latestTask: chainedRecordTask,
+			history: [
+				{
+					action: 'click_element_by_index',
+					success: true,
+					input: { index: 50, target_label: '详情', workflow: 'record-view', workflow_step: 'view_first_record_detail' },
+					output: '已打开第一条记录详情。',
+				},
+			],
+		},
+	})
+	assertAction(chainedRecordDecision.result, 'click_element_by_index')
+	if (
+		chainedRecordDecision.result.action.input.workflow_step !== 'return_after_record_view' ||
+		chainedRecordDecision.result.action.input.index !== 12
+	) {
+		throw new Error(`record-view continuation should return to the list instead of finishing the whole task, got ${JSON.stringify(chainedRecordDecision.result)}`)
+	}
+	const chainedRecordDoneBodies = []
+	const chainedRecordDoneDecision = await runPlannerWithFakeModel({
+		fetchImpl: async (_url, init) => {
+			chainedRecordDoneBodies.push(JSON.parse(init.body))
+			return fakeJsonResponse({
+				evaluation_previous_goal: '详情已经打开。',
+				memory: '已查看详情。',
+				thought: '任务完成。',
+				next_goal: '结束任务',
+				action: { name: 'done', input: { success: true, text: '已打开详情。' } },
+			})
+		},
+		observation: {
+			url: 'http://example.test/app#/records/detail',
+			title: '资料详情',
+			forms: [],
+			actions: [],
+			tables: [{ region: 'dialog', rows: [['名称', '星火资料']] }],
+			popups: [],
+			elements: [],
+			panels: [],
+			options: [],
+			simplifiedDom: ['<section region="content">资料详情</section>'],
+			rawCandidates: [],
+		},
+		sessionOverrides: {
+			step: 7,
+			task: chainedRecordTask,
+			latestTask: chainedRecordTask,
+			history: [
+				{
+					action: 'click_element_by_index',
+					success: true,
+					input: { index: 50, target_label: '详情', workflow: 'record-view', workflow_step: 'view_first_record_detail' },
+					output: '已打开第一条记录详情。',
+				},
+			],
+		},
+	})
+	assertAction(chainedRecordDoneDecision.result, 'done')
+	if (
+		chainedRecordDoneDecision.result.action.input.success !== false ||
+		chainedRecordDoneDecision.result.action.input.workflow_step !== 'return_after_record_view'
+	) {
+		throw new Error(`record-view continuation should block successful done when follow-up work is still pending, got ${JSON.stringify(chainedRecordDoneDecision.result)}`)
+	}
+	const chainedRecordUser = getUserMessageText(chainedRecordDoneBodies[chainedRecordDoneBodies.length - 1])
+	for (const expected of ['detail_opened_continuation_required', '不要 done', '继续后续搜索/查询/筛选/表单任务']) {
+		if (!chainedRecordUser.includes(expected)) {
+			throw new Error(`record-view continuation hint should be model-visible with ${expected}, got: ${chainedRecordUser}`)
 		}
 	}
 
@@ -6225,6 +6356,92 @@ async function assertPlannerReactContextRound() {
 	}
 }
 
+async function assertPlannerContextRoundTimeoutUsesInformationRecovery() {
+	const requestBodies = []
+	const events = []
+	const task = '请根据当前网页总结最新价格趋势，并判断现在是否值得买入。'
+	const observation = {
+		url: 'https://source.example/articles/unreadable',
+		title: '来源文章',
+		forms: [],
+		actions: [],
+		elements: [],
+		options: [],
+		popups: [],
+		panels: [],
+		tables: [],
+		simplifiedDom: [],
+		rawCandidates: [],
+	}
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async (_url, init) => {
+			requestBodies.push(JSON.parse(init.body))
+			if (requestBodies.length === 1) {
+				return fakeJsonResponse({
+					evaluation_previous_goal: '当前来源正文不足。',
+					memory: '需要查看页面主体。',
+					thought: '先补充主体区域上下文。',
+					next_goal: '检查当前来源正文。',
+					action: { name: 'inspect_region', input: { region: 'content', source: 'actions', limit: 20 } },
+				})
+			}
+			const error = new Error('模型流式响应超时')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			history: [
+				{
+					stepIndex: 8,
+					action: 'scroll',
+					input: { direction: 'down', target_label: '当前文章正文' },
+					success: false,
+					output: '页面未发生纵向滚动。',
+					outcome: { kind: 'no_effect', progress: false, reason: 'scroll_no_progress' },
+				},
+				{
+					stepIndex: 9,
+					action: 'click_element_by_index',
+					input: { target_label: '查看原文' },
+					success: true,
+					output: '已点击查看原文，但正文仍未显示。',
+				},
+			],
+		},
+		tabs: [
+			{ id: 1, title: '来源文章', url: 'https://source.example/articles/unreadable' },
+			{ id: 2, title: '市场价格趋势分析与新闻摘要', url: 'https://news.example/market-price-analysis' },
+		],
+		planOptions: {
+			onProgress: (event) => events.push(event),
+		},
+	})
+	assertAction(decision.result, 'switch_to_tab')
+	if (
+		decision.result.action.input.tab_id !== 2 ||
+		decision.result.action.input.workflow !== 'information-query' ||
+		decision.result.action.input.workflow_step !== 'information_query_alternate_source'
+	) {
+		throw new Error(`context-round timeout should switch to a related information source, got ${JSON.stringify(decision.result)}`)
+	}
+	if (requestBodies.length !== 2) {
+		throw new Error(`context-round timeout should happen after one planning context request, got ${requestBodies.length} model calls`)
+	}
+	const firstUser = getUserMessageText(requestBodies[0])
+	if (!firstUser.includes('information_query') || !firstUser.includes('information_source status="unreadable"')) {
+		throw new Error(`information query hints should expose unreadable source guidance, got: ${firstUser}`)
+	}
+	if (!events.some((event) => event.stage === 'timeout_recovery')) {
+		throw new Error(`context-round timeout should publish timeout_recovery progress, got ${JSON.stringify(events)}`)
+	}
+	if (!events.some((event) => event.stage === 'workflow_decision' && String(event.text || '').includes('当前信息来源缺少可读证据') && String(event.text || '').includes('继续收集证据后再总结'))) {
+		throw new Error(`information source recovery should publish user-visible evidence collection progress, got ${JSON.stringify(events)}`)
+	}
+}
+
 function assertPlannerObservationOmissionHints() {
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/planner-context.js', {})
 	const context = sandbox.NC_BG_PLANNER_CONTEXT
@@ -6779,6 +6996,17 @@ async function assertPlannerRejectsDiagnosticOptionCandidateSelection() {
 	if (dateRangeEndValidationError) {
 		throw new Error(`date range picker selection should also pass when the visible real candidate is the range end date, got: ${dateRangeEndValidationError}`)
 	}
+	const dateRangeBoundaryValidationError = validationSandbox.NC_BG_PLANNER_VALIDATION.validateExecutableAction(
+		{ name: 'choose_dropdown_option', input: { index: 27, text: '2026-06-08..2026-06-09', target_label: '创建时间' } },
+		dateObservation,
+		[]
+	)
+	if (
+		!String(dateRangeBoundaryValidationError || '').includes('范围选择请求') ||
+		!String(dateRangeBoundaryValidationError || '').includes('起止边界候选')
+	) {
+		throw new Error(`date range mismatch should guide the planner to select visible owned range boundaries, got: ${dateRangeBoundaryValidationError}`)
+	}
 	const staleControlledDateObservation = {
 		...dateObservation,
 		forms: [
@@ -7051,7 +7279,11 @@ async function assertPlannerRejectsDiagnosticOptionCandidateSelection() {
 		controlledDateObservation,
 		[]
 	)
-	if (!controlledDateValidationError || !controlledDateValidationError.includes('诊断候选不能直接选择')) {
+	if (
+		!controlledDateValidationError ||
+		!controlledDateValidationError.includes('日期/时间诊断候选不能直接选择') ||
+		!controlledDateValidationError.includes('date-option/time-option')
+	) {
 		throw new Error(`date picker fallback must not accept date cells explicitly owned by a different controlled popup, got: ${controlledDateValidationError}`)
 	}
 	const ambiguousDateObservation = buildTestObservation()
@@ -8886,7 +9118,7 @@ async function assertExplicitDropdownToolsAreRegisteredAndRouted() {
 	}
 }
 
-async function runPlannerWithFakeModel({ fetchImpl, observation, sessionOverrides = {}, planOptions = {} }) {
+async function runPlannerWithFakeModel({ fetchImpl, observation, sessionOverrides = {}, planOptions = {}, tabs = null }) {
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/planner.js', {
 		NC_BG_UTILS: {
 			safeJsonParse: (value) => {
@@ -8913,9 +9145,11 @@ async function runPlannerWithFakeModel({ fetchImpl, observation, sessionOverride
 		},
 		chrome: {
 			tabs: {
-				query: async () => [
-					{ id: 1, title: 'Example', url: 'http://example.test/app', current: true },
-				],
+				query: async () => Array.isArray(tabs)
+					? tabs
+					: [
+						{ id: 1, title: 'Example', url: 'http://example.test/app', current: true },
+					],
 			},
 		},
 		fetch: fetchImpl,
@@ -12760,6 +12994,7 @@ function assertSessionPlanItemsExposeSearchWorkflowProgress() {
 		!String(first.title || '').includes('进度 1/3') ||
 		!String(first.title || '').includes('当前：登录账号') ||
 		!String(first.title || '').includes('等待清空') ||
+		!String(first.title || '').includes('下一步：点击清空/重置并复核残留条件') ||
 		!String(first.title || '').includes('测试值：admin') ||
 		!String(first.title || '').includes('依据：列表样本/当前列表已有数据') ||
 		!String(first.title || '').includes('清空：待清空')
@@ -13128,6 +13363,111 @@ function assertSessionLifecycleExtractedFromSessionEngine() {
 	}
 	if (!published.some((message) => message?.payload?.resultSummary?.reason)) {
 		throw new Error(`terminal workflow state should be available to published result summaries, got ${JSON.stringify(published)}`)
+	}
+}
+
+function assertSidepanelStartsTasksOptimistically() {
+	const sidepanel = read('naturalclick-extension/sidepanel.js')
+	const runTaskIndex = sidepanel.indexOf('async function runTask')
+	const localStartIndex = sidepanel.indexOf('prepareLocalTaskStart(task', runTaskIndex)
+	const startMessageIndex = sidepanel.indexOf('type: TYPES.START_TASK', runTaskIndex)
+	if (!(runTaskIndex >= 0 && localStartIndex > runTaskIndex && startMessageIndex > localStartIndex)) {
+		throw new Error('sidepanel should switch to the chat/startup view before awaiting START_TASK')
+	}
+	if (/if \(!currentConfig\) await loadConfig\(\)/.test(sidepanel)) {
+		throw new Error('sidepanel send button should not block visible startup feedback on loadConfig()')
+	}
+	if (!/if \(!currentConfig\) loadConfig\(\)\.catch\(\(\) => \{\}\)[\s\S]*await runTask\(task\)/.test(sidepanel)) {
+		throw new Error('sidepanel should refresh missing config asynchronously before running the task')
+	}
+	const localStart = extractFunctionSource(sidepanel, 'prepareLocalTaskStart')
+	for (const expected of [
+		'ensureConversation(task)',
+		"kind: 'user'",
+		"currentSessionId = ''",
+		'pending: true',
+		"previousSessionId: String(options.previousSessionId || '')",
+		'startIndex: state.traceItems.length',
+		"state.status = 'running'",
+		"state.activityText = '正在连接当前网页并启动 Agent...'",
+		"state.view = { name: 'chat' }",
+		'render()',
+	]) {
+		if (!localStart.includes(expected)) {
+			throw new Error(`sidepanel local task startup should expose immediate chat feedback: missing ${expected}`)
+		}
+	}
+	const ignoreUpdate = extractFunctionSource(sidepanel, 'shouldIgnoreSessionUpdate')
+	for (const expected of ['activeRun?.pending', 'previousSessionId', 'payloadSessionId === previousSessionId']) {
+		if (!ignoreUpdate.includes(expected)) {
+			throw new Error(`sidepanel should ignore stale previous-session updates during pending startup: missing ${expected}`)
+		}
+	}
+	const bindSession = extractFunctionSource(sidepanel, 'bindRuntimeSessionId')
+	for (const expected of ['currentSessionId = id', 'activeRun', 'pending: false']) {
+		if (!bindSession.includes(expected)) {
+			throw new Error(`sidepanel should bind early runtime session updates to the optimistic run: missing ${expected}`)
+		}
+	}
+	const mergeRuntimeTrace = extractFunctionSource(sidepanel, 'mergeTraceItemsFromRuntime')
+	for (const expected of ['shouldKeepLocalPrefix', 'activeRun.startIndex', 'return [...prefix, ...payload.traceItems]']) {
+		if (!mergeRuntimeTrace.includes(expected)) {
+			throw new Error(`sidepanel should preserve local user input when runtime trace arrives: missing ${expected}`)
+		}
+	}
+}
+
+function assertSidepanelMarkdownRendering() {
+	const sidepanel = read('naturalclick-extension/sidepanel.js')
+	const html = read('naturalclick-extension/sidepanel.html')
+	for (const expected of [
+		'appendMarkdownContent(activity, state.activityText',
+		'shouldRenderMarkdownDetail(item)',
+		'appendMarkdownContent(detail, detailText)',
+		'markdownToSafeHtml',
+		'renderMarkdownInline',
+		'sanitizeMarkdownUrl',
+		"node.querySelectorAll('a[href]')",
+	]) {
+		if (!sidepanel.includes(expected)) {
+			throw new Error(`sidepanel should render AI replies as safe markdown: missing ${expected}`)
+		}
+	}
+	for (const expected of [
+		'.sp-markdown',
+		'.sp-markdown strong',
+		'.sp-markdown pre',
+		'.sp-card.activity .sp-markdown',
+	]) {
+		if (!html.includes(expected)) {
+			throw new Error(`sidepanel should style rendered markdown content: missing ${expected}`)
+		}
+	}
+	const sandbox = {}
+	for (const fn of ['escapeHtml', 'sanitizeMarkdownUrl', 'renderMarkdownInline', 'markdownToSafeHtml']) {
+		vm.runInNewContext(`${extractFunctionSource(sidepanel, fn)}\nglobalThis.${fn} = ${fn};`, sandbox)
+	}
+	const rendered = sandbox.markdownToSafeHtml([
+		'## 投资结论',
+		'根据 **实时价格** 和 `风险` 判断：',
+		'- 等待回落',
+		'- 分批观察',
+		'1. 先看支撑位',
+		'2. 再看成交量',
+		'[参考来源](https://example.test/report)',
+		'<script>alert(1)</script>',
+	].join('\n'))
+	for (const expected of ['<h4>投资结论</h4>', '<strong>实时价格</strong>', '<code>风险</code>', '<ul>', '<ol>', '<a href="https://example.test/report">参考来源</a>']) {
+		if (!rendered.includes(expected)) {
+			throw new Error(`markdown renderer should support common answer formatting: missing ${expected}, got ${rendered}`)
+		}
+	}
+	if (rendered.includes('<script>') || !rendered.includes('&lt;script&gt;alert(1)&lt;/script&gt;')) {
+		throw new Error(`markdown renderer must escape raw html, got ${rendered}`)
+	}
+	const unsafe = sandbox.markdownToSafeHtml('[坏链接](javascript:alert(1))')
+	if (unsafe.includes('javascript:') || unsafe.includes('<a ')) {
+		throw new Error(`markdown renderer must reject unsafe link protocols, got ${unsafe}`)
 	}
 }
 
@@ -13883,6 +14223,7 @@ function assertResultSummaryBehavior() {
 				!exportSandbox.formatResultSummaryItemExport({ label: '邮政编码', value: '111111', valueSourceLabel: '字段约束', basis: 'maxLength=6 pattern=\\d{6}' }).includes('取值=字段约束') ||
 				!exportSandbox.formatResultSummaryItemExport({ label: '邮政编码', value: '111111', valueSourceLabel: '字段约束', basis: 'maxLength=6 pattern=\\d{6}' }).includes('依据说明=maxLength=6') ||
 				!exportSandbox.formatResultSummaryItemExport({ label: '搜索条件', value: 'Alpha', sourceTitle: '取值来源', sourceLabel: '列表样本', basis: '当前列表已有数据' }).includes('取值来源=列表样本') ||
+				!exportSandbox.formatResultSummaryItemExport({ label: '搜索条件', testStepSummary: '取值:完成 > 提交:完成 > 结果:完成 > 清空:完成' }).includes('步骤=取值:完成 > 提交:完成 > 结果:完成 > 清空:完成') ||
 				!exportSandbox.formatResultSummaryItemExport({ label: '登录密码', statusLabel: '未测试', neededEvidence: '登录密码 需要形成一次输入/选择测试动作记录。' }).includes('需要补充=登录密码 需要形成一次输入/选择测试动作记录。') ||
 				!exportSandbox.formatResultIssueExport({ label: '登录密码', statusLabel: '未测试', neededEvidence: '登录密码 需要形成一次输入/选择测试动作记录。', summary: '缺少测试动作。' }).includes('需要补充=登录密码 需要形成一次输入/选择测试动作记录。')
 			) {
@@ -13994,6 +14335,13 @@ function assertResultSummaryBehavior() {
 			status: 'inconclusive',
 			headline: '搜索/筛选区域测试未完全确认：共 1 项，安全跳过 1 项。',
 			stats: { total: 1, skipped: 1 },
+			items: [{
+				order: 1,
+				label: '资料名称',
+				status: 'unknown',
+				statusLabel: '未确认：缺少真实样本/候选证据',
+				testStepSummary: '取值:跳过 > 提交:跳过 > 结果:跳过 > 清空:跳过',
+			}],
 			issues: [],
 			skippedDetails: [{
 				label: '资料名称',
@@ -14011,6 +14359,7 @@ function assertResultSummaryBehavior() {
 		if (
 			!renderedText.includes('安全跳过明细') ||
 			!renderedText.includes('资料名称') ||
+			!renderedText.includes('步骤：取值:跳过 > 提交:跳过 > 结果:跳过 > 清空:跳过') ||
 			!renderedText.includes('没有可用列表样本') ||
 			!renderedText.includes('需要补充') ||
 			!renderedText.includes('真实列表样本') ||
@@ -14097,7 +14446,7 @@ function assertResultSummaryBehavior() {
 	) {
 		throw new Error('live plan/progress items should keep enough explanatory text on screen and export longer details')
 	}
-	for (const expected of ['buildSearchResultSummary', 'buildInformationResultSummary', 'isInformationSeekingSummaryTask', 'missing_final_answer', '信息查询结果总结', 'buildNavigationResultSummary', 'buildLoginResultSummary', 'buildFieldActionResultSummary', 'collectFieldActionSummaryItems', 'collectExpectedFieldActionCoverage', 'getFieldActionCoverageMode', 'getFieldActionCoverageScope', 'isFieldExplicitlyMentionedInTask', 'getFieldCoverageLabelKeys', 'matchesFieldActionCoverageMode', 'isDropdownCoverageField', 'isSelectableCoverageField', 'getFieldActionSelectedPathValue', 'isFieldSelectionFailureItem', 'formatDiagnosticFieldList', 'mergeFieldActionCoverageItems', 'field_action_coverage_incomplete', 'buildSearchSkippedDetails', 'buildSummaryRemainingDetails', 'buildSearchUntestedNeededEvidence', 'resultsByKey', 'unknown_not_recorded', 'unknown_missing_sample', 'failed_terminal', 'missing_sample_evidence', 'date_candidate_ownership', 'dateCandidateOwnership', 'context_request_limit', 'contextRequestLimit', 'countGenericContextRequestLimit', 'isContextRequestLimitReason', 'user_input_required', 'userInputRequired', 'countGenericUserInputRequired', 'isUserInputRequiredReason', 'verification_recovery_incomplete', 'verificationRecoveryIncomplete', 'countSearchVerificationRecoveryIncomplete', 'countFieldActionVerificationRecoveryIncomplete', 'hasVerificationRecoveryIncompleteDetail', 'task_terminal_failure', 'buildGenericFailedActionIssues', 'collectGenericSensitiveValues', 'isLikelyGenericSecretToken', '失败动作', 'cleanup_unverified', 'navigation_failed', 'navigation_unconfirmed', 'navigation_reached', 'navigation_reveal_attempt', 'navigation_vision_attempt', '导航结果总结', '导航到达未确认', 'login_step_failed', 'login_incomplete', 'login_submitted', '登录结果总结', '登录步骤失败', 'field_action_failed', 'field_selection_failed', 'field_action_recovered_failure', 'enrichResultSummaryWithOperationalDiagnostics', 'collectOperationalResultSignals', 'appendOperationalSignalsToHeadline', '运行诊断', 'model_error', 'timeout', 'planner_correction', 'loop_guard', 'verification_failure', 'next_step_recommendation', 'appendNextStepRecommendations', 'diagnostics', 'issues', 'skippedDetails', 'remainingDetails', '搜索测试结果总结', '输入框测试结果总结', 'isSensitiveSearchSummaryField', 'collectSensitiveSearchSummaryValues', 'collectSensitiveLoginValues', 'maskSensitiveValuesInText', 'maskSensitiveSearchSummaryText']) {
+	for (const expected of ['buildSearchResultSummary', 'buildInformationResultSummary', 'isInformationSeekingSummaryTask', 'missing_final_answer', '信息查询结果总结', 'buildNavigationResultSummary', 'buildLoginResultSummary', 'buildFieldActionResultSummary', 'collectFieldActionSummaryItems', 'collectExpectedFieldActionCoverage', 'getFieldActionCoverageMode', 'getFieldActionCoverageScope', 'isFieldExplicitlyMentionedInTask', 'getFieldCoverageLabelKeys', 'matchesFieldActionCoverageMode', 'isDropdownCoverageField', 'isSelectableCoverageField', 'getFieldActionSelectedPathValue', 'isFieldSelectionFailureItem', 'formatDiagnosticFieldList', 'mergeFieldActionCoverageItems', 'field_action_coverage_incomplete', 'buildSearchSkippedDetails', 'buildSummaryRemainingDetails', 'buildSearchUntestedNeededEvidence', 'buildSearchSummaryTestSteps', 'testStepSummary', '结果步骤', 'resultsByKey', 'unknown_not_recorded', 'unknown_missing_sample', 'failed_terminal', 'missing_sample_evidence', 'date_candidate_ownership', 'dateCandidateOwnership', 'context_request_limit', 'contextRequestLimit', 'countGenericContextRequestLimit', 'isContextRequestLimitReason', 'user_input_required', 'userInputRequired', 'countGenericUserInputRequired', 'isUserInputRequiredReason', 'verification_recovery_incomplete', 'verificationRecoveryIncomplete', 'countSearchVerificationRecoveryIncomplete', 'countFieldActionVerificationRecoveryIncomplete', 'hasVerificationRecoveryIncompleteDetail', 'task_terminal_failure', 'buildGenericFailedActionIssues', 'collectGenericSensitiveValues', 'isLikelyGenericSecretToken', '失败动作', 'cleanup_unverified', 'navigation_failed', 'navigation_unconfirmed', 'navigation_reached', 'navigation_reveal_attempt', 'navigation_vision_attempt', '导航结果总结', '导航到达未确认', 'login_step_failed', 'login_incomplete', 'login_submitted', '登录结果总结', '登录步骤失败', 'field_action_failed', 'field_selection_failed', 'field_action_recovered_failure', 'enrichResultSummaryWithOperationalDiagnostics', 'collectOperationalResultSignals', 'appendOperationalSignalsToHeadline', '运行诊断', 'model_error', 'timeout', 'planner_correction', 'loop_guard', 'verification_failure', 'next_step_recommendation', 'appendNextStepRecommendations', 'diagnostics', 'issues', 'skippedDetails', 'remainingDetails', '搜索测试结果总结', '输入框测试结果总结', 'isSensitiveSearchSummaryField', 'collectSensitiveSearchSummaryValues', 'collectSensitiveLoginValues', 'maskSensitiveValuesInText', 'maskSensitiveSearchSummaryText']) {
 		if (!resultSummary.includes(expected)) {
 			throw new Error(`result summary module should build structured search reports: missing ${expected}`)
 		}
@@ -14375,8 +14724,11 @@ function assertResultSummaryBehavior() {
 		!String(summary.headline || '').includes('清空完成 1 项') ||
 			summary.items?.[0]?.sourceTitle !== '取值来源' ||
 			summary.items?.[0]?.sourceLabel !== '列表样本' ||
+			summary.items?.[0]?.testStepSummary !== '取值:完成 > 提交:完成 > 结果:完成 > 清空:完成' ||
+			!summary.items?.[0]?.testSteps?.some((item) => item.key === 'cleanup' && item.status === 'passed') ||
 			!String(summary.items?.[0]?.basis || '').includes('当前列表已有数据') ||
 			summary.items?.find((item) => item.label === '等级')?.statusCode !== 'unknown_not_recorded' ||
+			!String(summary.items?.find((item) => item.label === '等级')?.testStepSummary || '').includes('提交:缺失') ||
 			!String(summary.items?.find((item) => item.label === '等级')?.neededEvidence || '').includes('填值') ||
 			!String(summary.items?.find((item) => item.label === '等级')?.neededEvidence || '').includes('提交搜索') ||
 			!String(summary.items?.find((item) => item.label === '等级')?.neededEvidence || '').includes('清空复核') ||
@@ -14385,6 +14737,7 @@ function assertResultSummaryBehavior() {
 			!String(summary.text || '').includes('负责人：通过') ||
 		!String(summary.text || '').includes('取值来源=列表样本') ||
 		!String(summary.text || '').includes('依据说明=当前列表已有数据') ||
+		!String(summary.text || '').includes('结果步骤=取值:完成 > 提交:完成 > 结果:完成 > 清空:完成') ||
 		!String(summary.text || '').includes('清空=已清空') ||
 		!String(summary.text || '').includes('创建时间：失败：结果未包含测试值') ||
 			!String(summary.text || '').includes('等级：未确认：缺少结果记录') ||
@@ -16887,6 +17240,9 @@ function assertPlannerPromptExtractedFromPlanner() {
 		!prompt.includes('ownerIndex 与目标字段 index 一致') ||
 		!prompt.includes('owner=ambiguous') ||
 		!prompt.includes('缺少 ownerIndex') ||
+		!prompt.includes('日期/时间/范围选择器必须保留目标字段 index') ||
+		!prompt.includes('范围值通常要选择起止两个边界') ||
+		!prompt.includes('候选未归属时先 request_options_for/inspect_region/open_dropdown') ||
 		!prompt.includes('empty_context') ||
 		!prompt.includes('按 guidance 更换 source/region/query') ||
 		!prompt.includes('done(false) 说明 reason')
@@ -16919,6 +17275,11 @@ function assertPlannerPromptExtractedFromPlanner() {
 	}
 	if (
 		!prompt.includes('search_data_requirement status="missing_table_samples"') ||
+		!prompt.includes('information_query') ||
+		!prompt.includes('information_evidence') ||
+		!prompt.includes('information_source status="unreadable"') ||
+		!prompt.includes('信息查询/网页问答任务') ||
+		!prompt.includes('done(success=true)') ||
 		!prompt.includes('request_context source=tables region=content') ||
 		!prompt.includes('禁止 input_text 填泛化词') ||
 		!prompt.includes('只有补充上下文仍 empty_context 时才可 done(false)') ||
@@ -18311,6 +18672,65 @@ function assertSearchWorkflowBehavior() {
 	if (!registrySource.includes('deriveSearchWorkflowDecisionIfAllowed') || registrySource.includes('hasUnresolvedTaskNavigationTarget')) {
 		throw new Error('workflow registry should run deterministic search only through the explicit guarded workflow entry')
 	}
+	const chainedIntentSandbox = loadBackgroundModule('naturalclick-extension/background/search-workflow.js', {
+		NC_BG_TASK_INTENT: {
+			getTaskIntent: () => ({ operation: 'view_first_record_detail', operationScope: 'unspecified' }),
+		},
+	})
+	const chainedWorkflow = chainedIntentSandbox.NC_BG_SEARCH_WORKFLOW_TESTS
+	const chainedSearchTask = '进入资料列表，查看第一条记录详情，然后回到列表测试每一个搜索项功能是否正常'
+	const chainedSearchObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '资料名称' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: '搜索/筛选区域',
+				fields: [
+					{ index: 25, label: '资料名称', fieldType: 'text', valueState: 'empty', role: 'textbox', type: 'text', region: 'content' },
+				],
+			},
+		],
+		actions: [
+			{ index: 30, actionIntent: 'search', label: '搜索', region: 'content' },
+			{ index: 31, actionIntent: 'reset', label: '重置', region: 'content' },
+		],
+		tables: [{ headers: ['资料名称'], rows: [['样本资料']] }],
+	}
+	const chainedSearchBeforeReturn = chainedWorkflow.deriveSearchWorkflowDecision(
+		{
+			task: chainedSearchTask,
+			latestTask: chainedSearchTask,
+			history: [
+				{ action: 'click_element_by_index', success: true, input: { workflow: 'record-view', workflow_step: 'view_first_record_detail' } },
+			],
+			workflowState: {},
+		},
+		chainedSearchObservation
+	)
+	if (chainedSearchBeforeReturn !== null) {
+		throw new Error(`search workflow should not take over chained record-detail tasks before returning to the list, got ${JSON.stringify(chainedSearchBeforeReturn)}`)
+	}
+	const chainedSearchAfterReturn = chainedWorkflow.deriveSearchWorkflowDecision(
+		{
+			task: chainedSearchTask,
+			latestTask: chainedSearchTask,
+			history: [
+				{ action: 'click_element_by_index', success: true, input: { workflow: 'record-view', workflow_step: 'view_first_record_detail' } },
+				{ action: 'click_element_by_index', success: true, input: { workflow: 'record-view', workflow_step: 'return_after_record_view' } },
+			],
+			workflowState: {},
+		},
+		chainedSearchObservation
+	)
+	assertAction(chainedSearchAfterReturn, 'input_text')
+	if (
+		chainedSearchAfterReturn.action.input.workflow_step !== 'fill_field' ||
+		chainedSearchAfterReturn.action.input.index !== 25
+	) {
+		throw new Error(`search workflow should resume all-field search testing after record-detail return, got ${JSON.stringify(chainedSearchAfterReturn)}`)
+	}
 	const historyHelpers = sandbox.NC_BG_SEARCH_WORKFLOW_HISTORY_TESTS?.createSearchWorkflowHistoryHelpers?.()
 	if (!historyHelpers) {
 		throw new Error('search workflow history helper tests should be available')
@@ -18374,6 +18794,48 @@ function assertSearchWorkflowBehavior() {
 		output: '已重置搜索条件。',
 	})) {
 		throw new Error('legacy model-planned reset clicks should remain compatible when search context is explicit')
+	}
+	const fieldMetadataState = workflow.createSearchState()
+	fieldMetadataState.fieldOrder = ['index:25']
+	fieldMetadataState.fields = {
+		'index:25': {
+			key: 'index:25',
+			index: 25,
+			label: '字段名称',
+			fieldType: 'text',
+			lastTestValue: '样本值',
+			lastValueSource: 'table_sample',
+		},
+	}
+	fieldMetadataState.activeFieldKey = 'index:25'
+	workflow.applySearchHistoryItemToState(fieldMetadataState, {
+		action: 'click_element_by_index',
+		success: true,
+		input: { index: 44, target_label: '搜 索' },
+		nextGoal: '点击搜索按钮提交查询',
+		output: '已点击索引 44，点击目标=button "搜 索"。',
+	})
+	if (
+		fieldMetadataState.fields['index:25']?.label !== '字段名称' ||
+		fieldMetadataState.fields['index:25']?.index !== 25 ||
+		fieldMetadataState.resultsByKey['index:25']?.label !== '字段名称'
+	) {
+		throw new Error(`search submit buttons must not overwrite active field metadata, got ${JSON.stringify(fieldMetadataState)}`)
+	}
+	workflow.applySearchHistoryItemToState(fieldMetadataState, {
+		action: 'click_element_by_index',
+		success: true,
+		input: { index: 45, target_label: '清 空' },
+		nextGoal: '清空搜索条件并测试下一个字段',
+		output: '已点击索引 45，点击目标=button "清 空"。',
+	})
+	if (
+		fieldMetadataState.fields['index:25']?.label !== '字段名称' ||
+		fieldMetadataState.fields['index:25']?.index !== 25 ||
+		!fieldMetadataState.completedKeys.includes('index:25') ||
+		!fieldMetadataState.resetCompletedKeys.includes('index:25')
+	) {
+		throw new Error(`search reset buttons must complete the active field without corrupting metadata, got ${JSON.stringify(fieldMetadataState)}`)
 	}
 	if (
 		!planner.includes('derivePostContextWorkflowDecision') ||
@@ -24486,7 +24948,7 @@ function assertPlannerWorkflowRegistryBehavior() {
 		},
 	})
 	const plannerTests = sandbox.NC_BG_PLANNER_TESTS
-	if (!plannerTests?.derivePreModelWorkflowDecision || !plannerTests?.deriveTimeoutRecoveryWorkflowDecision || !plannerTests?.resolveDecisionWorkflowName || !plannerTests?.buildWorkflowContextText) {
+	if (!plannerTests?.derivePreModelWorkflowDecision || !plannerTests?.derivePostContextWorkflowDecision || !plannerTests?.deriveTimeoutRecoveryWorkflowDecision || !plannerTests?.resolveDecisionWorkflowName || !plannerTests?.buildWorkflowContextText) {
 		throw new Error('planner should export workflow registry test hooks')
 	}
 	if (!registry.includes('PRE_MODEL_WORKFLOWS') || !registry.includes('TIMEOUT_RECOVERY_WORKFLOWS')) {
@@ -24556,6 +25018,9 @@ function assertPlannerWorkflowRegistryBehavior() {
 	}
 	if (plannerTests.resolveDecisionWorkflowName({ action: { input: { workflow_step: 'open_create_form_timeout_recovery' } } }) !== 'create-task') {
 		throw new Error('workflow registry should route the generic create-entry timeout recovery step')
+	}
+	if (plannerTests.resolveDecisionWorkflowName({ action: { input: { workflow_step: 'information_query_alternate_source' } } }) !== 'information-query') {
+		throw new Error('workflow registry should route generic information-query alternate-source recovery')
 	}
 	if (/deriveFastPathDecision\(session,\s*observation,\s*tabsSummary\)/.test(planner)) {
 		throw new Error('planner should not call fast-path policy directly; route it through background/workflows.js')
@@ -24665,6 +25130,72 @@ function assertPlannerWorkflowRegistryBehavior() {
 	if (!searchHintOnly.includes('search_panel') || !searchHintOnly.includes('triggerIndex="9"')) {
 		throw new Error(`workflow hints should expose collapsed search panel instead of executing it, got ${searchHintOnly}`)
 	}
+	const informationTask = '请根据当前网页总结最新价格趋势，并判断现在是否值得买入。'
+	const sparseInformationObservation = {
+		url: 'https://source.example/articles/unreadable',
+		title: '来源文章',
+		forms: [],
+		actions: [],
+		elements: [],
+		options: [],
+		popups: [],
+		panels: [],
+		tables: [],
+		simplifiedDom: [],
+		rawCandidates: [],
+	}
+	const informationSession = {
+		task: informationTask,
+		latestTask: informationTask,
+		history: [
+			{ action: 'scroll', input: { target_label: '当前文章正文' }, output: '页面未发生纵向滚动。' },
+		],
+	}
+	const informationHint = plannerTests.buildWorkflowContextText(informationSession, sparseInformationObservation)
+	if (
+		!informationHint.includes('information_query') ||
+		!informationHint.includes('sourceState="sparse"') ||
+		!informationHint.includes('information_answer_rule') ||
+		!informationHint.includes('information_source status="unreadable"')
+	) {
+		throw new Error(`information query workflow hints should guide answer-oriented recovery, got ${informationHint}`)
+	}
+	const searchTestHint = plannerTests.buildWorkflowContextText(
+		{ task: '测试当前页面每一个搜索功能是否正常', history: [] },
+		{
+			title: '列表页',
+			panels: [{ kind: 'filter', state: 'expanded', label: '查询条件' }],
+			forms: [],
+			actions: [],
+			elements: [],
+			url: 'http://example.test/app',
+		}
+	)
+	if (searchTestHint.includes('information_query')) {
+		throw new Error(`search/filter testing tasks should not be treated as information query tasks, got ${searchTestHint}`)
+	}
+	const informationRecovery = plannerTests.derivePostContextWorkflowDecision(
+		informationSession,
+		informationHint,
+		[
+			{ name: 'inspect_region', input: { region: 'content' }, text: '<context_response seq="1" request="inspect_region"><region_detail region="content">(empty)</region_detail></context_response>' },
+			{ name: 'request_context', input: { source: 'actions', region: 'content' }, text: '<context_response seq="2" request="request_context">(empty)</context_response>' },
+		],
+		{
+			observation: sparseInformationObservation,
+			tabsSummary: [
+				{ id: 1, current: true, title: '来源文章', url: 'https://source.example/articles/unreadable' },
+				{ id: 2, current: false, title: '市场价格趋势分析与新闻摘要', url: 'https://news.example/market-price-analysis' },
+			],
+		}
+	)
+	if (
+		informationRecovery?.action?.name !== 'switch_to_tab' ||
+		informationRecovery.action.input.workflow !== 'information-query' ||
+		informationRecovery.action.input.workflow_step !== 'information_query_alternate_source'
+	) {
+		throw new Error(`post-context information recovery should switch to a related open source, got ${JSON.stringify(informationRecovery)}`)
+	}
 	const navigationBeforeSearchDecision = plannerTests.derivePreModelWorkflowDecision(
 		{ task: '找到账户中心部分，找出搜索区域，测试每一个搜索项功能是否正常', history: [] },
 		{
@@ -24705,6 +25236,73 @@ function assertPlannerWorkflowRegistryBehavior() {
 	)
 	if (wrongPageSearchDecision !== null) {
 		throw new Error(`inactive search workflow should not test a generic search area before the named task module is reached: ${JSON.stringify(wrongPageSearchDecision)}`)
+	}
+	const chainedSearchTask = '进入资料列表，查看第一条记录详情，然后回到列表，测试每一个搜索项功能是否正常'
+	const chainedContinuationSession = {
+		task: chainedSearchTask,
+		latestTask: chainedSearchTask,
+		history: [
+			{ action: 'click_element_by_index', success: true, input: { workflow: 'record-view', workflow_step: 'view_first_record_detail', target_label: '详情' } },
+			{ action: 'click_element_by_index', success: true, input: { workflow: 'record-view', workflow_step: 'return_after_record_view', target_label: '关闭' } },
+		],
+		workflowState: {
+			taskIntent: {
+				status: 'ready',
+				version: 13,
+				taskText: chainedSearchTask,
+				intent: {
+					operation: 'view_first_record_detail',
+					operationScope: 'unspecified',
+					navigationTargets: [
+						{ raw: '资料列表', canonical: '资料列表', aliases: ['资料列表'], entity: '资料列表' },
+					],
+					forbiddenNavigationTargets: [],
+				},
+			},
+			navigation: { attemptedKeys: ['资料列表'] },
+		},
+	}
+	const chainedContinuationObservation = {
+		title: '列表页',
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '资料名称,资料编号' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: '搜索/筛选区域',
+				fields: [
+					{ index: 25, label: '资料名称', fieldType: 'text', valueState: 'filled: 旧值', role: 'textbox', type: 'text', region: 'content' },
+					{ index: 26, label: '资料编号', fieldType: 'text', valueState: 'empty', role: 'textbox', type: 'text', region: 'content' },
+				],
+			},
+		],
+		actions: [
+			{ index: 30, actionIntent: 'search', label: '搜索', region: 'content' },
+			{ index: 31, actionIntent: 'reset', label: '重置', region: 'content' },
+		],
+		tables: [{ headers: ['资料名称', '资料编号'], rows: [['样本资料', 'R-001']] }],
+		url: 'http://example.test/app#/list',
+	}
+	const chainedContinuationDecision = plannerTests.derivePreModelWorkflowDecision(
+		chainedContinuationSession,
+		chainedContinuationObservation,
+		{ tabsSummary: [{ id: 1, current: true, url: 'http://example.test/app#/list' }] }
+	)
+	assertAction(chainedContinuationDecision, 'click_element_by_index')
+	if (
+		chainedContinuationDecision.action.input.workflow !== 'search-fields' ||
+		chainedContinuationDecision.action.input.workflow_step !== 'reset_filters' ||
+		chainedContinuationDecision.action.input.index !== 31
+	) {
+		throw new Error(`record-detail continuations should resume deterministic search and clear residual filters instead of repeating navigation/model planning, got ${JSON.stringify(chainedContinuationDecision)}`)
+	}
+	const chainedContinuationHint = plannerTests.buildWorkflowContextText(chainedContinuationSession, chainedContinuationObservation)
+	if (
+		!chainedContinuationHint.includes('status="deferred"') ||
+		chainedContinuationHint.includes('named task target is unresolved; do not test generic search/filter areas')
+	) {
+		throw new Error(`record-detail continuation hints should not keep blocking search with stale navigation targets, got ${chainedContinuationHint}`)
 	}
 	const wrongPageTimeoutDecision = plannerTests.deriveTimeoutRecoveryWorkflowDecision(
 		{ task: '找到账户中心部分，找出搜索区域，测试每一个搜索项功能是否正常', history: [] },

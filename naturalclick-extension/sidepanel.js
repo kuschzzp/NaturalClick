@@ -206,7 +206,7 @@
 			}
 			const task = String(el.taskInput.value || '').trim()
 			if (!task) return
-			if (!currentConfig) await loadConfig()
+			if (!currentConfig) loadConfig().catch(() => {})
 			await runTask(task)
 		})
 
@@ -369,8 +369,8 @@
 
 			if (message.type === TYPES.SESSION_UPDATE) {
 				const payload = message.payload || {}
-				if (currentSessionId && payload.sessionId && payload.sessionId !== currentSessionId) return
-				if (payload.sessionId) currentSessionId = payload.sessionId
+				if (shouldIgnoreSessionUpdate(payload)) return
+				if (payload.sessionId) bindRuntimeSessionId(payload.sessionId)
 
 				const prevStatus = state.status
 				const nextTraceItems = mergeTraceItemsFromRuntime(payload)
@@ -431,21 +431,19 @@
 	async function runTask(task, options = {}) {
 		if (taskStarting || taskStopping || state.status === 'running') return
 		taskStarting = true
-		state.activityText = '正在启动任务...'
-		state.resultSummary = null
-		render()
-
 		const startNewConversation = !!options.newConversation
-		try {
-			if (startNewConversation) {
-				resetConversationState()
-				state.traceItems = []
-			}
+		const previousSessionId = currentSessionId
+		const runToken = createLocalId('run')
+		if (startNewConversation) {
+			resetConversationState()
+			state.traceItems = []
+		}
+		prepareLocalTaskStart(task, { runToken, previousSessionId })
 
+		try {
 			const active = await getActiveTabContext()
 			if (!active) {
-				state.status = 'error'
-				state.activityText = '无法识别当前活动标签页。请先切换到网页标签页。'
+				failLocalTaskStart(runToken, '无法识别当前活动标签页。请先切换到网页标签页。')
 				return
 			}
 
@@ -459,42 +457,77 @@
 
 			if (!response?.ok) {
 				if (response?.stopped) {
-					state.status = 'stopped'
-					state.activityText = response?.error || '任务启动已中止。'
+					failLocalTaskStart(runToken, response?.error || '任务启动已中止。', 'stopped')
 				} else {
-					state.status = 'error'
-					state.activityText = response?.error || '任务启动失败。'
+					failLocalTaskStart(runToken, response?.error || '任务启动失败。')
 				}
 				return
 			}
 
-			ensureConversation(task)
-			currentConversationTurnCount += 1
-			state.traceItems.push({
-				id: createLocalId('u'),
-				title: `用户输入 #${currentConversationTurnCount}`,
-				detail: task,
-				kind: 'user',
-			})
-
-			currentSessionId = response.sessionId
+			bindRuntimeSessionId(response.sessionId)
 			lastPersistedSessionId = ''
-			activeRun = {
-				sessionId: response.sessionId,
-				startIndex: state.traceItems.length,
-				task,
-			}
-			state.status = 'running'
-			state.currentTask = task
-			state.activityText = '任务已启动，等待 Agent 更新...'
-			state.planItems = [{ id: 'boot', title: '准备执行任务', status: 'running' }]
-			el.taskInput.value = ''
-			autoResizeTaskInput()
-			state.view = { name: 'chat' }
+			markLocalTaskStarted(runToken, response)
 		} finally {
 			taskStarting = false
 			render()
 		}
+	}
+
+	function prepareLocalTaskStart(task, options = {}) {
+		ensureConversation(task)
+		currentConversationTurnCount += 1
+		state.traceItems.push({
+			id: createLocalId('u'),
+			title: `用户输入 #${currentConversationTurnCount}`,
+			detail: task,
+			kind: 'user',
+		})
+
+		currentSessionId = ''
+		lastPersistedSessionId = ''
+		activeRun = {
+			sessionId: '',
+			pending: true,
+			runToken: options.runToken,
+			previousSessionId: String(options.previousSessionId || ''),
+			startIndex: state.traceItems.length,
+			task,
+		}
+		state.status = 'running'
+		state.currentTask = task
+		state.activityText = '正在连接当前网页并启动 Agent...'
+		state.planItems = [{ id: 'boot', title: '连接目标页面并启动 Agent', status: 'running' }]
+		state.resultSummary = null
+		el.taskInput.value = ''
+		autoResizeTaskInput()
+		state.view = { name: 'chat' }
+		render()
+	}
+
+	function failLocalTaskStart(runToken, message, status = 'error') {
+		if (activeRun?.runToken !== runToken) return
+		state.status = status
+		state.activityText = message || (status === 'stopped' ? '任务启动已中止。' : '任务启动失败。')
+		state.planItems = updateBootPlanItem(state.planItems, state.activityText, status === 'stopped' ? 'stopped' : 'error')
+		currentSessionId = ''
+		activeRun = null
+	}
+
+	function markLocalTaskStarted(runToken, response) {
+		if (activeRun?.runToken !== runToken) return
+		const bootExists = (Array.isArray(state.planItems) ? state.planItems : []).some((item) => item?.id === 'boot')
+		if (!bootExists) return
+		const notice = String(response?.notice || '').trim()
+		state.activityText = notice ? `任务已启动：${notice}` : '任务已启动，等待 Agent 更新...'
+		state.planItems = updateBootPlanItem(state.planItems, 'Agent 已启动，等待页面观察', 'running')
+	}
+
+	function updateBootPlanItem(planItems, title, status) {
+		const items = Array.isArray(planItems) ? planItems : []
+		if (!items.some((item) => item?.id === 'boot')) {
+			return [{ id: 'boot', title, status }]
+		}
+		return items.map((item) => (item?.id === 'boot' ? { ...item, title, status } : item))
 	}
 
 	async function stopTask() {
@@ -672,7 +705,7 @@
 
 		const activity = document.createElement('div')
 		activity.className = 'sp-card activity'
-		activity.textContent = state.activityText || '等待任务...'
+		appendMarkdownContent(activity, state.activityText || '等待任务...')
 		el.chatStream.appendChild(activity)
 		el.chatStream.scrollTop = el.chatStream.scrollHeight
 		renderComposer()
@@ -699,7 +732,12 @@
 		title.textContent = String(item?.title || '执行步骤')
 		const detail = document.createElement('div')
 		detail.className = 'sp-card-detail'
-		detail.textContent = String(item?.detail || '')
+		const detailText = String(item?.detail || '')
+		if (shouldRenderMarkdownDetail(item)) {
+			appendMarkdownContent(detail, detailText)
+		} else {
+			detail.textContent = detailText
+		}
 		head.appendChild(dot)
 		titleWrap.appendChild(type)
 		titleWrap.appendChild(title)
@@ -726,8 +764,8 @@
 		}
 
 		const shouldShowDetail =
-			detail.textContent &&
-			String(item?.action?.output || '').trim() !== String(detail.textContent || '').trim()
+			detailText &&
+			String(item?.action?.output || '').trim() !== String(detailText || '').trim()
 		if (shouldShowDetail) {
 			card.appendChild(detail)
 		}
@@ -738,6 +776,145 @@
 			card.appendChild(renderModelIO(item.io))
 		}
 		return card
+	}
+
+	function shouldRenderMarkdownDetail(item) {
+		return item?.kind !== 'user'
+	}
+
+	function appendMarkdownContent(node, text) {
+		node.classList.add('sp-markdown')
+		node.innerHTML = markdownToSafeHtml(text)
+		for (const link of node.querySelectorAll('a[href]')) {
+			link.setAttribute('target', '_blank')
+			link.setAttribute('rel', 'noopener noreferrer')
+		}
+	}
+
+	function markdownToSafeHtml(text) {
+		const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n')
+		const out = []
+		let paragraph = []
+		let list = null
+		let quote = []
+		let code = null
+
+		const flushParagraph = () => {
+			if (!paragraph.length) return
+			out.push(`<p>${renderMarkdownInline(paragraph.join(' '))}</p>`)
+			paragraph = []
+		}
+		const flushList = () => {
+			if (!list) return
+			const tag = list.ordered ? 'ol' : 'ul'
+			out.push(`<${tag}>${list.items.map((item) => `<li>${renderMarkdownInline(item)}</li>`).join('')}</${tag}>`)
+			list = null
+		}
+		const flushQuote = () => {
+			if (!quote.length) return
+			out.push(`<blockquote>${quote.map((item) => `<p>${renderMarkdownInline(item)}</p>`).join('')}</blockquote>`)
+			quote = []
+		}
+		const flushCode = () => {
+			if (!code) return
+			out.push(`<pre><code>${escapeHtml(code.lines.join('\n'))}</code></pre>`)
+			code = null
+		}
+		const flushBlocks = () => {
+			flushParagraph()
+			flushList()
+			flushQuote()
+		}
+
+		for (const rawLine of lines) {
+			const line = String(rawLine || '')
+			const fence = line.match(/^\s*```/)
+			if (code) {
+				if (fence) {
+					flushCode()
+				} else {
+					code.lines.push(line)
+				}
+				continue
+			}
+			if (fence) {
+				flushBlocks()
+				code = { lines: [] }
+				continue
+			}
+			if (!line.trim()) {
+				flushBlocks()
+				continue
+			}
+
+			const heading = line.match(/^\s{0,3}(#{1,4})\s+(.+)$/)
+			if (heading) {
+				flushBlocks()
+				const level = Math.min(4, heading[1].length + 2)
+				out.push(`<h${level}>${renderMarkdownInline(heading[2].trim())}</h${level}>`)
+				continue
+			}
+
+			if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+				flushBlocks()
+				out.push('<hr>')
+				continue
+			}
+
+			const quoteMatch = line.match(/^\s{0,3}>\s?(.*)$/)
+			if (quoteMatch) {
+				flushParagraph()
+				flushList()
+				quote.push(quoteMatch[1])
+				continue
+			}
+
+			const unordered = line.match(/^\s{0,3}[-*+]\s+(.+)$/)
+			const ordered = line.match(/^\s{0,3}\d+[.)]\s+(.+)$/)
+			if (unordered || ordered) {
+				flushParagraph()
+				flushQuote()
+				const orderedList = !!ordered
+				if (!list || list.ordered !== orderedList) flushList()
+				if (!list) list = { ordered: orderedList, items: [] }
+				list.items.push((unordered || ordered)[1])
+				continue
+			}
+
+			flushList()
+			flushQuote()
+			paragraph.push(line.trim())
+		}
+		flushBlocks()
+		flushCode()
+		return out.join('') || '<p></p>'
+	}
+
+	function renderMarkdownInline(text) {
+		const codeTokens = []
+		let html = escapeHtml(text)
+		html = html.replace(/`([^`\n]+)`/g, (_, code) => {
+			const token = `@@NC_CODE_${codeTokens.length}@@`
+			codeTokens.push(`<code>${code}</code>`)
+			return token
+		})
+		html = html.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+			const safeUrl = sanitizeMarkdownUrl(url)
+			if (!safeUrl) return label
+			return `<a href="${escapeHtml(safeUrl)}">${label}</a>`
+		})
+		html = html
+			.replace(/\*\*([^*\n][\s\S]*?[^*\n]?)\*\*/g, '<strong>$1</strong>')
+			.replace(/__([^_\n][\s\S]*?[^_\n]?)__/g, '<strong>$1</strong>')
+			.replace(/(^|[\s([，。；：、])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+			.replace(/(^|[\s([，。；：、])_([^_\n]+)_/g, '$1<em>$2</em>')
+		return html.replace(/@@NC_CODE_(\d+)@@/g, (_, index) => codeTokens[Number(index)] || '')
+	}
+
+	function sanitizeMarkdownUrl(url) {
+		const value = String(url || '').trim()
+		if (/^https?:\/\//i.test(value) || /^mailto:/i.test(value)) return value
+		return ''
 	}
 
 	function normalizeModelReasoning(io) {
@@ -1122,6 +1299,7 @@
 				item?.sourceLabel ? `${item?.sourceTitle || '依据'}：${item.sourceLabel}` : '',
 				item?.valueSourceLabel ? `取值：${item.valueSourceLabel}` : '',
 				item?.basis ? `依据说明：${item.basis}` : '',
+				item?.testStepSummary ? `步骤：${item.testStepSummary}` : '',
 				item?.clearStatusLabel ? `清空：${item.clearStatusLabel}` : '',
 				item?.neededEvidence ? `需要补充：${item.neededEvidence}` : '',
 			].filter(Boolean).join(' · ')
@@ -1567,6 +1745,7 @@
 				item?.sourceLabel ? `${item?.sourceTitle || '依据'}=${item.sourceLabel}` : '',
 				item?.valueSourceLabel ? `取值=${item.valueSourceLabel}` : '',
 				item?.basis ? `依据说明=${item.basis}` : '',
+				item?.testStepSummary ? `步骤=${item.testStepSummary}` : '',
 				item?.clearStatusLabel ? `清空=${item.clearStatusLabel}` : '',
 				item?.neededEvidence ? `需要补充=${item.neededEvidence}` : '',
 			item?.attempts ? `尝试=${item.attempts}` : '',
@@ -3026,9 +3205,35 @@
 		return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 	}
 
+	function shouldIgnoreSessionUpdate(payload) {
+		const payloadSessionId = String(payload?.sessionId || '')
+		if (!payloadSessionId) return false
+		if (activeRun?.pending && !activeRun.sessionId) {
+			const previousSessionId = String(activeRun.previousSessionId || '')
+			return !!previousSessionId && payloadSessionId === previousSessionId
+		}
+		return !!(currentSessionId && payloadSessionId !== currentSessionId)
+	}
+
+	function bindRuntimeSessionId(sessionId) {
+		const id = String(sessionId || '')
+		if (!id) return
+		currentSessionId = id
+		if (activeRun && (!activeRun.sessionId || activeRun.sessionId === id)) {
+			activeRun = {
+				...activeRun,
+				sessionId: id,
+				pending: false,
+			}
+		}
+	}
+
 	function mergeTraceItemsFromRuntime(payload) {
 		if (!Array.isArray(payload?.traceItems)) return state.traceItems
-		if (activeRun && payload?.sessionId && payload.sessionId === activeRun.sessionId) {
+		const payloadSessionId = String(payload?.sessionId || '')
+		const shouldKeepLocalPrefix =
+			activeRun && (!activeRun.sessionId || !payloadSessionId || payloadSessionId === activeRun.sessionId)
+		if (shouldKeepLocalPrefix) {
 			const prefix = state.traceItems.slice(0, Math.max(0, activeRun.startIndex))
 			return [...prefix, ...payload.traceItems]
 		}

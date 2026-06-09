@@ -498,6 +498,7 @@
 			clear_field: '清空搜索字段',
 			skip_field: '安全跳过搜索字段',
 			view_first_record_detail: '查看列表记录详情',
+			return_after_record_view: '返回列表继续后续任务',
 			fill_form_field_timeout_recovery: '填写表单字段',
 			open_form_dropdown_timeout_recovery: '展开表单选择字段',
 			choose_form_dropdown_timeout_recovery: '选择表单候选',

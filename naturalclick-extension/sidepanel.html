@@ -273,6 +273,84 @@
 				line-height: 1.45;
 				word-break: break-word;
 			}
+			.sp-markdown {
+				word-break: break-word;
+			}
+			.sp-markdown p,
+			.sp-markdown ul,
+			.sp-markdown ol,
+			.sp-markdown blockquote,
+			.sp-markdown pre,
+			.sp-markdown h3,
+			.sp-markdown h4,
+			.sp-markdown h5,
+			.sp-markdown h6 {
+				margin: 0 0 7px;
+			}
+			.sp-markdown > :last-child {
+				margin-bottom: 0;
+			}
+			.sp-markdown ul,
+			.sp-markdown ol {
+				padding-left: 18px;
+			}
+			.sp-markdown li + li {
+				margin-top: 3px;
+			}
+			.sp-markdown strong {
+				font-weight: 700;
+				color: #263644;
+			}
+			.sp-markdown em {
+				font-style: italic;
+			}
+			.sp-markdown code {
+				padding: 1px 4px;
+				border-radius: 4px;
+				background: rgba(60, 89, 108, 0.1);
+				font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+				font-size: 0.92em;
+			}
+			.sp-markdown pre {
+				overflow: auto;
+				padding: 8px;
+				border-radius: 7px;
+				background: #101923;
+				color: #edf5f2;
+			}
+			.sp-markdown pre code {
+				padding: 0;
+				background: transparent;
+				color: inherit;
+				white-space: pre;
+			}
+			.sp-markdown blockquote {
+				padding-left: 9px;
+				border-left: 3px solid #cad7df;
+				color: #637582;
+			}
+			.sp-markdown a {
+				color: #2276d2;
+				text-decoration: none;
+			}
+			.sp-markdown a:hover {
+				text-decoration: underline;
+			}
+			.sp-card.activity .sp-markdown {
+				color: inherit;
+			}
+			.sp-card.activity .sp-markdown strong,
+			.sp-card.activity .sp-markdown a {
+				color: #ffffff;
+			}
+			.sp-card.activity .sp-markdown code {
+				background: rgba(255, 255, 255, 0.14);
+				color: #ffffff;
+			}
+			.sp-card.activity .sp-markdown blockquote {
+				border-left-color: rgba(255, 255, 255, 0.35);
+				color: #d9e7e3;
+			}
 			.sp-card.error {
 				border-color: rgba(182, 95, 78, 0.36);
 				background: #f7efec;

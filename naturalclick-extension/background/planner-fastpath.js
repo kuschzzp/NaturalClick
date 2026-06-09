@@ -3,9 +3,6 @@
 		const taskText = String(session?.latestTask || session?.task || '')
 		const targetUrl = extractTargetUrl(taskText)
 		if (!targetUrl || isTaskTargetLocation(observation?.url, targetUrl)) return null
-		if (isSameUrlFamily(observation?.url, targetUrl) && hasRecentTargetUrlNavigation(session, targetUrl)) {
-			return null
-		}
 		const targetTab = findTargetTab(tabsSummary, targetUrl)
 		if (targetTab && targetTab.id && !targetTab.current) {
 			return buildFallbackDecision(
@@ -19,6 +16,9 @@
 					reason: '切换到任务目标页面',
 				}
 			)
+		}
+		if (hasRecentTargetUrlNavigation(session, targetUrl)) {
+			return null
 		}
 		if (!targetTab) {
 			return buildFallbackDecision(
@@ -40,11 +40,18 @@
 	}
 
 	function hasRecentTargetUrlNavigation(session, targetUrl) {
+		if (hasStartupTargetUrlNavigation(session, targetUrl)) return true
 		const recent = Array.isArray(session?.history) ? session.history.slice(-6) : []
 		return recent.some((item) => {
 			if (!item?.success || String(item.action || '') !== 'open_new_tab') return false
 			return isSameTaskUrl(item?.input?.url, targetUrl)
 		})
+	}
+
+	function hasStartupTargetUrlNavigation(session, targetUrl) {
+		const startup = session?.workflowState?.initialNavigation
+		if (!startup || typeof startup !== 'object') return false
+		return isSameTaskUrl(startup.targetUrl, targetUrl)
 	}
 
 	function isSameTaskUrl(a, b) {

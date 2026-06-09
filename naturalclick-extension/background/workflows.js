@@ -25,6 +25,7 @@
 		navigate_to_task_target: 'task-navigation',
 		reveal_navigation_options: 'task-navigation',
 		view_first_record_detail: 'record-view',
+		return_after_record_view: 'record-view',
 		finish_record_view: 'record-view',
 		fill_form_field_timeout_recovery: 'form-fill',
 		open_form_dropdown_timeout_recovery: 'form-fill',
@@ -35,6 +36,8 @@
 		resolve_duplicate_field_conflict: 'form-fill',
 		resolve_field_validation_error: 'form-fill',
 		open_create_form_timeout_recovery: 'create-task',
+		information_query_alternate_source: 'information-query',
+		information_query_unreadable_source: 'information-query',
 	}
 
 	const PRE_MODEL_WORKFLOWS = [
@@ -101,6 +104,11 @@
 			run: (session, observation) =>
 				deriveCreateEntryTimeoutDecision(session, observation),
 		},
+		{
+			name: 'information-query',
+			run: (session, observation, context) =>
+				deriveInformationQueryRecoveryDecision(session, observation, context),
+		},
 	]
 
 	function derivePreModelWorkflowDecision(session, observation, context) {
@@ -116,13 +124,16 @@
 	}
 
 	function derivePostModelWorkflowDecision(session, decision, context = {}) {
+		const recordViewRecovery = deriveRecordViewPostModelDecision(session, decision, context)
+		if (recordViewRecovery) return annotateWorkflowDecision(recordViewRecovery, 'record-view')
 		if (typeof searchWorkflow.deriveSearchPostModelDecision !== 'function') return null
 		const recovered = searchWorkflow.deriveSearchPostModelDecision(session, decision, context)
 		return recovered ? annotateWorkflowDecision(recovered, 'search-fields') : null
 	}
 
 	function derivePostContextWorkflowDecision(session, workflowContextText, planningContext, context = {}) {
-		void context
+		const informationRecovery = deriveInformationQueryPostContextDecision(session, workflowContextText, planningContext, context)
+		if (informationRecovery) return annotateWorkflowDecision(informationRecovery, 'information-query')
 		if (typeof searchWorkflow.deriveSearchPostContextDecision !== 'function') return null
 		const recovered = searchWorkflow.deriveSearchPostContextDecision(session, workflowContextText, planningContext)
 		return recovered ? annotateWorkflowDecision(recovered, 'search-fields') : null
@@ -168,16 +179,19 @@
 		const lines = []
 		const state = syncNavigationState(session)
 		const expectedKeys = getExpectedNavigationKeys(session, state)
+		const searchContinuationReady = canContinueSearchWorkflowAfterPrerequisite(session, observation)
 		const reachedByKey = new Map(expectedKeys.map((key) => [
 			key,
 			isNavigationTargetReachedForSession(session, observation, key, state),
 		]))
 		for (const key of expectedKeys) {
-			const status = reachedByKey.get(key) ? 'reached' : 'unresolved'
+			const status = reachedByKey.get(key) ? 'reached' : (searchContinuationReady ? 'deferred' : 'unresolved')
 			lines.push(`- task_target key="${escapeAttr(key)}" status="${status}"`)
 		}
-		if (expectedKeys.some((key) => !reachedByKey.get(key))) {
+		if (expectedKeys.some((key) => !reachedByKey.get(key)) && !searchContinuationReady) {
 			lines.push('- guidance: named task target is unresolved; do not test generic search/filter areas until the target module/page is reached.')
+		} else if (expectedKeys.some((key) => !reachedByKey.get(key)) && searchContinuationReady) {
+			lines.push('- guidance: a prior page prerequisite has returned to a list with an expanded search/filter area; continue the search-field workflow instead of repeating completed navigation.')
 		}
 		if (taskIntent?.buildTaskIntentHintLines) {
 			for (const line of taskIntent.buildTaskIntentHintLines(session)) {
@@ -194,6 +208,9 @@
 			if (String(line || '').trim()) lines.push(line)
 		}
 		for (const line of buildCreateTaskHintLines(session, observation, expectedKeys, state)) {
+			if (String(line || '').trim()) lines.push(line)
+		}
+		for (const line of buildInformationQueryHintLines(session, observation)) {
 			if (String(line || '').trim()) lines.push(line)
 		}
 		if (!lines.length) return ''
@@ -1163,6 +1180,26 @@
 		const operation = taskIntent?.getOperation?.(session) || ''
 		if (operation !== 'view_first_record_detail' && !isFirstRecordDetailTask(taskText)) return null
 		if (hasRecentSuccessfulRecordViewAttempt(session)) {
+			if (taskHasPostRecordViewContinuation(taskText)) {
+				if (hasRecentRecordViewReturnAttempt(session)) return null
+				const returnCandidate = findRecordViewReturnCandidate(observation)
+				if (!returnCandidate) return null
+				const label = getObservedItemLabel(returnCandidate) || '返回'
+				return {
+					evaluation_previous_goal: '已触发列表第一条记录的详情查看动作，但用户任务仍包含后续页面操作。',
+					memory: '列表详情只是链式任务中的中间步骤；先回到列表或关闭详情，再继续后续搜索/查询/筛选测试。',
+					thought: '详情已打开，当前不能把整条任务判定为完成。先使用页面内可见的返回/关闭入口回到列表。',
+					next_goal: `回到列表继续后续任务：${label}`,
+					action: {
+						name: 'click_element_by_index',
+						input: {
+							index: Number(returnCandidate.index),
+							target_label: label,
+							workflow_step: 'return_after_record_view',
+						},
+					},
+				}
+			}
 			return {
 				evaluation_previous_goal: '已触发列表第一条记录的详情查看动作。',
 				memory: '任务要求查看列表第一条记录详情，详情入口已成功点击。',
@@ -1220,6 +1257,48 @@
 		}
 	}
 
+	function deriveRecordViewPostModelDecision(session, decision, context = {}) {
+		if (!isSuccessfulDoneDecision(decision)) return null
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!taskHasPostRecordViewContinuation(taskText)) return null
+		if (!hasRecentSuccessfulRecordViewAttempt(session)) return null
+		const observation = context?.observation || null
+		const returnCandidate = !hasRecentRecordViewReturnAttempt(session)
+			? findRecordViewReturnCandidate(observation)
+			: null
+		if (returnCandidate) {
+			const label = getObservedItemLabel(returnCandidate) || '返回'
+			return {
+				evaluation_previous_goal: '模型把详情查看子步骤当成整条任务完成，但用户任务仍包含后续页面操作。',
+				memory: '详情查看完成后需要回到列表继续后续搜索/查询/筛选测试，不能直接结束。',
+				thought: '当前页面有可见的返回/关闭入口，先回到列表继续。',
+				next_goal: `回到列表继续后续任务：${label}`,
+				action: {
+					name: 'click_element_by_index',
+					input: {
+						index: Number(returnCandidate.index),
+						target_label: label,
+						workflow_step: 'return_after_record_view',
+					},
+				},
+			}
+		}
+		return {
+			evaluation_previous_goal: '模型把详情查看子步骤当成整条任务完成，但用户任务仍包含后续页面操作。',
+			memory: '详情查看只是链式任务中的中间步骤；缺少可靠返回/关闭入口时不能报告成功完成。',
+			thought: '继续执行需要先回到列表，但当前观察没有稳定的返回列表入口。',
+			next_goal: '停止并报告链式任务未完成',
+			action: {
+				name: 'done',
+				input: {
+					success: false,
+					text: '已打开列表第一条记录详情，但原任务仍包含后续页面操作；当前未观察到稳定的返回/关闭/返回列表入口，未执行后续搜索/查询/筛选测试。',
+					workflow_step: 'return_after_record_view',
+				},
+			},
+		}
+	}
+
 	function buildRecordViewHintLines(session, observation, expectedKeys = [], state = null) {
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		const operation = taskIntent?.getOperation?.(session) || ''
@@ -1227,7 +1306,20 @@
 		const unresolved = (Array.isArray(expectedKeys) ? expectedKeys : [])
 			.filter((key) => !isNavigationTargetReachedForSession(session, observation, key, state))
 		if (unresolved.length) return []
-		if (hasRecentSuccessfulRecordViewAttempt(session)) return []
+		if (hasRecentSuccessfulRecordViewAttempt(session)) {
+			if (!taskHasPostRecordViewContinuation(taskText)) return []
+			const candidate = findRecordViewReturnCandidate(observation)
+			return [
+				[
+					'- record_view',
+					'status="detail_opened_continuation_required"',
+					'position="first"',
+					candidate ? `returnIndex="${Number(candidate.index)}"` : '',
+					candidate ? `returnLabel="${escapeAttr(getObservedItemLabel(candidate) || '返回')}"` : '',
+					'guidance="列表第一条记录详情已经打开，但原任务仍包含后续页面操作；不要 done，先通过页面内返回/关闭/返回列表入口回到列表，再继续后续搜索/查询/筛选/表单任务。"',
+				].filter(Boolean).join(' '),
+			]
+		}
 		const listTables = getRecordListEvidenceTables(observation)
 		const paginationEvidence = getPositivePaginationRecordEvidenceItems(observation)
 		if (!listTables.length && !paginationEvidence.length) {
@@ -1307,6 +1399,248 @@
 		return lines
 	}
 
+	function buildInformationQueryHintLines(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!isInformationQueryTask(taskText)) return []
+		const snippets = collectInformationEvidenceSnippets(observation, taskText)
+		const sourceState = isSparseInformationSource(observation, snippets) ? 'sparse' : 'visible_evidence'
+		const lines = [
+			[
+				'- information_query',
+				'status="active"',
+				`sourceState="${sourceState}"`,
+				`evidenceCount="${snippets.length}"`,
+				'guidance="这是信息查询/问答任务；目标是收集少量可信可见证据后用 done 直接回答用户。不要把网页浏览本身当完成，也不要为了完美继续无限开链接、滚动或 inspect。"',
+			].join(' '),
+			'- information_answer_rule minEvidence="1" guidance="若当前观察、搜索结果摘要、文章标题/正文片段或已打开来源足以支撑结论，应输出 done(success=true) 给出答案、依据和不确定性；证据不足时也要明确缺口，不要空转。"',
+		]
+		if (snippets.length) {
+			lines.push(`- information_evidence snippets="${escapeAttr(snippets.slice(0, 5).join(' | '))}"`)
+		}
+		if (sourceState === 'sparse' && hasRecentInformationSourceStall(session)) {
+			lines.push('- information_source status="unreadable" guidance="当前来源在等待/滚动/补上下文后仍缺少可读正文；下一步应切换到已打开的相关来源或搜索结果页，或 done(false) 说明来源不可读和已缺少哪些证据；不要重复同一方向滚动、重复点击同一查看原文链接或重复 inspect 同一区域。"')
+		}
+		return lines
+	}
+
+	function deriveInformationQueryPostContextDecision(session, workflowContextText, planningContext, context = {}) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!isInformationQueryTask(taskText)) return null
+		if (!String(workflowContextText || '').includes('information_query')) return null
+		const requestCount = countInformationContentContextRequests(planningContext)
+		if (requestCount < 2) return null
+		const observation = context?.observation || {}
+		const snippets = collectInformationEvidenceSnippets(observation, taskText)
+		if (!isSparseInformationSource(observation, snippets) || !hasRecentInformationSourceStall(session)) return null
+		return deriveInformationQueryRecoveryDecision(session, observation, context, {
+			reason: '当前信息来源补充上下文后仍没有可读正文证据。',
+		})
+	}
+
+	function deriveInformationQueryRecoveryDecision(session, observation, context = {}, options = {}) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!isInformationQueryTask(taskText)) return null
+		const snippets = collectInformationEvidenceSnippets(observation, taskText)
+		if (!isSparseInformationSource(observation, snippets) && !hasRecentInformationSourceStall(session)) return null
+		const tab = findInformationQueryAlternateTab(session, context?.tabsSummary || [], taskText)
+		const reason = String(options.reason || '当前信息来源缺少可读证据，继续等待或滚动风险较高。').trim()
+		if (tab) {
+			return {
+				evaluation_previous_goal: `${reason} 已找到另一个已打开的相关来源。`,
+				memory: '信息查询任务应围绕证据和最终答复收束；当前来源不可读时改用其他已打开来源，避免重复滚动、等待或 inspect。',
+				thought: '当前来源看不到可读内容，切换到已打开的相关页面继续提取证据。',
+				next_goal: `切换到相关信息来源：${shortWorkflowText(tab.title || tab.url || '已打开标签页', 80)}`,
+				action: {
+					name: 'switch_to_tab',
+					input: {
+						tab_id: tab.id,
+						target_label: shortWorkflowText(tab.title || tab.url || '相关信息来源', 120),
+						target_url: shortWorkflowText(tab.url || '', 240),
+						reason: '当前信息来源不可读，改用已打开的相关来源继续信息查询。',
+						workflow_step: 'information_query_alternate_source',
+					},
+				},
+			}
+		}
+		return {
+			evaluation_previous_goal: `${reason} 未找到更可靠的已打开来源。`,
+			memory: '信息查询任务已经遇到不可读来源；为避免继续空转，停止并说明缺少的证据。',
+			thought: '当前来源不可读且没有可切换的相关标签页，先把阻塞原因告诉用户。',
+			next_goal: '结束信息查询并说明证据缺口',
+			action: {
+				name: 'done',
+				input: {
+					text: '当前信息来源在等待、滚动或补充上下文后仍没有可读正文证据，也没有找到可切换的相关来源，因此无法可靠形成最终答复。请换一个可访问来源或重新发起查询。',
+					success: false,
+					workflow_step: 'information_query_unreadable_source',
+				},
+			},
+		}
+	}
+
+	function isInformationQueryTask(taskText) {
+		const text = String(taskText || '').trim()
+		if (!text) return false
+		if (/(测试|验证|检查|每个|每一个|所有|全部|功能是否|是否正常|test|verify|check)/i.test(text)) return false
+		return /(搜索一下|搜一下|查一下|查询一下|检索|网上搜索|最新|价格|行情|新闻|资讯|总结|分析|是否|是不是|值得|买入|卖出|search\s+(?:for|web)|look\s*up|research|latest|price|news|summari[sz]e|analy[sz]e|whether|worth)/i.test(text)
+	}
+
+	function collectInformationEvidenceSnippets(observation, taskText) {
+		const keywords = extractInformationQueryKeywords(taskText)
+		const snippets = []
+		const seen = new Set()
+		const add = (value) => {
+			const text = shortWorkflowText(String(value || '').replace(/\s+/g, ' ').trim(), 160)
+			if (!isUsefulInformationEvidenceText(text, keywords)) return
+			const key = text.toLowerCase()
+			if (seen.has(key)) return
+			seen.add(key)
+			snippets.push(text)
+		}
+		add(observation?.title)
+		for (const item of [
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+		]) {
+			if (isLikelyChromeOnlyInformationItem(item)) continue
+			add(getObservedItemLabel(item) || item?.text || item?.description)
+		}
+		for (const table of (Array.isArray(observation?.tables) ? observation.tables : [])) {
+			for (const row of (Array.isArray(table?.rows) ? table.rows : [])) {
+				add(Array.isArray(row) ? row.join(' ') : row)
+			}
+		}
+		return snippets.slice(0, 8)
+	}
+
+	function isUsefulInformationEvidenceText(text, keywords) {
+		const value = String(text || '').trim()
+		if (!value || value.length < 3) return false
+		if (/^(empty|share article|toggle side menu|更多|分享|菜单|登录|注册)$/i.test(value)) return false
+		const compact = value.replace(/\s+/g, '').toLowerCase()
+		if (/(?:\d[\d,.]*\s*(?:美元|美金|元|%|％|usd|eur|cny|jpy|gbp|ounce|oz|盎司)|[$¥€£]\s*\d)/i.test(value)) return true
+		for (const keyword of (Array.isArray(keywords) ? keywords : [])) {
+			if (keyword && compact.includes(keyword)) return true
+		}
+		return /(结论|摘要|概览|观点|分析|建议|风险|趋势|价格|行情|新闻|answer|summary|analysis|price|trend|risk|source)/i.test(value)
+	}
+
+	function extractInformationQueryKeywords(taskText) {
+		const text = String(taskText || '').toLowerCase()
+		const stop = new Set(['一下', '然后', '帮我', '现在', '是不是', '是否', '最佳', '时间', '最新', '搜索', '查询', '总结', '分析', '这个', '那个', '什么', '怎么', '一下现在'])
+		const values = []
+		for (const match of text.matchAll(/[\u4e00-\u9fff]{2,}/g)) {
+			const word = match[0]
+			for (let size = 2; size <= Math.min(4, word.length); size += 1) {
+				for (let index = 0; index <= word.length - size; index += 1) {
+					const token = word.slice(index, index + size)
+					if (!stop.has(token)) values.push(token)
+				}
+			}
+		}
+		for (const match of text.matchAll(/[a-z][a-z0-9-]{2,}/g)) {
+			const token = match[0]
+			if (!/^(the|and|for|with|latest|search|look|research|summary)$/.test(token)) values.push(token)
+		}
+		const unique = []
+		for (const value of values) addUnique(unique, value)
+		return unique.slice(0, 40)
+	}
+
+	function isLikelyChromeOnlyInformationItem(item) {
+		const region = String(item?.region || '').toLowerCase()
+		const label = String(getObservedItemLabel(item) || item?.text || '').trim()
+		if (/^(header|sidebar|pagination)$/.test(region) && !/[0-9]|价格|行情|新闻|摘要|概览|分析|建议|price|news|summary|analysis/i.test(label)) return true
+		return /^(share article|toggle side menu|更多输入项|麦克风|新话题|历史记录|应用|账号|首页|microphone|new topic|history|apps|account|home)$/i.test(label)
+	}
+
+	function isSparseInformationSource(observation, snippets) {
+		const contentActions = (Array.isArray(observation?.actions) ? observation.actions : [])
+			.filter((item) => String(item?.region || '') === 'content')
+			.length
+		const contentElements = (Array.isArray(observation?.elements) ? observation.elements : [])
+			.filter((item) => String(item?.region || '') === 'content')
+			.length
+		const tableRows = (Array.isArray(observation?.tables) ? observation.tables : [])
+			.reduce((total, table) => total + (Array.isArray(table?.rows) ? table.rows.length : 0), 0)
+		return (Array.isArray(snippets) ? snippets : []).length < 2 && tableRows === 0 && contentActions + contentElements <= 3
+	}
+
+	function hasRecentInformationSourceStall(session) {
+		const history = Array.isArray(session?.history) ? session.history : []
+		return history.slice(-10).some((item) => {
+			const action = String(item?.action || '').trim()
+			const input = item?.input && typeof item.input === 'object' ? item.input : {}
+			const text = [
+				action,
+				input.target_label,
+				input.reason,
+				item?.output,
+				item?.outcome?.reason,
+				item?.nextGoal,
+			].join(' ')
+			return /(页面未发生纵向滚动|scroll_no_progress|正文未显示|正文缺失|不可读|没有可滚动|查看原文|no vertical movement|unreadable|no readable content|body missing)/i.test(text)
+		})
+	}
+
+	function countInformationContentContextRequests(planningContext) {
+		return (Array.isArray(planningContext) ? planningContext : [])
+			.filter((item) => {
+				const name = String(item?.name || '').trim()
+				const input = item?.input && typeof item.input === 'object' ? item.input : {}
+				const text = String(item?.text || '')
+				if (name === 'inspect_region' && String(input.region || '') === 'content') return true
+				if (name === 'request_context' && /content|simplified_dom|raw_candidates|actions/.test(String(input.source || input.region || ''))) return true
+				return /request="inspect_region"[\s\S]*region="content"|region_detail region="content"/.test(text)
+			})
+			.length
+	}
+
+	function findInformationQueryAlternateTab(session, tabsSummary, taskText) {
+		const tabs = Array.isArray(tabsSummary) ? tabsSummary : []
+		const current = tabs.find((tab) => tab?.current) || null
+		const keywords = extractInformationQueryKeywords(taskText)
+		let best = null
+		for (const tab of tabs) {
+			if (!tab || tab.current || !tab.id) continue
+			const title = String(tab.title || '')
+			const url = String(tab.url || '')
+			if (!/^https?:\/\//i.test(url)) continue
+			if (hasRecentlySwitchedInformationTab(session, tab)) continue
+			const score = scoreInformationQueryTab(title, url, taskText, keywords)
+			if (score <= 0) continue
+			if (!best || score > best.score) best = { ...tab, score }
+		}
+		if (!best) return null
+		const currentScore = current ? scoreInformationQueryTab(current.title || '', current.url || '', taskText, keywords) : 0
+		return best.score >= Math.max(2, currentScore) ? best : null
+	}
+
+	function scoreInformationQueryTab(title, url, taskText, keywords) {
+		const text = `${title} ${url}`.replace(/\s+/g, '').toLowerCase()
+		if (!text || /(localhost|127\.0\.0\.1|chrome:\/\/|about:blank)/i.test(text)) return 0
+		let score = 0
+		const compactTask = String(taskText || '').replace(/\s+/g, '').toLowerCase()
+		if (compactTask && text.includes(compactTask.slice(0, Math.min(28, compactTask.length)))) score += 5
+		for (const keyword of (Array.isArray(keywords) ? keywords : [])) {
+			if (keyword && text.includes(keyword)) score += 1
+		}
+		if (/search|news|article|insight|analysis|finance|market|财经|新闻|价格|行情|分析|观点/i.test(`${title} ${url}`)) score += 1
+		return score
+	}
+
+	function hasRecentlySwitchedInformationTab(session, tab) {
+		const history = Array.isArray(session?.history) ? session.history : []
+		const targetId = String(tab?.id || '')
+		const targetTitle = String(tab?.title || '').trim()
+		return history.slice(-8).some((item) => {
+			if (String(item?.action || '') !== 'switch_to_tab') return false
+			const input = item?.input && typeof item.input === 'object' ? item.input : {}
+			return String(input.tab_id || '') === targetId ||
+				(targetTitle && String(input.target_label || input.target_title || '').includes(targetTitle.slice(0, 40)))
+		})
+	}
+
 	function buildNavigationRevealDecision(state, observation, unresolved, reason) {
 		const visionDecision = buildCompositeNavigationVisionDecision(state, observation, unresolved, reason)
 		if (visionDecision) return visionDecision
@@ -1384,7 +1718,7 @@
 		const state = syncNavigationState(session)
 		const unresolved = getExpectedNavigationKeys(session, state)
 			.filter((key) => !isNavigationTargetReachedForSession(session, observation, key, state))
-		if (unresolved.length) return null
+		if (unresolved.length && !canContinueSearchWorkflowAfterPrerequisite(session, observation)) return null
 		if (typeof searchWorkflow.deriveSearchWorkflowDecision !== 'function') return null
 		const decision = searchWorkflow.deriveSearchWorkflowDecision(session, observation)
 		if (shouldDeferSearchDecisionToModel(decision)) {
@@ -1394,6 +1728,35 @@
 			return null
 		}
 		return decision
+	}
+
+	function canContinueSearchWorkflowAfterPrerequisite(session, observation) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		if (!isSearchFieldCoverageTaskText(taskText)) return false
+		if (!hasRecentRecordViewReturnAttempt(session)) return false
+		return hasExpandedSearchFilterArea(observation)
+	}
+
+	function isSearchFieldCoverageTaskText(taskText) {
+		const text = String(taskText || '')
+		return /(搜索|查询|筛选|过滤|search|filter)/i.test(text) &&
+			/(测试|验证|检查|每个|每一个|所有|全部|功能|是否正常|test|verify|check)/i.test(text)
+	}
+
+	function hasExpandedSearchFilterArea(observation) {
+		const panels = Array.isArray(observation?.panels) ? observation.panels : []
+		const hasPanel = panels.some((panel) => {
+			const text = getNavigationKey([panel?.kind, panel?.label, panel?.triggerLabel, panel?.fields].filter(Boolean).join(' '))
+			return /^expanded$/i.test(String(panel?.state || '')) &&
+				/(filter|search|搜索|查询|筛选)/i.test(text)
+		})
+		if (!hasPanel) return false
+		return collectObservedFormFields(observation).some((field) => {
+			const region = getNavigationKey(field?.region)
+			if (region && !/^(content|dialog|main)$/.test(region)) return false
+			const label = getNavigationKey([field?.searchLabel, field?.label, field?.placeholder, field?.text].filter(Boolean).join(' '))
+			return !!label && Number.isFinite(Number(field?.index))
+		})
 	}
 
 	function deriveInputFieldTestWorkflowDecision(session, observation) {
@@ -1821,6 +2184,74 @@
 			/(详情|明细|查看|预览|view|detail|details|preview)/i.test(text)
 	}
 
+	function taskHasPostRecordViewContinuation(taskText) {
+		const text = String(taskText || '').trim()
+		if (!text) return false
+		const detailMatches = Array.from(text.matchAll(/(?:第一条|第一行|首条|首行|第一位|第\s*1\s*[条行]|列表第一)?.{0,24}(?:详情|明细|查看|预览|detail|details|view|preview)/gi))
+		const last = detailMatches[detailMatches.length - 1]
+		if (!last) return false
+		const suffix = text.slice(Number(last.index || 0) + String(last[0] || '').length)
+		if (!/(然后|接着|再|随后|继续|回到|返回|去|到|并且|同时|then|next|after|continue|back|return|and)/i.test(suffix)) return false
+		return /(搜索|查询|筛选|过滤|测试|验证|检查|排查|填写|填入|填表|录入|新增|新建|创建|添加|编辑|修改|更新|删除|导入|导出|search|query|filter|test|verify|check|fill|create|add|new|edit|update|delete|import|export)/i.test(suffix)
+	}
+
+	function findRecordViewReturnCandidate(observation) {
+		const candidates = collectRecordViewReturnCandidateItems(observation)
+			.filter(isRecordViewReturnCandidateItem)
+			.sort(scoreRecordViewReturnCandidate)
+		return candidates[0] || null
+	}
+
+	function collectRecordViewReturnCandidateItems(observation) {
+		return uniqueObservedItems([
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...collectTextNavigationItems(observation),
+		])
+	}
+
+	function isRecordViewReturnCandidateItem(item) {
+		const index = Number(item?.index)
+		if (!Number.isFinite(index)) return false
+		const region = getNavigationKey(item?.region)
+		if (region && !/^(content|dialog|header|main)$/.test(region)) return false
+		if (isSelectedOrActiveObservedItem(item)) return false
+		const role = getNavigationKey(item?.role)
+		if (role && !/^(button|link|menuitem)$/.test(role)) return false
+		const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)
+		if (/(dropdown|select|checkbox|radio|switch|cascader|textbox|combobox|listbox)/i.test(control)) return false
+		const label = getNavigationKey(getObservedItemLabel(item))
+		if (!label) return false
+		if (/(保存|提交|删除|移除|新增|新建|创建|添加|编辑|修改|搜索|查询|筛选|重置|导入|导出|登录|注册|save|submit|delete|remove|create|add|new|edit|search|query|filter|reset|import|export|login|sign)/i.test(label)) return false
+		return /^(返回|返回列表|返回上一页|回列表|回到列表|关闭|取消|收起|back|backtolist|return|returntolist|close|cancel|×|x)$/.test(label) ||
+			/(返回列表|回到列表|返回上一页|backtolist|returntolist)/i.test(label)
+	}
+
+	function scoreRecordViewReturnCandidate(a, b) {
+		return getRecordViewReturnCandidateScore(a) - getRecordViewReturnCandidateScore(b)
+	}
+
+	function getRecordViewReturnCandidateScore(item) {
+		const label = getNavigationKey(getObservedItemLabel(item))
+		const region = getNavigationKey(item?.region)
+		const rect = normalizeWorkflowRect(item?.rect)
+		let score = 0
+		if (/^(返回列表|回列表|回到列表|backtolist|returntolist)$/.test(label)) score -= 40
+		else if (/^(返回|返回上一页|back|return)$/.test(label)) score -= 28
+		else if (/^(关闭|取消|close|cancel|×|x)$/.test(label)) score -= 12
+		if (region === 'content' || region === 'dialog') score -= 8
+		else if (region === 'header') score += 6
+		score += rect ? Math.max(0, rect.top) / 1000 + Math.max(0, rect.left) / 100000 : 50
+		return score
+	}
+
+	function hasRecentRecordViewReturnAttempt(session) {
+		return getRecentHistoryItems(session, 4).some((item) => {
+			const input = item?.input || {}
+			return String(input.workflow_step || '') === 'return_after_record_view'
+		})
+	}
+
 	function hasRecentSuccessfulRecordViewAttempt(session) {
 		return getRecentHistoryItems(session, 6).some((item) => {
 			if (item?.success === false) return false
@@ -1835,6 +2266,13 @@
 	function isRecordViewHistoryItem(item) {
 		const input = item?.input || {}
 		return String(input.workflow_step || '') === 'view_first_record_detail'
+	}
+
+	function isSuccessfulDoneDecision(decision) {
+		const action = String(decision?.action?.name || '').trim()
+		if (action !== 'done') return false
+		const input = decision?.action?.input || {}
+		return input.success !== false
 	}
 
 	function findFirstRecordDetailCandidate(observation) {

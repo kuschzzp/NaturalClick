@@ -2078,14 +2078,36 @@
 		if (!state.fieldOrder.includes(key)) state.fieldOrder.push(key)
 		if (!state.fields || typeof state.fields !== 'object') state.fields = {}
 		const previous = state.fields[key] || {}
+		const workflowStep = String(input?.workflow_step || '').trim()
+		const isCommandStep = /^(submit_search|reset_filters|expand_search_panel|finish_search_fields)$/i.test(workflowStep)
+		const workflowIndex = Number(input?.workflow_field_index)
+		const previousIndex = Number(previous.index)
+		const inputIndex = Number(input?.index)
+		const nextIndex = Number.isFinite(workflowIndex)
+			? workflowIndex
+			: Number.isFinite(previousIndex)
+				? previousIndex
+				: (!isCommandStep && Number.isFinite(inputIndex) ? inputIndex : undefined)
+		const workflowLabel = String(input?.workflow_field_label || '').trim()
+		const previousLabel = String(previous.label || '').trim()
+		const fallbackLabel = !isCommandStep
+			? String(input?.target_label || input?.label || '').trim()
+			: ''
+		const nextLabel = workflowLabel || previousLabel || fallbackLabel
+		const nextFieldType = String(input?.workflow_field_type || previous.fieldType || '').trim()
 		const next = {
 			...previous,
 			key,
-			index: Number(input?.workflow_field_index ?? input?.index),
-			label: String(input?.workflow_field_label || input?.target_label || input?.label || ''),
-			fieldType: String(input?.workflow_field_type || ''),
 		}
-		const testValue = String(input?.workflow_test_value || input?.text || input?.label || '').trim()
+		if (Number.isFinite(nextIndex)) next.index = nextIndex
+		if (nextLabel) next.label = nextLabel
+		if (nextFieldType) next.fieldType = nextFieldType
+		const testValue = String(
+			input?.workflow_test_value ||
+			input?.text ||
+			(isCommandStep ? '' : input?.label) ||
+			''
+		).trim()
 		if (testValue) {
 			next.lastTestValue = testValue
 			next.lastValueSource = String(input?.workflow_value_source || previous.lastValueSource || '')
@@ -2242,6 +2264,7 @@
 	}
 
 	function isSearchWorkflowTask(session) {
+		const taskText = session?.latestTask || session?.task || ''
 		const intent = typeof taskIntent?.getTaskIntent === 'function'
 			? taskIntent.getTaskIntent(session)
 			: null
@@ -2249,9 +2272,20 @@
 			const operation = String(intent.operation || '').trim()
 			const scope = String(intent.operationScope || '').trim()
 			if (operation === 'search' && scope === 'all_matching_controls') return true
-			if (operation && operation !== 'search') return false
+			if (operation && operation !== 'search') {
+				return isSearchTestTask(taskText) && hasCompletedPreSearchContinuation(session)
+			}
 		}
-		return isSearchTestTask(session?.latestTask || session?.task || '')
+		return isSearchTestTask(taskText)
+	}
+
+	function hasCompletedPreSearchContinuation(session) {
+		const history = Array.isArray(session?.history) ? session.history : []
+		return history.slice(-12).some((item) => {
+			if (item?.success === false) return false
+			const input = item?.input || item?.action?.input || {}
+			return String(input.workflow_step || '') === 'return_after_record_view'
+		})
 	}
 
 	function findCollapsedSearchPanel(observation) {

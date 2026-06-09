@@ -1156,7 +1156,81 @@
 				clearFailureReason: cleanupFailed ? String(options.cleanupFailureReason || '').trim() : '',
 				summary,
 			}
+		}).map((item) => {
+			const testSteps = buildSearchSummaryTestSteps(item)
+			return {
+				...item,
+				testSteps,
+				testStepSummary: formatSearchSummaryTestSteps(testSteps),
+			}
 		})
+	}
+
+	function buildSearchSummaryTestSteps(item) {
+		const status = String(item?.status || '').trim()
+		const statusCode = String(item?.statusCode || '').trim()
+		const clearStatus = String(item?.clearStatus || '').trim()
+		const skipped = statusCode === 'unknown_missing_sample'
+		const hasValue = !!String(item?.value || '').trim()
+		const recorded = item?.recorded === true
+		return [
+			{
+				key: 'value',
+				label: '取值',
+				status: skipped ? 'skipped' : (hasValue ? 'passed' : 'missing'),
+				text: skipped
+					? '安全跳过'
+					: (hasValue ? '已确定测试值' : '缺少测试值'),
+			},
+			{
+				key: 'submit',
+				label: '提交',
+				status: skipped ? 'skipped' : (recorded ? (statusCode === 'failed_terminal' ? 'failed' : 'passed') : 'missing'),
+				text: skipped
+					? '无需提交'
+					: (recorded ? (statusCode === 'failed_terminal' ? '提交/执行异常' : '已提交或已形成结果记录') : '未形成提交记录'),
+			},
+			{
+				key: 'result',
+				label: '结果',
+				status: skipped ? 'skipped' : (status === 'passed' ? 'passed' : status === 'failed' ? 'failed' : (recorded ? 'unknown' : 'missing')),
+				text: skipped
+					? '未验证结果'
+					: (item?.statusLabel || '未确认结果'),
+			},
+			{
+				key: 'cleanup',
+				label: '清空',
+				status: formatSearchClearStepStatus(clearStatus),
+				text: item?.clearStatusLabel || '未测试',
+			},
+		]
+	}
+
+	function formatSearchClearStepStatus(clearStatus) {
+		if (clearStatus === 'cleared') return 'passed'
+		if (clearStatus === 'cleanup_failed') return 'failed'
+		if (clearStatus === 'pending_or_unverified') return 'unknown'
+		if (clearStatus === 'not_applicable') return 'skipped'
+		return 'missing'
+	}
+
+	function formatSearchSummaryTestSteps(steps) {
+		return (Array.isArray(steps) ? steps : [])
+			.map((step) => `${step.label}:${formatSearchSummaryStepStatus(step.status)}`)
+			.filter(Boolean)
+			.join(' > ')
+	}
+
+	function formatSearchSummaryStepStatus(status) {
+		const labels = {
+			passed: '完成',
+			failed: '异常',
+			unknown: '未确认',
+			missing: '缺失',
+			skipped: '跳过',
+		}
+		return labels[String(status || '').trim()] || String(status || '未确认')
 	}
 
 	function buildSearchUntestedNeededEvidence(label) {
@@ -2952,6 +3026,7 @@
 			item.value ? `测试值=${item.value}` : '',
 			item.sourceLabel ? `取值来源=${item.sourceLabel}` : '',
 			item.basis ? `依据说明=${item.basis}` : '',
+			item.testStepSummary ? `结果步骤=${item.testStepSummary}` : '',
 			item.clearStatusLabel ? `清空=${item.clearStatusLabel}` : '',
 			item.summary,
 		].filter(Boolean)

@@ -160,7 +160,9 @@ async function startTask(message, sender) {
 			config: runtimeConfig,
 			step: 0,
 			history: [],
-			workflowState: {},
+			workflowState: preparedTab.initialNavigation
+				? { initialNavigation: preparedTab.initialNavigation }
+				: {},
 			consecutiveFailures: 0,
 			aborted: false,
 		}
@@ -221,7 +223,18 @@ async function openInitialAutomationTarget(windowId, originalUrl, target) {
 		}
 		await waitForTabAutomatable(opened.id, 20000)
 		const notice = buildInitialNavigationNotice(originalUrl, target)
-		return { ok: true, tabId: opened.id, notice }
+		return {
+			ok: true,
+			tabId: opened.id,
+			notice,
+			initialNavigation: {
+				targetUrl: target.url,
+				source: target.source || '',
+				label: target.label || '',
+				openedTabId: opened.id,
+				originalUrl,
+			},
+		}
 	} catch (error) {
 		return {
 			ok: false,

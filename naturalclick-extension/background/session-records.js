@@ -468,10 +468,17 @@
 			auditField ? { ...auditField, key: auditFieldKey || auditField?.key || '' } : null,
 			phase
 		)
+		const nextAction = buildSearchWorkflowPlanNextAction(phase, {
+			label,
+			audit,
+			status,
+			terminalFailed,
+		})
 		const detail = [
 			`进度 ${totalText}`,
 			label ? `当前：${label}` : '',
 			phaseText,
+			nextAction ? `下一步：${nextAction}` : '',
 			audit,
 			reason ? `原因：${reason}` : '',
 		].filter(Boolean).join('，')
@@ -480,6 +487,19 @@
 			title: `搜索项测试${detail ? `（${detail}）` : ''}`,
 			status,
 		}
+	}
+
+	function buildSearchWorkflowPlanNextAction(phase, context = {}) {
+		if (context.terminalFailed || context.status === 'failed') return '查看停止原因并处理阻塞'
+		const labels = {
+			select_field: '选择下一个搜索字段并准备真实测试值',
+			awaiting_submit: '点击搜索/查询并观察结果',
+			awaiting_reset: '点击清空/重置并复核残留条件',
+			awaiting_option: '确认候选归属并选择真实候选',
+			completed: '生成字段级测试总结',
+			failed: '查看停止原因并处理阻塞',
+		}
+		return labels[String(phase || '').trim()] || ''
 	}
 
 	function countSearchWorkflowCoveredFields(state) {

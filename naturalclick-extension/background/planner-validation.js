@@ -910,26 +910,37 @@
 		if (!Number.isFinite(index) || !requested) return ''
 		const dateLikeTarget = hasDateLikeObservedTarget(observation, index) ||
 			isDateLikeDeclaredSelectionTarget(input, selectionText)
+		const rangeLikeRequest = isTemporalRangeSelectionRequest(selectionText)
 		const candidates = collectSelectionCandidatesForIndex(observation, index, dateLikeTarget)
 		if (candidates.some((candidate) => selectionRequestMatchesCandidate(selectionText, requested, candidate, { dateLikeTarget }))) return ''
 		const diagnostics = collectDiagnosticSelectionCandidatesForIndex(observation, index)
 		if (diagnostics.some((candidate) => selectionRequestMatchesCandidate(selectionText, requested, candidate, { dateLikeTarget }))) {
 			return [
 				`${actionName} 目标 index=${index} 只有未归属到该字段的诊断候选 "${shortText(diagnostics.join('|'), 180)}" 包含 "${shortText(selectionText, 80)}"。`,
-				'诊断候选不能直接选择；请先 open_dropdown(index)、request_options_for(index) 或 inspect_region popover/content，直到候选能稳定归属到目标字段。',
+				dateLikeTarget
+					? '日期/时间诊断候选不能直接选择；请先 open_dropdown(index)、request_options_for(index) 或 inspect_region popover/content，直到 date-option/time-option 能稳定归属到目标字段。'
+					: '诊断候选不能直接选择；请先 open_dropdown(index)、request_options_for(index) 或 inspect_region popover/content，直到候选能稳定归属到目标字段。',
 			].join('')
 		}
 		if (!candidates.length && diagnostics.length) {
 			return [
 				`${actionName} 目标 index=${index} 当前只有未归属到该字段的诊断候选 "${shortText(diagnostics.join('|'), 180)}"，没有稳定归属到该字段的真实候选。`,
-				`不能在这种状态下选择 "${shortText(selectionText, 80)}"；请先 open_dropdown(index)、request_options_for(index) 或 inspect_region popover/content，直到候选能稳定归属到目标字段。`,
+				dateLikeTarget
+					? `不能在这种状态下选择日期/时间值 "${shortText(selectionText, 80)}"；请先 open_dropdown(index)、request_options_for(index) 或 inspect_region popover/content，直到候选能稳定归属到目标字段。`
+					: `不能在这种状态下选择 "${shortText(selectionText, 80)}"；请先 open_dropdown(index)、request_options_for(index) 或 inspect_region popover/content，直到候选能稳定归属到目标字段。`,
 			].join('')
 		}
 		if (!candidates.length) return ''
 		return [
 			`${actionName} 目标 index=${index} 当前可见候选为 "${shortText(candidates.join('|'), 180)}"，没有 "${shortText(selectionText, 80)}"。`,
-			'不要臆造或重复不存在的选项；下一轮必须从可见候选中选择真实文本，或先 request_options_for/open_dropdown 重新确认。',
+			rangeLikeRequest
+				? '这是范围选择请求；下一轮应从可见且归属目标字段的起止边界候选中选择当前边界，或先 request_options_for/open_dropdown 重新确认范围候选。'
+				: '不要臆造或重复不存在的选项；下一轮必须从可见候选中选择真实文本，或先 request_options_for/open_dropdown 重新确认。',
 		].join('')
+	}
+
+	function isTemporalRangeSelectionRequest(value) {
+		return extractSelectionDateCandidates(value).length >= 2 || extractSelectionPeriodCandidates(value).length >= 2
 	}
 
 	function collectSelectionCandidatesForIndex(observation, index, dateLikeTarget = false) {
