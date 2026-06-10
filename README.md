@@ -26,9 +26,7 @@ It observes the active page through structured DOM extraction, sends the current
 
 This is **not** a stealth automation toolkit or a CAPTCHA bypass project. The goal is transparent, debuggable, user-controlled browser automation for real web workflows.
 
-Current extension version: `0.6.53`. The source of truth is `naturalclick-extension/manifest.json`.
-
-Version rule: the tail version must stay in `1-99`; after `0.X.99`, carry to `0.(X+1).1`. Every `0.X.1` release must be committed and pushed once.
+Current extension version: `0.6.56`. The source of truth is `naturalclick-extension/manifest.json`.
 
 ## Install
 
@@ -246,14 +244,6 @@ Run the runtime contract checks:
 ```bash
 node scripts/validate-runtime-contracts.js
 ```
-
-Bump versions with the helper instead of manually incrementing the tail:
-
-```bash
-node scripts/bump-version.js patch
-```
-
-The helper syncs `manifest.json`, the READMEs, and the diagnostics guide, and carries `0.X.99` to `0.(X+1).1`. If the new version is `0.X.1`, run the contract checks, then commit and push that release once as printed by the script.
 
 After editing extension files:
 

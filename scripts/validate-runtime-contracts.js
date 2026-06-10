@@ -6547,12 +6547,12 @@ function assertPlannerObservationOmissionHints() {
 	observation.forms = [
 		{
 			id: 'filter',
-			name: '搜索/筛选区域',
-			fields: Array.from({ length: 20 }, (_, index) => ({
+			name: '资料表单',
+			fields: Array.from({ length: 40 }, (_, index) => ({
 				index: 300 + index,
 				region: 'content',
 				fieldType: index === 18 ? 'platform' : 'text',
-				label: `搜索字段 ${index}`,
+				label: `资料字段 ${index}`,
 				valueState: 'empty',
 				role: index === 18 ? 'combobox' : 'textbox',
 			})),
@@ -6570,19 +6570,49 @@ function assertPlannerObservationOmissionHints() {
 		`<button index="${200 + index}" region="content">简化 ${index}</button>`
 	)
 	const text = context.buildObservationText(observation, { task: '测试搜索区域' })
-	if (!text.includes('<more_context source="forms" cursor="17" limit="40" action="request_context"')) {
+	if (!text.includes('<more_context source="forms" cursor="33" limit="40" action="request_context"')) {
 		throw new Error(`forms field omission should include an explicit request_context hint, got ${text}`)
 	}
-	if (!text.includes('"source":"forms","cursor":17,"limit":40')) {
+	if (!text.includes('"source":"forms","cursor":33,"limit":40')) {
 		throw new Error(`forms omission hint should include JSON-like request input, got ${text}`)
 	}
 	const formsChunk = context.resolvePlanningContextRequest(
 		observation,
-		{ name: 'request_context', input: { source: 'forms', cursor: 17, limit: 3 } },
+		{ name: 'request_context', input: { source: 'forms', cursor: 33, limit: 3 } },
 		0
 	).text
-	if (!formsChunk.includes('搜索字段 16') || !formsChunk.includes('搜索字段 18')) {
+	if (!formsChunk.includes('资料字段 32') || !formsChunk.includes('资料字段 34')) {
 		throw new Error(`forms request_context should continue from the omitted field cursor, got ${formsChunk}`)
+	}
+	const longSearchObservation = buildTestObservation({ rawCount: 12 })
+	longSearchObservation.forms = [
+		{
+			id: 'filter',
+			name: '搜索/筛选区域',
+			fields: Array.from({ length: 20 }, (_, index) => ({
+				index: 500 + index,
+				region: 'content',
+				fieldType: index % 4 === 2 ? 'daterange' : index % 4 === 3 ? 'select' : 'text',
+				label: `搜索字段 ${index}`,
+				valueState: 'empty',
+				role: index % 4 >= 2 ? 'combobox' : 'textbox',
+			})),
+		},
+	]
+	longSearchObservation.panels = [
+		{
+			kind: 'filter',
+			state: 'expanded',
+			label: '搜索/筛选区域',
+			fields: Array.from({ length: 20 }, (_, index) => `搜索字段 ${index}`),
+		},
+	]
+	const longSearchText = context.buildObservationText(longSearchObservation, { task: '测试每一个搜索项功能是否正常' })
+	if (!longSearchText.includes('搜索字段 19')) {
+		throw new Error(`long search/filter forms should expose all ordinary field rows before model planning, got ${longSearchText}`)
+	}
+	if (longSearchText.includes('<more_context source="forms"')) {
+		throw new Error(`long search/filter forms under the expanded limit should not hide trailing fields behind request_context, got ${longSearchText}`)
 	}
 	if (!text.includes('<more_context source="actions" cursor="17" limit="40" action="request_context"')) {
 		throw new Error(`actions omission should continue from the first hidden prefix row even when task-relevant actions were promoted, got ${text}`)
@@ -31026,13 +31056,16 @@ function assertManifestVersion() {
 			throw new Error(`${file} should mention current manifest version ${version}`)
 		}
 	}
-	const readmeZh = read('README.zh-CN.md')
-	if (!readmeZh.includes('0.X.99') || !readmeZh.includes('0.(X+1).1') || !readmeZh.includes('0.X.1') || !readmeZh.includes('push')) {
-		throw new Error('README.zh-CN.md should document the carry rule and required commit/push for every 0.X.1 release')
-	}
-	const readmeEn = read('README.md')
-	if (!readmeEn.includes('0.X.99') || !readmeEn.includes('0.(X+1).1') || !readmeEn.includes('0.X.1') || !readmeEn.includes('committed and pushed')) {
-		throw new Error('README.md should document the carry rule and required commit/push for every 0.X.1 release')
+	for (const file of [
+		'README.md',
+		'README.zh-CN.md',
+		'docs/runtime-configuration-and-diagnostics.md',
+		'docs/runtime-configuration-and-diagnostics.zh-CN.md',
+	]) {
+		const text = read(file)
+		if (/(版本规则|尾版本号|0\.X\.99|0\.\(X\+1\)\.1|0\.X\.1|提交并 push|bump-version|Release rule|version rule|tail version|committed and pushed|git push|git commit)/i.test(text)) {
+			throw new Error(`${file} should not expose internal release/version discipline in public docs`)
+		}
 	}
 }
 
@@ -31068,12 +31101,6 @@ function assertVersionBumpScript() {
 	}
 	if (!invalidTailRejected) {
 		throw new Error('version bump script should reject tail versions above 99')
-	}
-	for (const file of ['README.md', 'README.zh-CN.md']) {
-		const text = read(file)
-		if (!text.includes('node scripts/bump-version.js patch')) {
-			throw new Error(`${file} should document the version bump helper`)
-		}
 	}
 }
 

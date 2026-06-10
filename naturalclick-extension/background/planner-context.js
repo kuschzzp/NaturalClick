@@ -42,7 +42,10 @@
 		const optionCursor = getContiguousPrefixCursor(rankObservationItems(optionItems), rankedOptions)
 		const rawLimit = compact ? 0 : (forms.length || actions.length || optionItems.length || popups.length || panels.length ? 8 : 36)
 		const formLimit = compact ? 3 : 4
-		const fieldLimit = compact ? 10 : 16
+		const searchLikeTask = isSearchOrFilterTaskText(taskText) || hasSearchOrFilterSurface({ forms, panels })
+		const fieldLimit = searchLikeTask
+			? (compact ? 18 : 32)
+			: (compact ? 10 : 16)
 		const panelLimit = compact ? 4 : 6
 		const treeLimit = compact ? 0 : 12
 		const simplifiedLimit = compact ? 14 : 22
@@ -176,6 +179,25 @@
 			const fields = Array.isArray(form?.fields) ? form.fields : []
 			return count + 1 + fields.length
 		}, 0)
+	}
+
+	function isSearchOrFilterTaskText(value) {
+		return /(搜索|查询|筛选|过滤|search|query|filter)/i.test(String(value || ''))
+	}
+
+	function hasSearchOrFilterSurface({ forms, panels } = {}) {
+		const panelHit = (Array.isArray(panels) ? panels : []).some((panel) =>
+			/(filter|search|搜索|查询|筛选|过滤)/i.test([
+				panel?.kind,
+				panel?.label,
+				panel?.triggerLabel,
+				Array.isArray(panel?.fields) ? panel.fields.join(' ') : panel?.fields,
+			].filter(Boolean).join(' '))
+		)
+		if (panelHit) return true
+		return (Array.isArray(forms) ? forms : []).some((form) =>
+			/(filter|search|搜索|查询|筛选|过滤)/i.test([form?.id, form?.name].filter(Boolean).join(' '))
+		)
 	}
 
 	function normalizeCompactReason(value) {
@@ -1187,7 +1209,7 @@
 
 	function formatPanelLine(panel) {
 		const fields = Array.isArray(panel.fields) && panel.fields.length
-			? `fields="${shortText(panel.fields.join(','), 160)}"`
+			? `fields="${shortText(panel.fields.join(','), 360)}"`
 			: ''
 		const trigger = Number.isFinite(Number(panel.triggerIndex))
 			? `triggerIndex=${panel.triggerIndex} triggerLabel="${shortText(panel.triggerLabel || '', 48)}"`

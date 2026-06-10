@@ -3438,7 +3438,7 @@
 			if (!normalized || normalized === '(empty)' || seen.has(normalized)) continue
 			seen.add(normalized)
 			labels.push(shortText(normalized, 32))
-			if (labels.length >= 16) break
+			if (labels.length >= 32) break
 		}
 		return labels
 	}
