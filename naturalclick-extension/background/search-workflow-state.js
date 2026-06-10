@@ -46,6 +46,7 @@
 				resetCompletedKeys: [],
 				resultsByKey: {},
 				clearRetryAttemptsByKey: {},
+				clearFailureDetailsByKey: {},
 				evidenceRequestAttemptsByKey: {},
 				failedLabelsByKey: {},
 				dropdownOpenAttemptsByKey: {},
@@ -66,6 +67,7 @@
 				if (typeof state.baselineResetDone !== 'boolean') state.baselineResetDone = false
 				if (!state.resultsByKey || typeof state.resultsByKey !== 'object') state.resultsByKey = {}
 				if (!state.clearRetryAttemptsByKey || typeof state.clearRetryAttemptsByKey !== 'object') state.clearRetryAttemptsByKey = {}
+				if (!state.clearFailureDetailsByKey || typeof state.clearFailureDetailsByKey !== 'object') state.clearFailureDetailsByKey = {}
 				if (!Array.isArray(state.skippedKeys)) state.skippedKeys = []
 				if (!state.evidenceRequestAttemptsByKey || typeof state.evidenceRequestAttemptsByKey !== 'object') state.evidenceRequestAttemptsByKey = {}
 				if (!state.pendingDateRangeStartByKey || typeof state.pendingDateRangeStartByKey !== 'object') state.pendingDateRangeStartByKey = {}
@@ -86,6 +88,7 @@
 			state.resetCompletedKeys = []
 			state.resultsByKey = {}
 			state.clearRetryAttemptsByKey = {}
+			state.clearFailureDetailsByKey = {}
 			state.evidenceRequestAttemptsByKey = {}
 			state.failedLabelsByKey = {}
 			state.dropdownOpenAttemptsByKey = {}
@@ -126,6 +129,10 @@
 			if (!state.clearRetryAttemptsByKey || typeof state.clearRetryAttemptsByKey !== 'object') state.clearRetryAttemptsByKey = {}
 			for (const key of Object.keys(state.clearRetryAttemptsByKey || {})) {
 				if (!nextFields[key]) delete state.clearRetryAttemptsByKey[key]
+			}
+			if (!state.clearFailureDetailsByKey || typeof state.clearFailureDetailsByKey !== 'object') state.clearFailureDetailsByKey = {}
+			for (const key of Object.keys(state.clearFailureDetailsByKey || {})) {
+				if (!nextFields[key]) delete state.clearFailureDetailsByKey[key]
 			}
 			if (!state.evidenceRequestAttemptsByKey || typeof state.evidenceRequestAttemptsByKey !== 'object') state.evidenceRequestAttemptsByKey = {}
 			for (const key of Object.keys(state.evidenceRequestAttemptsByKey || {})) {
@@ -203,6 +210,20 @@
 			if (!key || !state?.clearRetryAttemptsByKey) return 0
 			const count = Number(state.clearRetryAttemptsByKey[key])
 			return Number.isFinite(count) ? count : 0
+		}
+
+		function rememberClearFailureDetail(state, key, detail) {
+			if (!key || !state || typeof state !== 'object') return
+			if (!state.clearFailureDetailsByKey || typeof state.clearFailureDetailsByKey !== 'object') {
+				state.clearFailureDetailsByKey = {}
+			}
+			state.clearFailureDetailsByKey[key] = detail && typeof detail === 'object' ? { ...detail } : {}
+		}
+
+		function getClearFailureDetail(state, key) {
+			if (!key || !state?.clearFailureDetailsByKey || typeof state.clearFailureDetailsByKey !== 'object') return null
+			const detail = state.clearFailureDetailsByKey[key]
+			return detail && typeof detail === 'object' ? detail : null
 		}
 
 		function incrementEvidenceRequestAttempt(state, key) {
@@ -292,6 +313,8 @@
 			getDropdownOpenAttemptCount,
 			incrementClearRetryAttempt,
 			getClearRetryAttemptCount,
+			rememberClearFailureDetail,
+			getClearFailureDetail,
 			incrementEvidenceRequestAttempt,
 			getEvidenceRequestAttemptCount,
 			getNextPendingField,

@@ -187,6 +187,7 @@
 			if (outcome.kind === 'options_visible' && !currentText && currentIndex !== null) {
 				const candidates = outcome.candidates
 				if (candidates) {
+					if (!visibleCandidatesLookReusableForRepeatedOpen(input, candidates, session)) continue
 					return [
 						`历史显示 index=${currentIndex} 的下拉候选已经可见，候选为 "${shortText(candidates, 180)}"。`,
 						'不要重复只展开同一字段；下一轮必须选择 candidates 中的真实候选，或使用 request_options_for 获取更精确候选。',
@@ -195,6 +196,71 @@
 			}
 		}
 		return ''
+	}
+
+	function visibleCandidatesLookReusableForRepeatedOpen(input, candidates, session) {
+		const values = splitCandidateText(candidates)
+		if (!values.length) return false
+		const expected = [
+			input?.workflow_test_value,
+			input?.text,
+			input?.label,
+			input?.value,
+		].map(normalizeSelectionText).filter(Boolean)
+		if (expected.length && values.some((item) => expected.some((target) => item.key === target || item.key.includes(target) || target.includes(item.key)))) {
+			return true
+		}
+		const targetLabel = normalizeSelectionText(input?.target_label || input?.workflow_field_label || '')
+		const searchFieldLabels = collectSearchWorkflowFieldLabels(session)
+		const fieldLabelHits = values.filter((item) => searchFieldLabels.has(item.key))
+		if (fieldLabelHits.length && (!targetLabel || !fieldLabelHits.some((item) => item.key === targetLabel))) {
+			return false
+		}
+		const uiNoise = values.filter((item) => isLikelyUiOrNavigationCandidate(item.raw)).length
+		const nonNoise = values.length - uiNoise
+		if (targetLabel && !values.some((item) => item.key === targetLabel) && uiNoise >= 2 && values.length >= 5) {
+			return false
+		}
+		if (uiNoise >= 2 && nonNoise <= Math.max(1, Math.floor(values.length / 3))) {
+			return false
+		}
+		if (uiNoise >= Math.max(2, Math.ceil(values.length / 2))) {
+			return false
+		}
+		return true
+	}
+
+	function splitCandidateText(candidates) {
+		return String(candidates || '')
+			.split(/[|,，;；、\n]+/)
+			.map((raw) => String(raw || '').trim())
+			.filter(Boolean)
+			.map((raw) => ({ raw, key: normalizeSelectionText(raw) }))
+			.filter((item) => item.key)
+	}
+
+	function collectSearchWorkflowFieldLabels(session) {
+		const labels = new Set()
+		const fields = session?.workflowState?.search?.fields || {}
+		for (const field of Object.values(fields)) {
+			for (const value of [
+				field?.label,
+				field?.workflow_field_label,
+				field?.placeholder,
+				field?.searchLabel,
+			]) {
+				const key = normalizeSelectionText(value)
+				if (key) labels.add(key)
+			}
+		}
+		return labels
+	}
+
+	function isLikelyUiOrNavigationCandidate(value) {
+		const text = normalizeSelectionText(value)
+		if (!text) return true
+		if (/^(empty|unknown|null|undefined|-|--)$/.test(text)) return true
+		return /(首页|菜单|更多|展开|收起|搜索内容|搜索|查询|筛选|重置|清空|新增|新建|导入|导出|详情|编辑|删除|操作|退出登录|个人信息|上一页|下一页|分页|返回|刷新|关闭|取消|确定|保存|提交)/i.test(text)
 	}
 
 	function isSelectionActionName(name) {
@@ -913,6 +979,7 @@
 		const rangeLikeRequest = isTemporalRangeSelectionRequest(selectionText)
 		const candidates = collectSelectionCandidatesForIndex(observation, index, dateLikeTarget)
 		if (candidates.some((candidate) => selectionRequestMatchesCandidate(selectionText, requested, candidate, { dateLikeTarget }))) return ''
+		if (hasTrustedWorkflowScopedCandidate(input, selectionText)) return ''
 		const diagnostics = collectDiagnosticSelectionCandidatesForIndex(observation, index)
 		if (diagnostics.some((candidate) => selectionRequestMatchesCandidate(selectionText, requested, candidate, { dateLikeTarget }))) {
 			return [
@@ -937,6 +1004,23 @@
 				? '这是范围选择请求；下一轮应从可见且归属目标字段的起止边界候选中选择当前边界，或先 request_options_for/open_dropdown 重新确认范围候选。'
 				: '不要臆造或重复不存在的选项；下一轮必须从可见候选中选择真实文本，或先 request_options_for/open_dropdown 重新确认。',
 		].join('')
+	}
+
+	function hasTrustedWorkflowScopedCandidate(input, selectionText) {
+		const workflowStep = String(input?.workflow_step || '').trim()
+		if (workflowStep !== 'select_option') return false
+		if (String(input?.workflow_candidate_evidence || '').trim() !== 'field_scoped_options') return false
+		const target = normalizeSelectionText(selectionText)
+		if (!target) return false
+		const values = String(input?.workflow_scoped_candidates || '')
+			.split(/[|,，;；、\n]+/)
+			.map((item) => String(item || '').trim())
+			.filter(Boolean)
+		if (!values.length) return false
+		return values.some((candidate) => {
+			const key = normalizeSelectionText(candidate)
+			return key && (key === target || selectionRequestMatchesCandidate(selectionText, target, candidate, {}))
+		})
 	}
 
 	function isTemporalRangeSelectionRequest(value) {

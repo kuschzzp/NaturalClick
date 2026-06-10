@@ -11,6 +11,7 @@
 		unknown_missing_sample: '未确认：缺少真实样本/候选证据',
 		unknown_not_recorded: '未确认：缺少结果记录',
 		unknown_result_pending: '未确认：已提交待观察',
+		unknown_observation_timeout: '未确认：页面观察超时',
 	}
 	const SOURCE_LABELS = {
 		table_sample: '列表样本',
@@ -867,6 +868,7 @@
 		const cleanupUnverified = countItems(list, (item) => item.clearStatus === 'pending_or_unverified')
 		const noTable = countItems(list, (item) => item.recorded && item.statusCode === 'unknown_no_table')
 		const resultPending = countItems(list, (item) => item.recorded && item.statusCode === 'unknown_result_pending')
+		const observationTimeout = countItems(list, (item) => item.recorded && item.statusCode === 'unknown_observation_timeout')
 		const missingEvidence = countItems(list, (item) => item.statusCode === 'unknown_missing_sample')
 		const dateCandidateOwnership = Math.max(
 			Number(counts.dateCandidateOwnership || 0),
@@ -985,6 +987,14 @@
 				text: `结果待确认：${resultPending} 项已提交搜索，但还没有完成提交后的列表观察。`,
 			})
 		}
+		if (observationTimeout) {
+			diagnostics.push({
+				kind: 'observation_timeout',
+				severity: 'warning',
+				count: observationTimeout,
+				text: `页面观察超时：${observationTimeout} 项搜索已执行到提交或清空阶段，但提交后页面结构读取超时，结果未完全确认。`,
+			})
+		}
 		if (missingResult) {
 			diagnostics.push({
 				kind: 'coverage_incomplete',
@@ -1029,8 +1039,8 @@
 		if (kinds.has('user_input_required')) {
 			recommendations.push('建议：先补充 Agent 请求的验证码、账号、确认信息或替代字段值，再从等待用户回答前的搜索步骤继续。')
 		}
-		if (kinds.has('missing_table_evidence') || kinds.has('result_pending')) {
-			recommendations.push('建议：提交搜索后补充一次列表/表格观察，再判断搜索结果是否命中测试值。')
+		if (kinds.has('missing_table_evidence') || kinds.has('result_pending') || kinds.has('observation_timeout')) {
+			recommendations.push('建议：提交搜索后补充一次轻量列表/表格观察，优先确认搜索结果和清空状态，避免再次触发全量 DOM 超时。')
 		}
 		if (kinds.has('value_missing') || kinds.has('empty_result')) {
 			recommendations.push('建议：核对测试值来源、结果抽取和搜索实现，确认是否存在搜索接口未生效或结果列未被识别。')

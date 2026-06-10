@@ -39,11 +39,12 @@
 		const contentType = String(payload.contentType || '')
 		const body = String(payload.body || '')
 		const fields = extractNetworkFields(body)
+		const requestFields = extractRequestFields(payload.url || '', payload.requestBody || '')
 		const textSample = fields
 			.slice(0, 12)
 			.map((field) => `${field.label || field.key || field.path}=${field.value}`)
 			.join(' | ')
-		if (!fields.length && !textSample) return null
+		if (!fields.length && !textSample && !requestFields.length) return null
 		return {
 			method,
 			status: Number.isFinite(status) ? status : 0,
@@ -52,6 +53,7 @@
 			ageMs: 0,
 			capturedAt: Number(payload.capturedAt) || Date.now(),
 			elapsedMs: Number(payload.elapsedMs) || 0,
+			requestFields,
 			fields,
 			textSample: shortNetworkText(textSample, 480),
 		}
@@ -62,8 +64,45 @@
 		return records.map((record) => ({
 			...record,
 			ageMs: Math.max(0, now - Number(record.capturedAt || now)),
+			requestFields: (Array.isArray(record.requestFields) ? record.requestFields : []).slice(0, MAX_FIELDS_PER_RECORD),
 			fields: (Array.isArray(record.fields) ? record.fields : []).slice(0, MAX_FIELDS_PER_RECORD),
 		}))
+	}
+
+	function extractRequestFields(url, body) {
+		const fields = []
+		const seen = new Set()
+		visitUrlSearchFields(url, fields, seen)
+		for (const field of extractNetworkFields(body)) {
+			if (!field || field.masked) continue
+			const withPath = {
+				...field,
+				path: shortNetworkText(`body.${field.path || field.key || ''}`, 96),
+			}
+			const dedupeKey = `${normalizeNetworkText(withPath.path)}:${normalizeNetworkText(withPath.value)}`
+			if (!dedupeKey || seen.has(dedupeKey)) continue
+			seen.add(dedupeKey)
+			fields.push(withPath)
+			if (fields.length >= MAX_FIELDS_PER_RECORD) break
+		}
+		return fields.slice(0, MAX_FIELDS_PER_RECORD)
+	}
+
+	function visitUrlSearchFields(url, fields, seen) {
+		const raw = String(url || '').trim()
+		if (!raw) return
+		try {
+			const parsed = new URL(raw, location.href)
+			for (const [key, value] of parsed.searchParams.entries()) {
+				if (fields.length >= MAX_FIELDS_PER_RECORD) return
+				const field = buildNetworkField(['query', key], key, value)
+				if (!field || field.masked) continue
+				const dedupeKey = `${normalizeNetworkText(field.path)}:${normalizeNetworkText(field.value)}`
+				if (!dedupeKey || seen.has(dedupeKey)) continue
+				seen.add(dedupeKey)
+				fields.push(field)
+			}
+		} catch (_) {}
 	}
 
 	function extractNetworkFields(body) {

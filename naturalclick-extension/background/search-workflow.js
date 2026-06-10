@@ -33,6 +33,7 @@
 		if (!fields.length) return null
 		const state = searchState.syncSearchState(session, fields, seedSearchStateFromHistory)
 		if (!state) return null
+		rememberSearchActionTargets(state, observation, fields)
 		if (String(state.phase || '') === 'failed') {
 			return finishSearchWorkflowDecision(false, state.failedReason || '搜索工作流失败。')
 		}
@@ -165,15 +166,20 @@
 		if (!sampleDependentFields.length) return
 		const selectionFields = sampleDependentFields.filter(isSelectionField)
 		const candidateSummary = buildSearchDataRequirementCandidateSummary(state, selectionFields)
-		const guidance = selectionFields.length
-			? '当前搜索选择字段缺少可用列表/API样本或任务显式值；即使下拉候选可见，也不要随意选择第一个候选；先 request_context source=tables、request_context source=network 或 inspect_region content 获取对应字段样本，不要填泛化测试词。'
-			: '当前搜索字段缺少可用列表/API样本；先 request_context source=tables、request_context source=network 或 inspect_region content 获取列表/接口数据，不要填泛化测试词。'
+		const horizontalTableSummary = buildHorizontalTableEvidenceSummary(observation)
+		const baseGuidance = selectionFields.length
+			? '当前搜索选择字段缺少可用列表/API样本或任务显式值；若目标字段已有稳定归属的真实候选，可使用候选覆盖测试并在结果里标明取值来源=真实候选；否则先 request_context source=tables、request_context source=network、request_context source=raw_candidates 或 inspect_region content 获取对应字段样本，不要填泛化测试词。'
+			: '当前搜索字段缺少可用列表/API样本；先 request_context source=tables、request_context source=network、request_context source=raw_candidates 或 inspect_region content 获取列表/接口数据，不要填泛化测试词。'
+		const guidance = horizontalTableSummary
+			? `${baseGuidance} 当前列表存在横向滚动，缺失字段可能在未读取列；优先补接口/原始候选证据，或定位可横向滚动容器后再判断。`
+			: baseGuidance
 		lines.push([
 			'- search_data_requirement',
 			'status="missing_table_samples"',
 			`fields="${escapeAttr(sampleDependentFields.map(getFieldLabel).filter(Boolean).join('|'))}"`,
 			selectionFields.length ? `selectionFields="${escapeAttr(selectionFields.map(getFieldLabel).filter(Boolean).join('|'))}"` : '',
 			candidateSummary ? `visibleCandidates="${escapeAttr(candidateSummary)}"` : '',
+			horizontalTableSummary ? `tableHScroll="${escapeAttr(horizontalTableSummary)}"` : '',
 			`guidance="${escapeAttr(guidance)}"`,
 		].join(' '))
 	}
@@ -294,6 +300,25 @@
 		return parts.join('; ')
 	}
 
+	function buildHorizontalTableEvidenceSummary(observation) {
+		const parts = []
+		const tables = Array.isArray(observation?.tables) ? observation.tables : []
+		for (const table of tables) {
+			if (!table?.horizontalScrollable) continue
+			const maxScrollLeft = Math.max(0, Number(table.maxScrollLeft) || 0)
+			if (maxScrollLeft <= 0) continue
+			const scrollLeft = Math.max(0, Number(table.scrollLeft) || 0)
+			const headers = (Array.isArray(table.headers) ? table.headers : [])
+				.map((header) => String(header || '').trim())
+				.filter(Boolean)
+				.slice(0, 6)
+			const headerSummary = headers.length ? ` headers=${headers.join('|')}` : ''
+			parts.push(`${scrollLeft}/${maxScrollLeft}${headerSummary}`)
+			if (parts.length >= 3) break
+		}
+		return parts.join('; ')
+	}
+
 	function collectFieldVisibleCandidatesForHint(state, field) {
 		const key = getFieldKey(field)
 		const values = [
@@ -317,7 +342,10 @@
 
 	function collectSelectionFieldSampleMismatches(state, fields, observation) {
 		const mismatches = []
-		for (const field of (Array.isArray(fields) ? fields : [])) {
+		const activeKey = String(state?.activeFieldKey || '').trim()
+		const activeField = activeKey ? searchState.getFieldByKey(fields, activeKey) : null
+		const targetFields = activeField ? [activeField] : (Array.isArray(fields) ? fields : [])
+		for (const field of targetFields) {
 			const mismatch = getSelectionFieldSampleMismatch(state, field, observation)
 			if (mismatch) mismatches.push(mismatch)
 		}
@@ -377,18 +405,16 @@
 			const candidate = pickOptionCandidateDetailForField(state, field, observation, session)
 			if (candidate.text) return buildSelectionChoiceDecision(field, candidate)
 			const mismatch = getSelectionFieldSampleMismatch(state, field, observation)
-			if (mismatch) return buildOptionSampleMismatchDecision(state, field, mismatch)
-			if (hasUsableOptionCandidate(state, field, observation)) {
-				return buildEvidenceStopOrSkipDecision(
-					state,
-					field,
-					`搜索字段 "${label}" 已有真实候选，但当前没有可用列表样本或任务显式值用于选择候选，已停止以避免无依据搜索。`,
-					{
-						...buildFieldWorkflowInput(field),
-						workflow_missing_table_samples: true,
-					}
-				)
+			if (mismatch) {
+				const coverageCandidate = pickCandidateOnlySelectionCandidate(state, field, observation, {
+					allowWhenSamplePresent: true,
+					sample: mismatch.sample,
+				})
+				if (coverageCandidate.text) return buildSelectionChoiceDecision(field, coverageCandidate)
+				return buildOptionSampleMismatchDecision(state, field, mismatch)
 			}
+			const coverageCandidate = pickCandidateOnlySelectionCandidate(state, field, observation)
+			if (coverageCandidate.text) return buildSelectionChoiceDecision(field, coverageCandidate)
 			return {
 				evaluation_previous_goal: `准备测试选择类搜索字段 "${label}"。`,
 				memory: '选择类字段必须先展开并读取真实候选，禁止猜测选项文本。',
@@ -428,18 +454,18 @@
 		const candidate = pickOptionCandidateDetailForField(state, field, observation, session)
 		if (candidate.text) return buildSelectionChoiceDecision(field, candidate)
 		const mismatch = getSelectionFieldSampleMismatch(state, field, observation)
-		if (mismatch) return buildOptionSampleMismatchDecision(state, field, mismatch)
-		if (hasUsableOptionCandidate(state, field, observation)) {
-			return buildEvidenceStopOrSkipDecision(
-				state,
-				field,
-				`搜索字段 "${getFieldLabel(field)}" 已展开并有真实候选，但当前没有可用列表样本或任务显式值用于选择候选，已停止以避免无依据搜索。`,
-				{
-					...buildFieldWorkflowInput(field),
-					workflow_missing_table_samples: true,
-				}
-			)
+		if (mismatch) {
+			const coverageCandidate = pickCandidateOnlySelectionCandidate(state, field, observation, {
+				allowWhenSamplePresent: true,
+				sample: mismatch.sample,
+			})
+			if (coverageCandidate.text) return buildSelectionChoiceDecision(field, coverageCandidate)
+			return buildOptionSampleMismatchDecision(state, field, mismatch)
 		}
+		const coverageCandidate = pickCandidateOnlySelectionCandidate(state, field, observation)
+		if (coverageCandidate.text) return buildSelectionChoiceDecision(field, coverageCandidate)
+		const rejectedTemporalSample = buildRejectedTemporalSampleDecision(state, field, observation)
+		if (rejectedTemporalSample) return rejectedTemporalSample
 		const key = getFieldKey(field)
 		const attempts = searchState.getDropdownOpenAttemptCount(state, key)
 		if (attempts <= 0) {
@@ -453,6 +479,9 @@
 		const candidateText = String(candidate?.text || candidate || '').trim()
 		const source = String(candidate?.source || 'option_candidate').trim()
 		const basis = String(candidate?.basis || '真实可见候选').trim()
+		const candidateOnly = candidate?.candidateOnly === true
+		const candidatePool = normalizeWorkflowScopedCandidatePool(candidate?.candidatePool || candidate?.candidates || candidateText)
+		const evidence = buildSearchValueEvidenceSummary(field, { text: candidateText, source, basis })
 		const isCascader = isCascaderLikeField(field)
 		const actionName = isCheckboxLikeField(field)
 			? 'select_checkbox_option'
@@ -465,6 +494,8 @@
 			memory: `选择候选 "${candidateText}" 后提交搜索；候选来源=${source}${basis ? `，依据=${basis}` : ''}。`,
 			thought: source === 'table_sample'
 				? '候选来自真实下拉项，并与当前列表对应列已有值匹配，优先用于避免空结果。'
+				: candidateOnly
+					? '缺少列表/API样本时，使用稳定归属到目标字段的真实候选做控件覆盖测试，并在结果中保留取值来源。'
 				: '只从真实候选中选择，避免臆造下拉项。',
 			next_goal: `选择搜索字段 "${label}" 的候选：${candidateText}`,
 			action: {
@@ -475,6 +506,10 @@
 					target_label: label,
 					workflow_value_source: source,
 					workflow_value_basis: basis,
+					workflow_value_evidence: evidence,
+					workflow_scoped_candidates: candidatePool.length ? candidatePool.slice(0, 40).join('|') : undefined,
+					workflow_candidate_evidence: candidatePool.length ? 'field_scoped_options' : undefined,
+					workflow_candidate_only_test: candidateOnly || undefined,
 					workflow_step: 'select_option',
 					workflow_test_value: candidateText,
 					...(isCascader
@@ -485,10 +520,25 @@
 		}
 	}
 
+	function normalizeWorkflowScopedCandidatePool(values) {
+		const list = Array.isArray(values) ? values : [values]
+		const out = []
+		const seen = new Set()
+		for (const value of list) {
+			const text = String(value || '').trim()
+			const key = normalizeText(text)
+			if (!key || seen.has(key)) continue
+			seen.add(key)
+			out.push(text)
+		}
+		return out
+	}
+
 	function buildTextSearchFillDecision(field, value) {
 		const label = getFieldLabel(field)
 		const source = String(value?.source || '').trim()
 		const basis = String(value?.basis || '').trim()
+		const evidence = buildSearchValueEvidenceSummary(field, value)
 		return {
 			evaluation_previous_goal: `准备测试文本类搜索字段 "${label}"。`,
 			memory: `搜索测试按字段推进：填写当前字段后提交搜索，再重置进入下一字段。测试值来源=${source}${basis ? `，依据=${basis}` : ''}。`,
@@ -507,6 +557,7 @@
 					target_label: label,
 					workflow_value_source: source,
 					workflow_value_basis: basis,
+					workflow_value_evidence: evidence,
 					workflow_step: 'fill_field',
 				},
 			},
@@ -561,6 +612,21 @@
 				workflow_table_sample: sample,
 				workflow_expected_value: taskValue || sample,
 				workflow_dropdown_output: String(state?.pendingDropdownOutput || '').slice(0, 240),
+			}
+		)
+	}
+
+	function buildRejectedTemporalSampleDecision(state, field, observation) {
+		if (!hasRejectedTemporalSampleForField(observation, [], field)) return null
+		const label = getFieldLabel(field)
+		return buildEvidenceStopOrSkipDecision(
+			state,
+			field,
+			`搜索字段 "${label}" 的日期/时间样本无法解析为有效候选，已停止以避免选择相邻日期或错误范围。`,
+			{
+				...buildFieldWorkflowInput(field),
+				workflow_missing_table_samples: true,
+				workflow_rejected_temporal_sample: true,
 			}
 		)
 	}
@@ -630,6 +696,11 @@
 		}
 		const peer = range.split('..').find((item) => normalizeDateCandidate(item) !== start) || range.split('..')[1] || start
 		const label = getFieldLabel(field)
+		const evidence = buildSearchValueEvidenceSummary(field, {
+			text: range,
+			source: 'visible_option',
+			basis: `日期范围起点：${start}`,
+		})
 		return {
 			evaluation_previous_goal: `搜索字段 "${label}" 已选择日期范围起点。`,
 			memory: `日期范围控件需要开始和结束日期；已选起点=${start}，下一步选择终点=${peer}，避免半选范围直接提交。`,
@@ -646,6 +717,7 @@
 					workflow_test_value: range,
 					workflow_value_source: 'visible_option',
 					workflow_value_basis: `日期范围起点：${start}`,
+					workflow_value_evidence: evidence,
 					workflow_step: 'select_option',
 					workflow_date_range_completion: true,
 				},
@@ -671,6 +743,7 @@
 					target_label: getActionLabel(action) || '搜索',
 					workflow_test_value: String(stored.lastTestValue || ''),
 					workflow_value_source: String(stored.lastValueSource || ''),
+					workflow_value_evidence: String(stored.lastValueEvidence || ''),
 					workflow_step: 'submit_search',
 				},
 			},
@@ -702,13 +775,15 @@
 			canClearSearchFieldByInput(field)
 		)
 		if (failedResetField) {
-			const retryCount = searchState.getClearRetryAttemptCount(state, getFieldKey(failedResetField))
+			const failedKey = getFieldKey(failedResetField)
+			const retryCount = searchState.getClearRetryAttemptCount(state, failedKey)
 			const clearFallback = buildFieldClearFallbackDecision('baseline', failedResetField, filled, {
 				workflow_clear_retry: true,
 				workflow_clear_retry_count: retryCount,
 				workflow_reset_ineffective: !!action,
 				workflow_reset_action_index: action ? Number(action.index) : undefined,
 				workflow_reset_action_label: action ? (getActionLabel(action) || '重置') : undefined,
+				...buildClearFailureWorkflowInput(state, failedKey),
 			})
 			if (clearFallback) return clearFallback
 		}
@@ -755,6 +830,7 @@
 				workflow_reset_ineffective: !!action,
 				workflow_reset_action_index: action ? Number(action.index) : undefined,
 				workflow_reset_action_label: action ? (getActionLabel(action) || '重置') : undefined,
+				...buildClearFailureWorkflowInput(state, key),
 			})
 			if (clearFallback) return clearFallback
 		}
@@ -792,6 +868,9 @@
 					workflow_result_status: result.status,
 					workflow_result_summary: result.summary,
 					workflow_step: 'reset_filters',
+					workflow_test_value: String(field.lastTestValue || ''),
+					workflow_value_source: String(field.lastValueSource || ''),
+					workflow_value_evidence: String(field.lastValueEvidence || ''),
 					workflow_clear_retry: retryCount > 0 || undefined,
 					workflow_clear_retry_count: retryCount || undefined,
 				},
@@ -821,8 +900,14 @@
 
 	function deriveSearchObservationFailureDecision(session, error) {
 		const state = session?.workflowState?.search
-		if (!state || !hasSearchResultEvidence(state)) return null
+		if (!state) return null
 		const reason = compactSearchDiagnosticText(error || '无法读取页面状态', 240)
+		const failureCount = incrementObservationFailureCount(state)
+		const recovered = failureCount <= 3
+			? buildObservationFailureRecoveryDecision(session, state, reason)
+			: null
+		if (recovered) return recovered
+		if (!hasSearchResultEvidence(state)) return null
 		const decision = buildFinalSearchWorkflowDecision(state)
 		const input = decision?.action?.input || {}
 		const baseText = String(input.text || '').trim() || '搜索/筛选区域测试已有部分记录。'
@@ -842,6 +927,183 @@
 				},
 			},
 		}
+	}
+
+	function deriveSearchTimeoutRecoveryDecision(session, observation, context = {}) {
+		const state = session?.workflowState?.search
+		if (!state || isTerminalSearchPhase(state.phase) || String(state.phase || '') === 'failed') return null
+		const phase = String(state.phase || '').trim()
+		const diagnostic = '模型规划超时'
+		if (/^(awaiting_submit|awaiting_reset|awaiting_option)$/.test(phase)) {
+			const recovered = deriveSearchExecutableRecoveryDecision(session, state, observation, context, {
+				workflow_timeout_recovered: true,
+				workflow_model_timeout_recovered: true,
+				planning_context_diagnostic: diagnostic,
+				workflow_planning_context_diagnostic: diagnostic,
+			}, { allowNextPendingOption: false })
+			if (isExecutableSearchRecoveryDecision(recovered)) {
+				return {
+					...recovered,
+					evaluation_previous_goal: `模型规划超时；搜索工作流处于 ${phase} 阶段，已由本地状态机恢复下一步。${recovered.evaluation_previous_goal || ''}`,
+					memory: `搜索超时恢复：phase=${phase}，只接管已明确的提交、清空或候选选择动作。${recovered.memory || ''}`,
+					thought: `当前不是重新选择字段，而是继续完成已开始的搜索测试步骤。${recovered.thought || ''}`,
+				}
+			}
+		}
+		return buildSearchTimeoutSummaryDecision(state, diagnostic, phase)
+	}
+
+	function buildSearchTimeoutSummaryDecision(state, reason, phase) {
+		if (!hasSearchResultEvidence(state)) return null
+		const decision = buildFinalSearchWorkflowDecision(state)
+		const input = decision?.action?.input || {}
+		const baseText = String(input.text || '').trim() || '搜索/筛选区域测试已有部分记录。'
+		return {
+			...decision,
+			evaluation_previous_goal: `模型规划超时；搜索工作流已有可汇总结果，但当前阶段 ${phase || 'unknown'} 没有安全的确定性下一步动作。`,
+			memory: '超时总结恢复：优先输出已记录的搜索测试结果，避免把一次模型等待超时表现成整轮测试无结果。',
+			thought: '继续点击或选择可能会重复测试字段；在已有结果证据时，阶段性总结比盲目动作更安全。',
+			next_goal: '输出搜索测试阶段性总结',
+			action: {
+				...decision.action,
+				input: {
+					...input,
+					text: `${baseText}最后一次模型规划超时：${reason}；已按当前已记录结果生成阶段性总结。`,
+					workflow_timeout_summary: true,
+					workflow_model_timeout_recovered: true,
+					workflow_timeout_phase: phase || 'unknown',
+					planning_context_diagnostic: reason,
+					workflow_planning_context_diagnostic: reason,
+				},
+			},
+		}
+	}
+
+	function buildObservationFailureRecoveryDecision(session, state, reason) {
+		const phase = String(state?.phase || '').trim()
+		if (phase === 'awaiting_submit') {
+			return buildObservationFailureSubmitDecision(state, reason)
+		}
+		if (phase === 'awaiting_reset') {
+			return buildObservationFailureResetDecision(state, reason)
+		}
+		if (phase === 'awaiting_option') {
+			return buildObservationFailureOptionDecision(session, state, reason)
+		}
+		return null
+	}
+
+	function buildObservationFailureSubmitDecision(state, reason) {
+		const key = String(state?.activeFieldKey || '').trim()
+		if (!key) return null
+		const field = buildFieldFromSearchState(state, key)
+		const action = getRememberedSearchAction(state, 'submit')
+		if (!field || !Number.isFinite(Number(action?.index))) return null
+		const stored = state.fields?.[key] || {}
+		return {
+			evaluation_previous_goal: '页面观察超时，但搜索字段值已在工作流状态中记录。',
+			memory: `观察失败恢复：继续使用上一轮已识别的搜索提交入口，避免因全量 DOM 抽取超时而提前总结。字段=${getFieldLabel(field) || key}，值=${stored.lastTestValue || '未知'}。`,
+			thought: '当前阶段是已设置字段值、等待提交搜索；无需重新全量观察即可点击之前确认过的提交按钮。',
+			next_goal: `观察超时后继续提交搜索：${getFieldLabel(field) || key}`,
+			action: {
+				name: 'click_element_by_index',
+				input: {
+					...buildFieldWorkflowInput(field),
+					index: Number(action.index),
+					target_label: action.label || '搜索',
+					workflow_test_value: String(stored.lastTestValue || ''),
+					workflow_value_source: String(stored.lastValueSource || ''),
+					workflow_value_evidence: String(stored.lastValueEvidence || ''),
+					workflow_step: 'submit_search',
+					workflow_observation_recovery: true,
+					workflow_observation_error: reason,
+				},
+			},
+		}
+	}
+
+	function buildObservationFailureResetDecision(state, reason) {
+		const key = String(state?.activeFieldKey || state?.lastSearchedFieldKey || '').trim()
+		if (!key) return null
+		const field = buildFieldFromSearchState(state, key)
+		if (!field) return null
+		const result = recordObservationTimeoutSearchResult(state, key, reason)
+		const action = getRememberedSearchAction(state, 'reset')
+		if (Number.isFinite(Number(action?.index))) {
+			return {
+				evaluation_previous_goal: '搜索已提交，但提交后的页面观察超时。',
+				memory: `观察失败恢复：先记录该字段结果为未确认，再使用上一轮已识别的清空/重置入口恢复筛选基线，继续后续字段。${result.summary}`,
+				thought: '当前阶段是提交后等待清空；即使结果观察超时，也应清空条件继续覆盖后续字段，而不是直接结束整轮测试。',
+				next_goal: `观察超时后清空搜索条件：${getFieldLabel(field) || key}`,
+				action: {
+					name: 'click_element_by_index',
+					input: {
+						...buildFieldWorkflowInput(field),
+						index: Number(action.index),
+						target_label: action.label || '重置',
+						workflow_result_status: result.status,
+						workflow_result_summary: result.summary,
+						workflow_step: 'reset_filters',
+						workflow_test_value: String(field.lastTestValue || ''),
+						workflow_value_source: String(field.lastValueSource || ''),
+						workflow_value_evidence: String(field.lastValueEvidence || ''),
+						workflow_observation_recovery: true,
+						workflow_observation_error: reason,
+					},
+				},
+			}
+		}
+		const clearFallback = buildFieldClearFallbackDecision('after_submit', field, getFieldLabel(field) ? [getFieldLabel(field)] : [], {
+			workflow_result_status: result.status,
+			workflow_result_summary: result.summary,
+			workflow_observation_recovery: true,
+			workflow_observation_error: reason,
+		})
+		return clearFallback
+	}
+
+	function buildObservationFailureOptionDecision(session, state, reason) {
+		const key = String(state?.activeFieldKey || '').trim()
+		if (!key) return null
+		const field = buildFieldFromSearchState(state, key)
+		if (!field) return null
+		const candidate = pickOptionCandidateDetailForField(state, field, null, session)
+		if (!candidate.text) return null
+		return annotateSearchDecisionInput(buildSelectionChoiceDecision(field, candidate), {
+			workflow_observation_recovery: true,
+			workflow_observation_error: reason,
+		})
+	}
+
+	function recordObservationTimeoutSearchResult(state, key, reason) {
+		const field = state?.fields?.[key] || {}
+		const value = String(field.lastTestValue || '').trim()
+		return recordSearchResultObservation(state, key, {
+			status: 'unknown_observation_timeout',
+			label: String(field.label || key || '').trim(),
+			value,
+			source: String(field.lastValueSource || '').trim(),
+			summary: value
+				? `搜索已提交测试值 "${value}"，但提交后页面观察超时，结果未确认；将先清空条件继续后续字段。${reason ? `超时诊断：${reason}` : ''}`
+				: `搜索已提交，但提交后页面观察超时且没有记录到测试值；将先清空条件继续后续字段。${reason ? `超时诊断：${reason}` : ''}`,
+		})
+	}
+
+	function incrementObservationFailureCount(state) {
+		if (!state || typeof state !== 'object') return 0
+		const phase = String(state.phase || '').trim()
+		const lastPhase = String(state.lastObservationFailurePhase || '').trim()
+		const previous = lastPhase === phase ? Number(state.observationFailureCount || 0) : 0
+		const next = Math.max(0, previous) + 1
+		state.lastObservationFailurePhase = phase
+		state.observationFailureCount = next
+		return next
+	}
+
+	function clearObservationFailureCount(state) {
+		if (!state || typeof state !== 'object') return
+		state.observationFailureCount = 0
+		state.lastObservationFailurePhase = ''
 	}
 
 	function hasSearchResultEvidence(state) {
@@ -905,6 +1167,7 @@
 				workflow_reset_ineffective: !!action,
 				workflow_reset_action_index: action ? Number(action.index) : undefined,
 				workflow_reset_action_label: action ? (getActionLabel(action) || '重置') : undefined,
+				...buildClearFailureWorkflowInput(state, key),
 			})
 			if (clearFallback) return clearFallback
 		}
@@ -927,6 +1190,7 @@
 					workflow_clear_failed: true,
 					workflow_clear_retry: true,
 					workflow_clear_retry_count: nextAttempt,
+					...buildClearFailureWorkflowInput(state, key),
 				})
 				if (clearFallback) return clearFallback
 			}
@@ -950,8 +1214,21 @@
 					workflow_step: 'reset_filters',
 					workflow_clear_retry: true,
 					workflow_clear_retry_count: nextAttempt,
+					...buildClearFailureWorkflowInput(state, key),
 				},
 			},
+		}
+	}
+
+	function buildClearFailureWorkflowInput(state, key) {
+		const detail = searchState.getClearFailureDetail(state, key)
+		if (!detail) return {}
+		return {
+			workflow_clear_failure_reason: String(detail.reason || ''),
+			workflow_clear_failure_output: String(detail.output || ''),
+			workflow_clear_failure_action_index: Number.isFinite(Number(detail.actionIndex)) ? Number(detail.actionIndex) : undefined,
+			workflow_clear_failure_action_label: String(detail.actionLabel || ''),
+			workflow_clear_failure_attempts: Number.isFinite(Number(detail.attempts)) ? Number(detail.attempts) : undefined,
 		}
 	}
 
@@ -972,7 +1249,12 @@
 		}
 		return {
 			evaluation_previous_goal: textByContext[context] || textByContext.after_submit,
-			memory: '搜索测试仍保持通用策略：优先使用页面清空/重置按钮；缺失时只对普通可编辑文本框置空，不对选择、日期或多选控件猜测清空。',
+			memory: [
+				'搜索测试仍保持通用策略：优先使用页面清空/重置按钮；缺失时只对普通可编辑文本框置空，不对选择、日期或多选控件猜测清空。',
+				extraInput?.workflow_clear_failure_reason
+					? `上次清空失败：${extraInput.workflow_clear_failure_reason}`
+					: '',
+			].filter(Boolean).join(' '),
 			thought: '字段级清空是结构化兜底，适用于可编辑文本字段；清空后继续按字段逐项测试。',
 			next_goal: `清空搜索字段：${label}`,
 			action: {
@@ -1189,23 +1471,27 @@
 	}
 
 	function deriveSearchContextLimitExecutableDecision(session, state, observation, context = {}, limitInput = {}) {
-		if (!state || !observation) return null
-		const fields = collectSearchFields(observation)
-		if (!fields.length) return null
 		const planningContext = Array.isArray(context?.planningContext) ? context.planningContext : []
 		const diagnostic = String(limitInput?.planning_context_diagnostic || '')
-		const recoveryInput = {
+		return deriveSearchExecutableRecoveryDecision(session, state, observation, context, {
 			workflow_context_limit_recovered: true,
 			workflow_model_failure_recovered: true,
 			planning_context_diagnostic: diagnostic,
 			workflow_planning_context_diagnostic: diagnostic,
 			workflow_context_rounds: planningContext.length || undefined,
-		}
+		})
+	}
+
+	function deriveSearchExecutableRecoveryDecision(session, state, observation, context = {}, recoveryInput = {}, options = {}) {
+		if (!state || !observation) return null
+		const fields = collectSearchFields(observation)
+		if (!fields.length) return null
+		const planningContext = Array.isArray(context?.planningContext) ? context.planningContext : []
 		const phase = String(state.phase || '')
 		let recovered = null
 		if (phase === 'awaiting_option') {
 			const field = searchState.getFieldByKey(fields, state.activeFieldKey) ||
-				searchState.getNextPendingField(state, fields)
+				(options.allowNextPendingOption === false ? null : searchState.getNextPendingField(state, fields))
 			if (!field) return null
 			const candidateState = buildStateWithPlanningContextOptionCandidates(state, field, planningContext)
 			const rangeCompletion = buildPendingDateRangeCompletionDecision(candidateState, field, observation)
@@ -1214,6 +1500,10 @@
 			} else {
 				const candidate = pickOptionCandidateDetailForField(candidateState, field, observation, session, { planningContext })
 				if (candidate.text) recovered = buildSelectionChoiceDecision(field, candidate)
+				if (!recovered) {
+					const coverageCandidate = pickCandidateOnlySelectionCandidate(candidateState, field, observation)
+					if (coverageCandidate.text) recovered = buildSelectionChoiceDecision(field, coverageCandidate)
+				}
 			}
 		} else if (phase === 'awaiting_submit') {
 			recovered = buildSubmitSearchDecision(observation, state, fields)
@@ -1254,10 +1544,7 @@
 		return {
 			...state,
 			pendingDropdownFieldKey: getFieldKey(field) || String(state?.pendingDropdownFieldKey || ''),
-			pendingDropdownCandidates: [
-				...(Array.isArray(state?.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []),
-				...candidates,
-			],
+			pendingDropdownCandidates: candidates,
 		}
 	}
 
@@ -1287,9 +1574,12 @@
 		for (const block of extractContextBlocks(text, 'native_options')) {
 			labels.push(...extractOptionLabelsFromContextText(block.body))
 		}
+		for (const block of extractContextBlocks(text, 'target_matches')) {
+			labels.push(...extractOptionLabelsFromContextText(block.body))
+		}
 		for (const tag of ['visible_options', 'visible_popups']) {
 			for (const block of extractContextBlocks(text, tag)) {
-				if (!/\bscoped=["'](?:field|explicit)["']/i.test(block.openTag || '')) continue
+				if (!/\bscoped=["'](?:field|explicit|active)["']/i.test(block.openTag || '')) continue
 				labels.push(...extractOptionLabelsFromContextText(block.body))
 			}
 		}
@@ -1315,6 +1605,7 @@
 		for (const line of String(text || '').split(/\n+/)) {
 			const trimmed = line.replace(/\s+/g, ' ').trim()
 			if (!trimmed || /<\/?(?:visible_options|visible_popups|native_options|options_for|target_matches)\b/i.test(trimmed)) continue
+			labels.push(...extractInlineOptionCandidatesFromContextLine(trimmed))
 			const attrLabel = readContextLineAttribute(trimmed, 'label')
 			if (attrLabel) {
 				labels.push(attrLabel)
@@ -1324,6 +1615,16 @@
 			if (nativeMatch) labels.push(unescapeContextText(nativeMatch[1]))
 		}
 		return labels.map((item) => String(item || '').trim()).filter(Boolean)
+	}
+
+	function extractInlineOptionCandidatesFromContextLine(line) {
+		const labels = []
+		for (const attr of ['options', 'candidates', 'text']) {
+			const value = readContextLineAttribute(line, attr)
+			if (!value) continue
+			labels.push(...splitInlineOptionCandidateText(value))
+		}
+		return labels
 	}
 
 	function escapeRegExp(value) {
@@ -1345,15 +1646,17 @@
 			.trim()
 	}
 
-	function deriveSearchPostContextDecision(session, workflowContextText, planningContext = []) {
+	function deriveSearchPostContextDecision(session, workflowContextText, planningContext = [], context = {}) {
 		const state = session?.workflowState?.search
 		if (!state || isTerminalSearchPhase(state.phase) || String(state.phase || '') === 'failed') return null
 		const key = resolveActiveSearchStateKey(state)
 		if (!key || searchState.getEvidenceRequestAttemptCount(state, key) <= 0) return null
-		const field = buildFieldFromSearchState(state, key)
+		const observation = context?.observation || null
+		const observationFields = observation ? collectSearchFields(observation) : []
+		const field = searchState.getFieldByKey(observationFields, key) || buildFieldFromSearchState(state, key)
 		if (!field) return null
 		const diagnostic = summarizeSearchPlanningContextDiagnostic(planningContext)
-		const executableRecovery = deriveSearchPostContextExecutableDecision(session, state, field, planningContext)
+		const executableRecovery = deriveSearchPostContextExecutableDecision(session, state, field, planningContext, observation)
 		if (isExecutableSearchRecoveryDecision(executableRecovery)) {
 			return annotateSearchDecisionInput(executableRecovery, {
 				workflow_context_recovered: true,
@@ -1404,20 +1707,31 @@
 		})
 	}
 
-	function deriveSearchPostContextExecutableDecision(session, state, field, planningContext = []) {
+	function deriveSearchPostContextExecutableDecision(session, state, field, planningContext = [], observation = null) {
 		if (!state || !field) return null
 		const key = getFieldKey(field)
+		const phase = String(state.phase || '').trim()
 		if (key) {
 			rememberFieldMetadata(state, key, buildFieldWorkflowInput(field))
 			state.activeFieldKey = key
 		}
+		if (phase === 'awaiting_submit') {
+			return observation ? buildSubmitSearchDecision(observation, state, collectSearchFields(observation)) : null
+		}
+		if (phase === 'awaiting_reset') {
+			return observation ? buildResetSearchDecision(observation, state, collectSearchFields(observation)) : null
+		}
 		if (isSelectionField(field)) {
+			if (phase && phase !== 'awaiting_option' && phase !== 'select_field') return null
 			const candidateState = buildStateWithPlanningContextOptionCandidates(state, field, planningContext)
-			const candidate = pickOptionCandidateDetailForField(candidateState, field, null, session, { planningContext })
+			const candidate = pickOptionCandidateDetailForField(candidateState, field, observation, session, { planningContext })
 			if (candidate.text) return buildSelectionChoiceDecision(field, candidate)
+			const coverageCandidate = pickCandidateOnlySelectionCandidate(candidateState, field, observation)
+			if (coverageCandidate.text) return buildSelectionChoiceDecision(field, coverageCandidate)
 			return null
 		}
-		const value = buildSearchFieldTestValue(session, field, null, planningContext)
+		if (phase && phase !== 'select_field') return null
+		const value = buildSearchFieldTestValue(session, field, observation, planningContext)
 		if (!value.text) return null
 		if (key) {
 			rememberFieldMetadata(state, key, {
@@ -1431,12 +1745,19 @@
 	}
 
 	function deriveSearchPostValidationDecision(session, action, validationError, context = {}) {
-		void context
 		const state = session?.workflowState?.search
 		if (!state || isTerminalSearchPhase(state.phase) || String(state.phase || '') === 'failed') return null
 		if (!isSearchValidationRecoveryAction(action)) return null
 		const text = String(validationError || '').trim()
 		if (!text) return null
+		const executableRecovery = deriveSearchExecutableRecoveryDecision(session, state, context?.observation, context, {
+			workflow_validation_recovered: true,
+			workflow_validation_error: text,
+			workflow_context_recovered: Array.isArray(context?.planningContext) && context.planningContext.length ? true : undefined,
+			planning_context_diagnostic: summarizeSearchPlanningContextDiagnostic(context?.planningContext) || undefined,
+			workflow_planning_context_diagnostic: summarizeSearchPlanningContextDiagnostic(context?.planningContext) || undefined,
+		}, { allowNextPendingOption: false })
+		if (isExecutableSearchRecoveryDecision(executableRecovery)) return executableRecovery
 		const evidence = classifySearchEvidenceFailure({
 			evaluation_previous_goal: text,
 			memory: text,
@@ -1639,7 +1960,7 @@
 		const optionSampleMismatch = input.workflow_option_sample_mismatch === true ||
 			/(option_sample_mismatch|候选.*不匹配|不匹配.*候选|列表样本和候选不匹配|非匹配候选|无法安全选择非匹配候选)/i.test(text)
 		const optionCandidatesUnobserved = input.workflow_option_candidates_unobserved === true ||
-			/(option_candidates_unobserved|global_popup_diagnostic|global_selectable_popup_diagnostic|候选.*未观测|未观测.*候选|没有观测到候选|没有检测到真实候选|下拉候选.*为空|无法确认可选候选|缺少候选|没有候选|不能猜选项|猜选项|字段外可见|字段外候选|不要直接选择字段外候选|候选.*未归属|未归属.*候选|候选未能.*目标字段.*归属|诊断候选|没有稳定归属|不能直接选择.*候选)/i.test(text)
+			/(option_candidates_unobserved|global_popup_diagnostic|global_selectable_popup_diagnostic|候选.*未观测|未观测.*候选|没有观测到候选|没有检测到真实候选|下拉候选.*为空|无法确认可选候选|缺少候选|没有候选|不能猜选项|猜选项|字段外可见|字段外候选|不要直接选择字段外候选|候选.*未归属|未归属.*候选|候选未能.*目标字段.*归属|诊断候选|没有稳定归属|不能直接选择.*候选|下拉候选已经可见|不要重复只展开同一字段|候选(?:项)?(?:明显)?(?:不属于|不对|不正确)|归属混乱|缺少真实.*选项|未包含真实.*选项)/i.test(text)
 		const rawMissingTableSamples = input.workflow_missing_table_samples === true ||
 			/(missing_table_samples|no_observed_tables|missing_sample|缺少.*(表格|列表|样本|数据)|没有.*(可用)?(表格|列表)(摘要|样本|数据)|没有.*可用.*样本|无.*(表格|列表)(摘要|样本|数据)|泛化搜索词|随机值|随机搜索|无意义测试)/i.test(text)
 		const missingTableSamples = rawMissingTableSamples && !optionSampleMismatch && !optionCandidatesUnobserved
@@ -1690,6 +2011,7 @@
 
 	function applySearchHistoryItemToState(state, item) {
 		if (!item || !state) return
+		if (item.success !== false) clearObservationFailureCount(state)
 		if (isSearchWorkflowFinishHistory(item)) {
 			markSearchWorkflowCompleted(state, item)
 			return
@@ -1993,6 +2315,11 @@
 			return
 		}
 		const attempts = searchState.incrementClearRetryAttempt(state, resetKey)
+		rememberClearFailureDetail(state, resetKey, input, item, attempts)
+		if (isResetObservationUnavailableFailure(input, item)) {
+			recordResetObservationUnavailableCompletion(state, resetKey, input, item)
+			return
+		}
 		if (attempts >= 3) {
 			markSearchWorkflowFailed(
 				state,
@@ -2004,6 +2331,49 @@
 		state.lastSearchedFieldKey = resetKey
 		clearPendingDropdownState(state)
 		state.phase = input.workflow_baseline_reset ? 'select_field' : 'awaiting_reset'
+	}
+
+	function isResetObservationUnavailableFailure(input, item) {
+		if (String(input?.workflow_step || '').trim() !== 'reset_filters') return false
+		const text = normalizeText([
+			input?.workflow_observation_error,
+			item?.output,
+			item?.message,
+			item?.error,
+			getHistoryFailureReason(item, ''),
+		].filter(Boolean).join(' '))
+		return /(页面通信超时|执行脚本未响应|无法获取动作后页面状态|动作后观察暂不可用|观察耗时|postobservation|observation.*timeout|requestobservation|通信超时|未响应)/i.test(text)
+	}
+
+	function recordResetObservationUnavailableCompletion(state, key, input, item) {
+		const field = state?.fields?.[key] || {}
+		const reason = getHistoryFailureReason(item, '搜索重置后页面观察超时')
+		if (!state.resultsByKey?.[key]) {
+			recordSearchResultObservation(state, key, {
+				status: 'unknown_observation_timeout',
+				label: String(input?.workflow_field_label || field.label || key || '').trim(),
+				value: String(input?.workflow_test_value || field.lastTestValue || '').trim(),
+				source: String(input?.workflow_value_source || field.lastValueSource || '').trim(),
+				summary: `搜索已提交，但清空/重置后的页面观察不可用，结果与清空状态均未完全确认。超时诊断：${compactSearchDiagnosticText(reason, 180)}`,
+			})
+		}
+		markSearchFieldCompleted(state, key, { requiresClear: false })
+		state.activeFieldKey = ''
+		state.lastSearchedFieldKey = ''
+		clearPendingDropdownState(state)
+		state.phase = 'select_field'
+	}
+
+	function rememberClearFailureDetail(state, key, input, item, attempts) {
+		const reason = getHistoryFailureReason(item, '搜索重置失败')
+		const output = compactSearchDiagnosticText(item?.output || item?.message || reason || '', 260)
+		searchState.rememberClearFailureDetail(state, key, {
+			reason: compactSearchDiagnosticText(reason, 180),
+			output,
+			actionIndex: Number(input?.index),
+			actionLabel: String(input?.target_label || input?.label || input?.text || '').trim(),
+			attempts: Number(attempts) || 0,
+		})
 	}
 
 	function isSearchDateOptionClickHistory(state, item, action, input) {
@@ -2170,6 +2540,7 @@
 			next.lastTestValue = testValue
 			next.lastValueSource = String(input?.workflow_value_source || previous.lastValueSource || '')
 			next.lastValueBasis = String(input?.workflow_value_basis || previous.lastValueBasis || '')
+			next.lastValueEvidence = String(input?.workflow_value_evidence || previous.lastValueEvidence || '')
 		}
 		state.fields[key] = next
 	}
@@ -2380,12 +2751,17 @@
 				} else if (!formLooksSearch && !fieldLooksSearch) {
 					continue
 				}
-				const normalizedField = panelLabel ? { ...field, searchLabel: panelLabel } : field
+				const normalizedField = {
+					...field,
+					...(panelLabel ? { searchLabel: panelLabel } : {}),
+					searchFormId: String(form?.id || form?.name || '').trim(),
+					searchOrder: fields.length,
+				}
 				if (!isUsableSearchField(normalizedField)) continue
 				fields.push(normalizedField)
 			}
 		}
-		return pruneDuplicateWeakLabelFields(dedupeFields(fields))
+		return finalizeCollectedSearchFields(fields, panelLabels)
 	}
 
 	function isPageSearchRegion(field) {
@@ -2414,6 +2790,246 @@
 			out.push(field)
 		}
 		return out
+	}
+
+	function finalizeCollectedSearchFields(fields, panelLabels = []) {
+		const collapsed = collapseDateRangeSearchFields(dedupeFields(fields))
+		const relabeled = applyTemporalPanelLabelsToGenericDateRanges(collapsed, panelLabels)
+		return pruneDuplicateWeakLabelFields(relabeled)
+	}
+
+	function collapseDateRangeSearchFields(fields) {
+		const list = Array.isArray(fields) ? fields : []
+		if (list.length < 2) return list
+		const dropped = new Set()
+		for (const parent of list) {
+			if (!isDateRangeParentField(parent)) continue
+			for (const child of list) {
+				if (parent === child || dropped.has(child)) continue
+				if (!isDateRangeEndpointField(child)) continue
+				if (dateRangeFieldsBelongTogether(parent, child)) dropped.add(child)
+			}
+		}
+		const candidates = list.filter((field) => !dropped.has(field))
+		const consumed = new Set()
+		const result = []
+		for (let i = 0; i < candidates.length; i += 1) {
+			const field = candidates[i]
+			if (consumed.has(field)) continue
+			if (isDateRangeStartEndpointField(field)) {
+				const peerIndex = findDateRangeEndPeerIndex(candidates, field, i + 1, consumed)
+				if (peerIndex >= 0) {
+					const peer = candidates[peerIndex]
+					result.push(buildMergedDateRangeField(field, peer))
+					consumed.add(field)
+					consumed.add(peer)
+					continue
+				}
+			}
+			result.push(field)
+		}
+		return result
+	}
+
+	function applyTemporalPanelLabelsToGenericDateRanges(fields, panelLabels = []) {
+		const list = Array.isArray(fields) ? fields : []
+		const temporalLabels = collectSpecificTemporalPanelLabels(panelLabels)
+		if (!list.length || !temporalLabels.length) return list
+		const used = new Set()
+		for (const field of list) {
+			const label = getFieldLabel(field)
+			const key = normalizeText(label)
+			if (!key || isAmbiguousTemporalRangeLabel(label)) continue
+			used.add(key)
+		}
+		return list.map((field) => {
+			if (!isDateRangeField(field)) return field
+			const currentLabel = getFieldLabel(field)
+			if (!isAmbiguousTemporalRangeLabel(currentLabel)) return field
+			const replacement = pickUnusedTemporalPanelLabel(temporalLabels, used)
+			if (!replacement) return field
+			used.add(normalizeText(replacement))
+			return {
+				...field,
+				searchLabel: replacement,
+				label: replacement,
+				searchRangeFallbackLabel: currentLabel,
+				searchRangeLabelSource: 'panel_field_order',
+			}
+		})
+	}
+
+	function collectSpecificTemporalPanelLabels(panelLabels) {
+		const labels = []
+		const seen = new Set()
+		for (const value of (Array.isArray(panelLabels) ? panelLabels : [])) {
+			const label = normalizeSearchFieldLabel(value)
+			const key = normalizeText(label)
+			if (!key || seen.has(key)) continue
+			if (!isSpecificTemporalPanelLabel(label)) continue
+			seen.add(key)
+			labels.push(label)
+		}
+		return labels
+	}
+
+	function isSpecificTemporalPanelLabel(value) {
+		const text = normalizeText(value)
+		if (!text || isGenericSearchFieldLabel(text)) return false
+		if (isAmbiguousTemporalRangeLabel(text)) return false
+		return /(日期|时间|日历|月份|年份|年度|星期|周次|期限|期间|周期|date|time|month|year|week|calendar|period|duration)/i.test(text)
+	}
+
+	function isAmbiguousTemporalRangeLabel(value) {
+		const text = normalizeText(value).toLowerCase()
+		if (!text) return true
+		if (isStartEndpointLabel(value) || isEndEndpointLabel(value)) return true
+		return /^(日期|时间|日期范围|时间范围|日期区间|时间区间|起止日期|起止时间|日期起止|时间起止|daterange|timerange|datetimerange|date|time|range|period)$/.test(text)
+	}
+
+	function pickUnusedTemporalPanelLabel(labels, used) {
+		for (const label of (Array.isArray(labels) ? labels : [])) {
+			const key = normalizeText(label)
+			if (!key || used.has(key)) continue
+			return label
+		}
+		return ''
+	}
+
+	function isDateRangeParentField(field) {
+		return isDateRangeField(field) && !isDateRangeEndpointField(field)
+	}
+
+	function isDateRangeEndpointField(field) {
+		return isDateRangeStartEndpointField(field) || isDateRangeEndEndpointField(field)
+	}
+
+	function isDateRangeStartEndpointField(field) {
+		return isTemporalEndpointField(field) && isStartEndpointLabel(getFieldLabel(field) || field?.placeholder || field?.text)
+	}
+
+	function isDateRangeEndEndpointField(field) {
+		return isTemporalEndpointField(field) && isEndEndpointLabel(getFieldLabel(field) || field?.placeholder || field?.text)
+	}
+
+	function isTemporalEndpointField(field) {
+		const label = normalizeText([getFieldLabel(field), field?.placeholder, field?.text].filter(Boolean).join(' '))
+		const fieldType = String(field?.fieldType || field?.type || '').toLowerCase()
+		if (/(date|time|datetime|month|year|week|日期|时间)/i.test(label)) return true
+		return /^(date|time|datetime|month|year|week|daterange|datetimerange|timerange|monthrange|yearrange|weekrange)$/i.test(fieldType.replace(/[-_\s]+/g, ''))
+	}
+
+	function isStartEndpointLabel(value) {
+		const text = normalizeText(value).toLowerCase()
+		if (!text) return false
+		return /(^|[^a-z])(start|from|begin)(date|time)?$/.test(text) ||
+			/(^|(?:日期|时间|区间|范围|期间|周期)?)(开始|起始|起止开始|起点)(日期|时间)?$/i.test(text) ||
+			/(开始日期|开始时间|起始日期|起始时间|fromdate|fromtime|startdate|starttime)$/i.test(text)
+	}
+
+	function isEndEndpointLabel(value) {
+		const text = normalizeText(value).toLowerCase()
+		if (!text) return false
+		return /(^|[^a-z])(end|to|until)(date|time)?$/.test(text) ||
+			/(^|(?:日期|时间|区间|范围|期间|周期)?)(结束|截止|终止|止点)(日期|时间)?$/i.test(text) ||
+			/(结束日期|结束时间|截止日期|截止时间|todate|totime|enddate|endtime)$/i.test(text)
+	}
+
+	function findDateRangeEndPeerIndex(fields, startField, fromIndex, consumed) {
+		for (let i = Math.max(0, Number(fromIndex) || 0); i < fields.length; i += 1) {
+			const candidate = fields[i]
+			if (!candidate || consumed.has(candidate)) continue
+			if (!isDateRangeEndEndpointField(candidate)) continue
+			if (dateRangeFieldsBelongTogether(startField, candidate)) return i
+			if (!sameSearchFormOrContainer(startField, candidate)) continue
+			const startRect = normalizeRect(startField?.rect)
+			const candidateRect = normalizeRect(candidate?.rect)
+			if (startRect && candidateRect && Math.abs(rectCenter(startRect).y - rectCenter(candidateRect).y) > 48) break
+		}
+		return -1
+	}
+
+	function buildMergedDateRangeField(startField, endField) {
+		const label = inferMergedDateRangeLabel(startField, endField)
+		const fieldType = inferMergedDateRangeFieldType(startField, endField)
+		return {
+			...startField,
+			searchLabel: label,
+			label,
+			fieldType,
+			selectionControl: startField.selectionControl || endField.selectionControl || 'dropdown',
+			control: startField.control || endField.control || 'dropdown',
+			role: startField.role || endField.role || 'combobox',
+			searchRangePeerIndex: Number(endField.index),
+			searchRangePeerLabel: getFieldLabel(endField),
+		}
+	}
+
+	function inferMergedDateRangeLabel(startField, endField) {
+		for (const field of [startField, endField]) {
+			const label = getFieldLabel(field)
+			if (label && !isStartEndpointLabel(label) && !isEndEndpointLabel(label)) return label
+		}
+		const stripped = stripDateRangeEndpointWords(getFieldLabel(startField)) || stripDateRangeEndpointWords(getFieldLabel(endField))
+		if (stripped && !isGenericSearchFieldLabel(stripped)) {
+			if (/^(日期|date)$/i.test(normalizeText(stripped))) return '日期范围'
+			if (/^(时间|time)$/i.test(normalizeText(stripped))) return '时间范围'
+			return stripped
+		}
+		const text = normalizeText([getFieldLabel(startField), getFieldLabel(endField), startField?.fieldType, endField?.fieldType].filter(Boolean).join(' '))
+		if (/(time|时间)/i.test(text) && !/(date|日期)/i.test(text)) return '时间范围'
+		return '日期范围'
+	}
+
+	function inferMergedDateRangeFieldType(startField, endField) {
+		const text = [startField?.fieldType, endField?.fieldType, getFieldLabel(startField), getFieldLabel(endField)]
+			.map((value) => String(value || '').toLowerCase())
+			.join(' ')
+		if (/(datetime|日期时间)/i.test(text)) return 'datetimerange'
+		if (/(time|时间)/i.test(text) && !/(date|日期)/i.test(text)) return 'timerange'
+		if (/month|月份|月/.test(text)) return 'monthrange'
+		if (/year|年份|年/.test(text) && !/日期|date/.test(text)) return 'yearrange'
+		if (/week|周/.test(text)) return 'weekrange'
+		return 'daterange'
+	}
+
+	function stripDateRangeEndpointWords(value) {
+		return String(value || '')
+			.replace(/(开始|起始|起点|from|start|begin|结束|截止|终止|止点|to|end|until)/ig, '')
+			.replace(/^[：:：\s-]+|[：:：\s-]+$/g, '')
+			.trim()
+	}
+
+	function dateRangeFieldsBelongTogether(left, right) {
+		if (!sameSearchFormOrContainer(left, right)) return false
+		const leftRect = normalizeRect(left?.rect)
+		const rightRect = normalizeRect(right?.rect)
+		if (!leftRect || !rightRect) return true
+		if (rectContainsCenter(leftRect, rightRect) || rectContainsCenter(rightRect, leftRect)) return true
+		const leftCenter = rectCenter(leftRect)
+		const rightCenter = rectCenter(rightRect)
+		const sameRow = Math.abs(leftCenter.y - rightCenter.y) <= Math.max(28, Math.min(56, Math.max(leftRect.height, rightRect.height) * 1.4))
+		const horizontalGap = Math.max(0, Math.max(leftRect.left, rightRect.left) - Math.min(leftRect.left + leftRect.width, rightRect.left + rightRect.width))
+		const centerGap = Math.abs(leftCenter.x - rightCenter.x)
+		return sameRow && horizontalGap <= 96 && centerGap <= 520
+	}
+
+	function sameSearchFormOrContainer(left, right) {
+		const leftForm = String(left?.searchFormId || '').trim()
+		const rightForm = String(right?.searchFormId || '').trim()
+		if (leftForm && rightForm && leftForm !== rightForm) return false
+		const leftContainer = normalizeText(left?.semanticContainer || left?.container || '')
+		const rightContainer = normalizeText(right?.semanticContainer || right?.container || '')
+		if (leftContainer && rightContainer && leftContainer !== rightContainer) return false
+		return true
+	}
+
+	function rectContainsCenter(outer, inner) {
+		const center = rectCenter(inner)
+		return center.x >= outer.left &&
+			center.x <= outer.left + outer.width &&
+			center.y >= outer.top &&
+			center.y <= outer.top + outer.height
 	}
 
 	function pruneDuplicateWeakLabelFields(fields) {
@@ -2519,6 +3135,37 @@
 			fields,
 			'reset'
 		)
+	}
+
+	function rememberSearchActionTargets(state, observation, fields = []) {
+		if (!state || typeof state !== 'object') return
+		const submit = findSearchSubmitAction(observation, fields)
+		const reset = findSearchResetAction(observation, fields)
+		if (submit) state.lastSubmitAction = buildSearchActionSnapshot(submit, '搜索')
+		if (reset) state.lastResetAction = buildSearchActionSnapshot(reset, '重置')
+	}
+
+	function buildSearchActionSnapshot(action, fallbackLabel) {
+		const index = Number(action?.index)
+		return {
+			index: Number.isFinite(index) ? index : undefined,
+			label: getActionLabel(action) || fallbackLabel || '',
+			region: String(action?.region || '').trim(),
+			intent: String(action?.actionIntent || action?.intent || '').trim(),
+		}
+	}
+
+	function getRememberedSearchAction(state, kind) {
+		const raw = kind === 'reset' ? state?.lastResetAction : state?.lastSubmitAction
+		if (!raw || typeof raw !== 'object') return null
+		const index = Number(raw.index)
+		if (!Number.isFinite(index)) return null
+		return {
+			index,
+			label: String(raw.label || (kind === 'reset' ? '重置' : '搜索')).trim(),
+			region: String(raw.region || '').trim(),
+			intent: String(raw.intent || '').trim(),
+		}
 	}
 
 	function findActionByText(observation, pattern, fields = [], kind = '') {
@@ -2864,6 +3511,16 @@
 		}
 	}
 
+	function buildSearchValueEvidenceSummary(field, value) {
+		const parts = [
+			`field=${getFieldLabel(field) || getFieldKey(field) || 'unknown'}`,
+			`source=${String(value?.source || '').trim() || 'unknown'}`,
+			String(value?.basis || '').trim() ? `basis=${String(value.basis).trim()}` : '',
+			String(value?.text || '').trim() ? `value=${String(value.text).trim()}` : '',
+		].filter(Boolean)
+		return parts.join('; ')
+	}
+
 	function buildSearchFieldTestText(session, field, observation) {
 		return buildSearchFieldTestValue(session, field, observation).text
 	}
@@ -2873,6 +3530,13 @@
 		const contextSample = observedSample.text ? { text: '' } : pickSearchFieldSampleDetailFromPlanningContext(planningContext, field)
 		const sampled = observedSample.text ? observedSample : contextSample
 		if (sampled?.text) {
+			if (!isSelectionField(field) && isClearlyWrongTypedTextSearchSample(sampled.text, field)) {
+				return {
+					text: '',
+					source: 'missing_sample',
+					basis: `样本 "${sampled.text}" 与字段类型不一致，疑似相邻列/隐藏列样本`,
+				}
+			}
 			return {
 				text: sampled.text,
 				source: sampled.source || 'table_sample',
@@ -3114,6 +3778,28 @@
 		return !getFieldLabelCandidates(field).some((label) => normalizeText(label) === normalized)
 	}
 
+	function isClearlyWrongTypedTextSearchSample(sample, field) {
+		const text = String(sample || '').trim()
+		if (!text) return false
+		const descriptor = normalizeText([
+			getFieldLabel(field),
+			field?.fieldType,
+			field?.type,
+			field?.role,
+			field?.placeholder,
+		].filter(Boolean).join(' '))
+		if (/(分配人|负责人|经办人|处理人|人员|姓名|用户名|用户|owner|assignee|person|operator|handler|agent|staff|member|name|username|user)/i.test(descriptor)) {
+			return isBooleanStatusLikeSample(text) || looksLikeTemporalSearchSample(text)
+		}
+		return false
+	}
+
+	function isBooleanStatusLikeSample(value) {
+		const text = normalizeText(value)
+		if (!text) return false
+		return /^(有效|无效|启用|禁用|停用|开启|关闭|正常|异常|是|否|yes|no|true|false|active|inactive|enabled|disabled|on|off)$/i.test(text)
+	}
+
 	function pickOptionCandidateForField(state, field) {
 		return pickFirstVisibleOptionCandidate(state, field).text
 	}
@@ -3123,7 +3809,7 @@
 		const failed = new Set((state?.failedLabelsByKey?.[key] || []).map(normalizeText).filter(Boolean))
 		const candidates = collectUsableOptionCandidates(state, field, observation)
 		const planningContext = Array.isArray(context?.planningContext) ? context.planningContext : []
-		const observedSample = pickSearchFieldSampleDetail(observation, field)
+		const observedSample = pickSearchFieldSampleDetailForCandidates(observation, field, candidates, failed)
 		const contextSample = observedSample.text ? { text: '' } : pickSearchFieldSampleDetailFromPlanningContext(planningContext, field)
 		const sampleDetail = observedSample.text ? observedSample : contextSample
 		const rawSample = String(sampleDetail?.text || '').trim()
@@ -3137,6 +3823,7 @@
 					text: sample,
 					source: sampleSource,
 					basis: `${sampleBasisPrefix}级联路径：${sample}`,
+					candidatePool: candidates,
 				}
 			}
 			if (isDateRangeField(field)) {
@@ -3147,6 +3834,7 @@
 						text: range,
 						source: sampleSource,
 						basis: `${sampleBasisPrefix}日期：${date}`,
+						candidatePool: candidates,
 					}
 				}
 				return { text: '', source: '', basis: '' }
@@ -3157,6 +3845,7 @@
 					text: matched,
 					source: sampleSource,
 					basis: `${sampleBasisPrefix}值：${sample}`,
+					candidatePool: candidates,
 				}
 			}
 		}
@@ -3169,6 +3858,7 @@
 					text: range,
 					source: 'task_value',
 					basis: `任务文本明确指定的日期：${date}`,
+					candidatePool: candidates,
 				}
 			}
 			if (hasRejectedTemporalSampleForField(observation, planningContext, field)) {
@@ -3180,6 +3870,7 @@
 					text: visibleRange,
 					source: 'visible_option',
 					basis: `日期控件真实可见候选组成范围：${visibleRange}`,
+					candidatePool: candidates,
 				}
 			}
 			return { text: '', source: '', basis: '' }
@@ -3191,6 +3882,7 @@
 					text: taskValue,
 					source: 'task_value',
 					basis: '任务文本明确指定的级联路径',
+					candidatePool: candidates,
 				}
 			}
 		}
@@ -3200,6 +3892,7 @@
 				text: taskMatched,
 				source: 'task_value',
 				basis: '任务文本明确指定的候选',
+				candidatePool: candidates,
 			}
 		}
 		if (ignoredSample && !isCascaderLikeField(field)) {
@@ -3211,6 +3904,7 @@
 					basis: ignoredSample
 						? `列表样本疑似错列（${ignoredSample}），改用目标字段真实候选：${visible}`
 						: `目标字段真实候选：${visible}`,
+					candidatePool: candidates,
 				}
 			}
 		}
@@ -3254,6 +3948,7 @@
 		const values = [
 			...(pendingDropdownBelongsToField(state, key) && Array.isArray(state?.pendingDropdownCandidates) ? state.pendingDropdownCandidates : []),
 			...(Array.isArray(field?.optionLabels) ? field.optionLabels : []),
+			...extractInlineOptionCandidatesFromField(field),
 			...collectObservedOptionCandidatesForField(observation, field),
 		]
 		const seen = new Set()
@@ -3267,6 +3962,39 @@
 			result.push(text)
 		}
 		return result
+	}
+
+	function extractInlineOptionCandidatesFromField(field) {
+		if (!isSelectionField(field)) return []
+		const values = [
+			field?.text,
+			field?.description,
+			field?.stateHints,
+		]
+		const out = []
+		const seen = new Set()
+		for (const value of values) {
+			for (const candidate of splitInlineOptionCandidateText(value)) {
+				const key = normalizeText(candidate)
+				if (!key || seen.has(key)) continue
+				seen.add(key)
+				out.push(candidate)
+			}
+		}
+		return out
+	}
+
+	function splitInlineOptionCandidateText(value) {
+		const text = String(value || '').trim()
+		if (!text || text.length > 240) return []
+		if (!/[|,，、;；\s]/.test(text)) return []
+		const raw = text
+			.split(/[|,，、;；\n\r\t ]+/)
+			.map((item) => String(item || '').trim())
+			.filter(Boolean)
+		if (raw.length < 2 || raw.length > 40) return []
+		if (raw.some((item) => item.length > 32 || /[。！？!?：:]/.test(item))) return []
+		return raw
 	}
 
 	function pendingDropdownBelongsToField(state, key) {
@@ -3340,7 +4068,8 @@
 	function pickFirstVisibleOptionCandidate(state, field, observation = null) {
 		const key = getFieldKey(field)
 		const failed = new Set((state?.failedLabelsByKey?.[key] || []).map(normalizeText).filter(Boolean))
-		for (const candidate of collectUsableOptionCandidates(state, field, observation)) {
+		const candidates = collectUsableOptionCandidates(state, field, observation)
+		for (const candidate of candidates) {
 			const text = String(candidate || '').trim()
 			const normalized = normalizeText(text)
 			if (!normalized || failed.has(normalized)) continue
@@ -3348,9 +4077,69 @@
 				text,
 				source: 'visible_option',
 				basis: '真实候选列表',
+				candidatePool: candidates,
 			}
 		}
 		return { text: '', source: '', basis: '' }
+	}
+
+	function pickCandidateOnlySelectionCandidate(state, field, observation = null, options = {}) {
+		if (!isSelectionField(field) || isCascaderLikeField(field)) return { text: '', source: '', basis: '' }
+		if (isDateRangeField(field)) return { text: '', source: '', basis: '' }
+		const sample = String(options?.sample || pickSearchFieldSampleText(observation, field) || '').trim()
+		if (sample && options?.allowWhenSamplePresent !== true) return { text: '', source: '', basis: '' }
+		const key = getFieldKey(field)
+		const failed = new Set((state?.failedLabelsByKey?.[key] || []).map(normalizeText).filter(Boolean))
+		const directCandidates = [
+			...(Array.isArray(field?.optionLabels) ? field.optionLabels : []),
+			...extractInlineOptionCandidatesFromField(field),
+			...(sample ? [] : collectObservedOptionCandidatesForField(observation, field)),
+		].filter((candidate) =>
+			isUsableSearchOptionCandidate(candidate, field, state) &&
+			!isCandidateOnlyCoverageUnsafeForSample(candidate, sample)
+		)
+		const directCandidate = pickFirstOptionCandidateFromList(directCandidates, failed)
+		let candidatePool = directCandidates
+		let text = directCandidate
+		if (!text && pendingDropdownCandidatesSafeForCoverage(state, field)) {
+			candidatePool = collectUsableOptionCandidates(state, field, observation)
+				.filter((candidate) => !isCandidateOnlyCoverageUnsafeForSample(candidate, sample))
+			text = pickFirstOptionCandidateFromList(candidatePool, failed)
+		}
+		if (!text) return { text: '', source: '', basis: '' }
+		return {
+			text,
+			source: 'visible_option',
+			basis: sample
+				? `列表/API样本 "${sample}" 与当前候选未匹配；使用目标字段真实可归属候选做控件覆盖测试：${text}`
+				: `缺少列表/API样本或任务显式值；使用目标字段真实可归属候选做控件覆盖测试：${text}`,
+			candidateOnly: true,
+			candidatePool,
+		}
+	}
+
+	function isCandidateOnlyCoverageUnsafeForSample(candidate, sample) {
+		const sampleKey = normalizeText(sample)
+		const candidateKey = normalizeText(candidate)
+		if (!sampleKey || !candidateKey || sampleKey === candidateKey) return false
+		const sampleStatusBucket = getCategoricalStatusBucket(sample)
+		const candidateStatusBucket = getCategoricalStatusBucket(candidate)
+		if (sampleStatusBucket && candidateStatusBucket && sampleStatusBucket !== candidateStatusBucket) return true
+		if (pickCandidateMatchingSample([candidate], sample, new Set())) return false
+		return candidateKey.includes(sampleKey) || sampleKey.includes(candidateKey)
+	}
+
+	function pendingDropdownCandidatesSafeForCoverage(state, field) {
+		const key = getFieldKey(field)
+		if (!pendingDropdownBelongsToField(state, key)) return false
+		const raw = Array.isArray(state?.pendingDropdownCandidates)
+			? state.pendingDropdownCandidates.map((item) => String(item || '').trim()).filter(Boolean)
+			: []
+		if (!raw.length || raw.length > 80) return false
+		const unusable = raw.filter((candidate) => !isUsableSearchOptionCandidate(candidate, field, state)).length
+		const usable = raw.length - unusable
+		if (usable <= 0) return false
+		return unusable <= Math.max(2, Math.floor(raw.length / 3))
 	}
 
 	function pickFirstOptionCandidateFromList(candidates, failed) {
@@ -3368,8 +4157,40 @@
 		if (!text || !Array.isArray(candidates) || !candidates.length) return false
 		if (isDateRangeField(field) || isCascaderLikeField(field)) return false
 		if (pickCandidateMatchingSample(candidates, text, new Set())) return false
+		if (looksLikeTemporalSearchSample(text) && !candidates.some(looksLikeTemporalSearchSample)) return true
+		if (hasCategoricalStatusSynonym(text, candidates)) return false
+		if (
+			isShortCategoricalSelectionText(text) &&
+			candidates.length >= 2 &&
+			candidates.every(isShortCategoricalSelectionText)
+		) {
+			return true
+		}
 		if (!isCodeLikeTableSample(text)) return false
 		return !candidates.some((candidate) => isCodeLikeTableSample(candidate))
+	}
+
+	function hasCategoricalStatusSynonym(sample, candidates) {
+		const bucket = getCategoricalStatusBucket(sample)
+		if (!bucket) return false
+		return (Array.isArray(candidates) ? candidates : []).some((candidate) => getCategoricalStatusBucket(candidate) === bucket)
+	}
+
+	function getCategoricalStatusBucket(value) {
+		const text = normalizeText(value)
+		if (!text) return ''
+		if (/(启用|启用中|开启|打开|有效|正常|active|enabled|on|yes)/i.test(text)) return 'enabled'
+		if (/(禁用|停用|关闭|无效|失效|inactive|disabled|off|no)/i.test(text)) return 'disabled'
+		return ''
+	}
+
+	function isShortCategoricalSelectionText(value) {
+		const text = String(value || '').replace(/\s+/g, '').trim()
+		if (!text || text.length > 16) return false
+		if (/^(empty|\(empty\)|unknown|null|undefined|-|--|请选择|请输入|搜索|查询|筛选|清空|重置|新增|导入|导出|详情|编辑|删除|操作)$/i.test(text)) return false
+		if (looksLikeTemporalSearchSample(text) || isCodeLikeTableSample(text) || isLongNumericTableSample(text)) return false
+		if (countAsciiDigits(text) > 0) return false
+		return /^[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z_-]{0,15}$/.test(text)
 	}
 
 	function isCodeLikeTableSample(value) {
@@ -3444,12 +4265,18 @@
 	function pickCandidateMatchingSample(candidates, sample, failed) {
 		const sampleKey = normalizeText(sample)
 		if (!sampleKey) return ''
+		const sampleStatusBucket = getCategoricalStatusBucket(sample)
 		const matches = []
 		for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
 			const text = String(candidate || '').trim()
 			const key = normalizeText(text)
 			if (!key || failed.has(key)) continue
 			if (key === sampleKey) return text
+			const candidateStatusBucket = getCategoricalStatusBucket(text)
+			if (sampleStatusBucket && candidateStatusBucket === sampleStatusBucket) {
+				matches.push({ text, score: 2 })
+				continue
+			}
 			const score = scoreCandidateSampleTextMatch(key, sampleKey)
 			if (Number.isFinite(score)) matches.push({ text, score })
 		}
@@ -3618,6 +4445,26 @@
 		return { text: '', source: '', basis: '' }
 	}
 
+	function pickSearchFieldSampleDetailForCandidates(observation, field, candidates, failed = new Set()) {
+		const fallback = pickSearchFieldSampleDetail(observation, field)
+		const usableCandidates = (Array.isArray(candidates) ? candidates : [])
+			.map((item) => String(item || '').trim())
+			.filter(Boolean)
+		if (!observation || !field || !usableCandidates.length) return fallback
+		const labelCandidates = getFieldLabelCandidates(field)
+		for (const table of (Array.isArray(observation?.tables) ? observation.tables : [])) {
+			const sample = pickTableSampleForFieldCandidates(table, labelCandidates, field, usableCandidates, failed)
+			if (sample) {
+				return {
+					text: sample,
+					source: 'table_sample',
+					basis: '当前列表已有与字段候选匹配的数据',
+				}
+			}
+		}
+		return fallback
+	}
+
 	function pickSearchFieldSampleTextFromPlanningContext(planningContext, field) {
 		return pickSearchFieldSampleDetailFromPlanningContext(planningContext, field).text
 	}
@@ -3784,7 +4631,7 @@
 		for (const item of network) {
 			const fields = Array.isArray(item?.fields) ? item.fields : []
 			for (const entry of fields) {
-				if (!networkFieldMatchesLabels(entry, labelCandidates)) continue
+				if (!networkFieldMatchesLabels(entry, labelCandidates, field)) continue
 				const value = String(entry?.value || '').trim()
 				if (isUsableTableSample(value, labelCandidates, field)) return value
 			}
@@ -3792,7 +4639,7 @@
 		return ''
 	}
 
-	function networkFieldMatchesLabels(entry, labelCandidates) {
+	function networkFieldMatchesLabels(entry, labelCandidates, field = null) {
 		const labels = (Array.isArray(labelCandidates) ? labelCandidates : [])
 			.map((label) => ({
 				raw: normalizeText(label),
@@ -3810,11 +4657,125 @@
 			header: normalizeHeaderLabel(value),
 			token: normalizeNetworkFieldToken(value),
 		}))
-		return candidates.some((candidate) => labels.some((label) =>
+		if (candidates.some((candidate) => labels.some((label) =>
 			fieldTokenMatches(candidate.raw, label.raw) ||
 			fieldTokenMatches(candidate.header, label.header) ||
 			fieldTokenMatches(candidate.token, label.token)
-		))
+		))) return true
+		return networkFieldSemanticallyMatches(entry, labelCandidates, field)
+	}
+
+	function networkFieldSemanticallyMatches(entry, labelCandidates, field = null) {
+		const labelConcepts = collectNetworkFieldConcepts(
+			[
+				...(Array.isArray(labelCandidates) ? labelCandidates : []),
+				field?.fieldType,
+				field?.type,
+				field?.role,
+			].filter(Boolean).join(' ')
+		)
+		const candidateConcepts = collectNetworkFieldConcepts([entry?.label, entry?.key, entry?.path].filter(Boolean).join(' '))
+		if (!labelConcepts.size || !candidateConcepts.size) return false
+		const overlap = countSetOverlap(labelConcepts, candidateConcepts)
+		if (overlap >= 2) return true
+		if (overlap <= 0) return false
+		if (isGenericNameNetworkField(entry) && isEntityNameSearchField(labelCandidates, field)) return true
+		if (isTypedNetworkSemanticMatch(labelConcepts, candidateConcepts, field)) return true
+		if (isDisplayNetworkValueSemanticMatch(entry, labelConcepts, candidateConcepts)) return true
+		return false
+	}
+
+	function collectNetworkFieldConcepts(value) {
+		const raw = String(value || '')
+		const normalized = normalizeText(raw)
+		const token = normalizeNetworkFieldToken(raw)
+		const text = `${raw} ${normalized} ${token}`.toLowerCase()
+		const concepts = new Set()
+		if (/(名称|标题|name|title)/i.test(text)) concepts.add('name')
+		if (/(公司|企业|单位|组织|机构|主体|company|corp|corporation|enterprise|organization|organisation|org|entity)/i.test(text)) concepts.add('entity')
+		if (/(姓名|人员|联系人|负责人|经办人|用户|账号|账户|person|people|user|owner|assignee|staff|member|operator|handler|contactperson)/i.test(text)) concepts.add('person')
+		if (/(联系|电话|手机|phone|mobile|telephone|tel|contact)/i.test(text)) concepts.add('contact')
+		if (/(邮箱|邮件|email|mail)/i.test(text)) concepts.add('email')
+		if (/(编号|编码|单号|序号|code|number|no|num|serial|sn)/i.test(text)) concepts.add('code')
+		if (/(状态|status|state)/i.test(text)) concepts.add('status')
+		if (/(等级|级别|rating|level|grade)/i.test(text)) concepts.add('level')
+		if (/(类型|类别|分类|category|type|kind|class)/i.test(text)) concepts.add('category')
+		if (/(来源|source|origin|channel)/i.test(text)) concepts.add('source')
+		if (/(意向|倾向|intent|intention|willingness)/i.test(text)) concepts.add('intent')
+		if (/(转化|转换|成交|conversion|convert|converted|deal|close|closed)/i.test(text)) concepts.add('conversion')
+		if (/(有效|启用|禁用|可用|是否|valid|enabled|active|available|usable|disabled|inactive|boolean|bool)/i.test(text)) concepts.add('validity')
+		if (/(分配|指派|负责人|owner|assignee|assign|assigned)/i.test(text)) concepts.add('assignment')
+		if (/(地址|所在地|区域|地区|省|市|区|location|address|region|area|province|city|district)/i.test(text)) concepts.add('location')
+		if (/(创建|新增|create|created|creation|insert|add)/i.test(text)) concepts.add('created')
+		if (/(更新|修改|update|updated|modify|modified)/i.test(text)) concepts.add('updated')
+		if (/(日期|时间|date|time|at)$/i.test(text) || /(日期|时间|date|time|timestamp|datetime)/i.test(text)) concepts.add('time')
+		if (/(税|tax|vat)/i.test(text)) concepts.add('tax')
+		if (/(条件|条款|方式|condition|term|terms|method|mode|way)/i.test(text)) concepts.add('condition')
+		return concepts
+	}
+
+	function isDisplayNetworkValueSemanticMatch(entry, labelConcepts, candidateConcepts) {
+		if (!hasDisplayValueNetworkFieldSuffix(entry)) return false
+		return sharedSpecificNetworkConcepts(labelConcepts, candidateConcepts).length > 0
+	}
+
+	function hasDisplayValueNetworkFieldSuffix(entry) {
+		const token = normalizeNetworkFieldToken([entry?.key, entry?.label, entry?.path].filter(Boolean).join(' '))
+		if (!token) return false
+		return /(name|label|text|title|display|caption|value|desc|description)$/.test(token) ||
+			/(名称|标签|文本|标题|显示值|显示|描述|说明)$/.test(token)
+	}
+
+	function sharedSpecificNetworkConcepts(left, right) {
+		const ignored = new Set(['name'])
+		const shared = []
+		for (const concept of (left instanceof Set ? left : new Set())) {
+			if (ignored.has(concept)) continue
+			if (right instanceof Set && right.has(concept)) shared.push(concept)
+		}
+		return shared
+	}
+
+	function countSetOverlap(left, right) {
+		let count = 0
+		for (const item of (left instanceof Set ? left : new Set())) {
+			if (right instanceof Set && right.has(item)) count += 1
+		}
+		return count
+	}
+
+	function isGenericNameNetworkField(entry) {
+		const token = normalizeNetworkFieldToken([entry?.key, entry?.label].filter(Boolean).join(' '))
+		const pathToken = normalizeNetworkFieldToken(entry?.path || '')
+		return /^(name|title)$/.test(token) || /(?:^|data\d*)(?:name|title)$/.test(pathToken)
+	}
+
+	function isEntityNameSearchField(labelCandidates, field = null) {
+		const text = normalizeText([
+			...(Array.isArray(labelCandidates) ? labelCandidates : []),
+			field?.fieldType,
+			field?.type,
+		].filter(Boolean).join(' '))
+		if (!text || !/(名称|标题|name|title)/i.test(text)) return false
+		return !/(姓名|联系人|负责人|经办人|人员|用户|账号|账户|person|user|owner|assignee|staff|member)/i.test(text)
+	}
+
+	function isTypedNetworkSemanticMatch(labelConcepts, candidateConcepts, field = null) {
+		const descriptor = normalizeText([
+			field?.fieldType,
+			field?.type,
+			field?.role,
+		].filter(Boolean).join(' '))
+		const pairs = [
+			['phone|mobile|tel', 'contact'],
+			['email|mail', 'email'],
+			['date|time|daterange|datetime', 'time'],
+			['status|state', 'status'],
+		]
+		for (const [pattern, concept] of pairs) {
+			if (new RegExp(pattern, 'i').test(descriptor) && labelConcepts.has(concept) && candidateConcepts.has(concept)) return true
+		}
+		return false
 	}
 
 	function pickDelimitedFieldSampleForLabels(text, labelCandidates, field) {
@@ -3823,7 +4784,7 @@
 			const match = String(pair || '').trim().match(/^(.{1,80}?)(?:=|:|：)\s*(.{1,96})$/)
 			if (!match) continue
 			const label = match[1]
-			if (!networkFieldMatchesLabels({ label, key: label, path: label }, labelCandidates)) continue
+			if (!networkFieldMatchesLabels({ label, key: label, path: label }, labelCandidates, field)) continue
 			const value = String(match[2] || '').trim()
 			if (isUsableTableSample(value, labelCandidates, field)) return value
 		}
@@ -3994,7 +4955,7 @@
 			for (const entry of fields) {
 				const entryValue = String(entry?.value || '').trim()
 				if (!entryValue || entryValue === '***') continue
-				const labelMatched = networkFieldMatchesLabels(entry, labelCandidates)
+				const labelMatched = networkFieldMatchesLabels(entry, labelCandidates, field)
 				if (labelMatched && searchResultCellMatchesValue(entryValue, normalizedValue, value)) return true
 				if (!labelMatched && searchResultCellMatchesValue(entryValue, normalizedValue, value)) return true
 			}
@@ -4089,6 +5050,7 @@
 			unknown_missing_sample: '未确认:缺少真实样本/候选证据',
 			unknown_not_recorded: '未确认:缺少结果记录',
 			unknown_result_pending: '未确认:已提交待观察',
+			unknown_observation_timeout: '未确认:页面观察超时',
 		}
 		return labels[key] || key || '未确认'
 	}
@@ -4178,18 +5140,35 @@
 	}
 
 	function pickTableSampleForField(table, labelCandidates, field) {
+		return collectTableSamplesForField(table, labelCandidates, field)[0] || ''
+	}
+
+	function pickTableSampleForFieldCandidates(table, labelCandidates, field, candidates, failed = new Set()) {
+		for (const sample of collectTableSamplesForField(table, labelCandidates, field)) {
+			if (pickCandidateMatchingSample(candidates, sample, failed)) return sample
+		}
+		return ''
+	}
+
+	function collectTableSamplesForField(table, labelCandidates, field) {
 		const headers = (Array.isArray(table?.headers) ? table.headers : [])
 			.map((header) => String(header || '').trim())
 		const rows = Array.isArray(table?.rows) ? table.rows : []
-		if (!headers.length || !rows.length) return ''
+		if (!headers.length || !rows.length) return []
 		const index = findMatchingHeaderIndex(headers, labelCandidates)
-		if (index < 0) return ''
+		if (index < 0) return []
+		const samples = []
+		const seen = new Set()
 		for (const row of rows) {
 			const cells = Array.isArray(row) ? row : []
 			const value = String(cells[index] || '').trim()
-			if (isUsableTableSample(value, labelCandidates, field)) return value
+			const key = normalizeText(value)
+			if (!key || seen.has(key)) continue
+			if (!isUsableTableSample(value, labelCandidates, field)) continue
+			seen.add(key)
+			samples.push(value)
 		}
-		return ''
+		return samples
 	}
 
 	function findMatchingHeaderIndex(headers, labelCandidates) {
@@ -4770,6 +5749,7 @@
 		buildSearchWorkflowHintLines,
 		deriveSearchWorkflowDecision,
 		deriveSearchObservationFailureDecision,
+		deriveSearchTimeoutRecoveryDecision,
 		deriveSearchPostModelDecision,
 		deriveSearchPostContextDecision,
 		deriveSearchPostValidationDecision,
@@ -4785,6 +5765,7 @@
 		createSearchState,
 		deriveSearchWorkflowDecision,
 		deriveSearchObservationFailureDecision,
+		deriveSearchTimeoutRecoveryDecision,
 		deriveSearchPostModelDecision,
 		deriveSearchPostContextDecision,
 		deriveSearchPostValidationDecision,

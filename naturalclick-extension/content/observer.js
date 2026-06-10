@@ -3171,6 +3171,14 @@
 
 	function formatNetworkLine(item) {
 		const fields = Array.isArray(item?.fields) ? item.fields : []
+		const requestFields = Array.isArray(item?.requestFields) ? item.requestFields : []
+		const requestText = requestFields
+			.slice(0, 12)
+			.map((field) => {
+				const label = field.label || field.key || field.path || 'field'
+				return `${shortText(label, 32)}=${shortText(field.value, 64)}`
+			})
+			.join(' | ')
 		const fieldText = fields
 			.slice(0, 12)
 			.map((field) => {
@@ -3181,6 +3189,7 @@
 		return [
 			`  response method=${item?.method || '-'} status=${item?.status || '-'} ageMs=${Number(item?.ageMs) || 0}`,
 			`url="${shortText(item?.url || '', 120)}"`,
+			requestText ? `request="${shortText(requestText, 320)}"` : '',
 			fieldText ? `fields="${shortText(fieldText, 320)}"` : '',
 		].filter(Boolean).join(' ')
 	}

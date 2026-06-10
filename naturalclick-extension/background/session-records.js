@@ -602,6 +602,8 @@
 			unknown_value_missing: '未确认:结果未包含测试值',
 			unknown_missing_sample: '未确认:缺少真实样本/候选证据',
 			unknown_not_recorded: '未确认:缺少结果记录',
+			unknown_result_pending: '未确认:已提交待观察',
+			unknown_observation_timeout: '未确认:页面观察超时',
 		}
 		return labels[String(status || '').trim()] || cleanPlanFragment(status)
 	}

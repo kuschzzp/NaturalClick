@@ -4,6 +4,7 @@
 
 	const SOURCE = 'NaturalClickNetworkHook'
 	const MAX_BODY_CHARS = 120000
+	const MAX_REQUEST_BODY_CHARS = 20000
 	const TEXT_TYPES = /(?:json|text|javascript|xml|x-www-form-urlencoded)/i
 
 	function postResponse(payload) {
@@ -31,6 +32,11 @@
 		return value.length > MAX_BODY_CHARS ? value.slice(0, MAX_BODY_CHARS) : value
 	}
 
+	function trimRequestBody(text) {
+		const value = String(text || '')
+		return value.length > MAX_REQUEST_BODY_CHARS ? value.slice(0, MAX_REQUEST_BODY_CHARS) : value
+	}
+
 	function readFetchUrl(input) {
 		try {
 			if (typeof input === 'string') return input
@@ -44,12 +50,34 @@
 		return String(init?.method || input?.method || 'GET').toUpperCase()
 	}
 
+	function readRequestBody(body) {
+		try {
+			if (body === null || body === undefined) return ''
+			if (typeof body === 'string') return trimRequestBody(body)
+			if (body instanceof URLSearchParams) return trimRequestBody(body.toString())
+			if (typeof FormData !== 'undefined' && body instanceof FormData) {
+				const parts = []
+				for (const [key, value] of body.entries()) {
+					parts.push(`${key}=${typeof value === 'string' ? value : '[file]'}`)
+					if (parts.length >= 80) break
+				}
+				return trimRequestBody(parts.join('&'))
+			}
+			if (body && typeof body === 'object' && typeof ReadableStream !== 'undefined' && body instanceof ReadableStream) {
+				return ''
+			}
+			if (body && typeof body === 'object') return trimRequestBody(JSON.stringify(body))
+		} catch (_) {}
+		return ''
+	}
+
 	const originalFetch = window.fetch
 	if (typeof originalFetch === 'function') {
 		window.fetch = function naturalClickFetch(input, init) {
 			const startedAt = Date.now()
 			const url = readFetchUrl(input)
 			const method = readFetchMethod(input, init)
+			const requestBody = readRequestBody(init?.body)
 			return originalFetch.apply(this, arguments).then((response) => {
 				try {
 					const clone = response.clone()
@@ -63,6 +91,7 @@
 									url: url || clone.url || '',
 									status: response.status,
 									contentType,
+									requestBody,
 									body: trimBody(body),
 									elapsedMs: Date.now() - startedAt,
 									capturedAt: Date.now(),
@@ -89,8 +118,9 @@
 			} catch (_) {}
 			return originalOpen.apply(this, arguments)
 		}
-		OriginalXHR.prototype.send = function naturalClickXhrSend() {
+		OriginalXHR.prototype.send = function naturalClickXhrSend(bodyArg) {
 			const startedAt = Date.now()
+			const requestBody = readRequestBody(bodyArg)
 			try {
 				this.addEventListener('loadend', () => {
 					try {
@@ -114,6 +144,7 @@
 							url: meta.url || this.responseURL || '',
 							status: this.status,
 							contentType,
+							requestBody,
 							body: trimBody(body),
 							elapsedMs: Date.now() - startedAt,
 							capturedAt: Date.now(),

@@ -4,6 +4,21 @@
 		const targetUrl = extractTargetUrl(taskText)
 		if (!targetUrl || isTaskTargetLocation(observation?.url, targetUrl)) return null
 		const targetTab = findTargetTab(tabsSummary, targetUrl)
+		if (targetTab && targetTab.current) {
+			if (hasRecentTargetUrlObservationWait(session, targetUrl)) return null
+			return buildFallbackDecision(
+				'目标标签页已经是当前标签页，但页面观察还未刷新到任务目标 URL，先等待观察同步。',
+				'等待目标页面观察刷新。',
+				'wait',
+				{
+					ms: 600,
+					reason: '目标标签页已处于当前状态，等待页面观察刷新后继续',
+					target_label: getTabTargetLabel(targetTab, targetUrl),
+					target_url: targetUrl,
+					workflow_step: 'wait_for_target_url_observation',
+				}
+			)
+		}
 		if (targetTab && targetTab.id && !targetTab.current) {
 			return buildFallbackDecision(
 				'当前标签页不是任务目标站点，先切换到已打开的目标标签页。',
@@ -45,6 +60,17 @@
 		return recent.some((item) => {
 			if (!item?.success || String(item.action || '') !== 'open_new_tab') return false
 			return isSameTaskUrl(item?.input?.url, targetUrl)
+		})
+	}
+
+	function hasRecentTargetUrlObservationWait(session, targetUrl) {
+		const recent = Array.isArray(session?.history) ? session.history.slice(-3) : []
+		return recent.some((item) => {
+			const action = String(item?.action || '')
+			if (item?.success === false || action !== 'wait') return false
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'wait_for_target_url_observation') return false
+			return isSameTaskUrl(input.target_url, targetUrl)
 		})
 	}
 

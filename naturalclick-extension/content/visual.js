@@ -15,6 +15,8 @@
 		const MAX_INDEX_HIGHLIGHTS = 160
 		const FOCUS_LAYER_EXTRA_HIGHLIGHTS = 16
 		const MIN_FOCUS_LAYER_HIGHLIGHTS = 48
+		const POINTER_MOVE_HIDE_MS = 180
+		const POINTER_CLICK_HIDE_MS = 80
 
 		/** @type {HTMLDivElement | null} */
 		let host = null
@@ -25,12 +27,14 @@
 		let listening = false
 		let rafId = 0
 		let cursorHideTimer = 0
+		let cursorPositioned = false
 		let captureHideDepth = 0
 		let hostVisibilityBeforeCapture = ''
 
 		function ensureHost() {
-			if (host && document.body.contains(host)) return host
+			if (host && host.isConnected) return host
 			injectStyle()
+			removeOrphanHosts()
 			host = document.createElement('div')
 			host.id = HOST_ID
 			host.setAttribute('data-naturalclick-ignore', 'true')
@@ -41,6 +45,12 @@
 			document.documentElement.appendChild(host)
 			ensureCursor()
 			return host
+		}
+
+		function removeOrphanHosts() {
+			for (const node of document.querySelectorAll(`#${HOST_ID}`)) {
+				if (node !== host) node.remove()
+			}
 		}
 
 		function injectStyle() {
@@ -92,7 +102,7 @@
 					border:1px solid rgba(16,185,129,.7);
 					border-radius:7px;
 					box-shadow:0 0 0 1px rgba(16,185,129,.1);
-					animation:ncActionPulse .34s ease-out forwards;
+					animation:ncActionPulse .18s ease-out forwards;
 				}
 				@keyframes ncActionPulse{
 					0%{opacity:0;transform:scale(.996)}
@@ -101,15 +111,17 @@
 				}
 				#${HOST_ID} .nc-cursor{
 					position:fixed;
-					left:0;top:0;
+					left:-9999px;top:-9999px;
 					width:20px;
 					height:24px;
 					margin-left:-2px;
 					margin-top:-2px;
 					transform-origin:3px 3px;
 					filter: drop-shadow(0 1px 4px rgba(15,23,42,.22));
-					transition: opacity .04s linear;
+					transition: opacity .035s ease;
+					visibility:hidden;
 					opacity:0;
+					will-change:left,top,opacity;
 				}
 				#${HOST_ID} .nc-cursor::before{
 					content:"";
@@ -120,7 +132,7 @@
 					clip-path: polygon(0 0, 0 100%, 32% 72%, 47% 100%, 61% 93%, 44% 66%, 100% 66%);
 					box-shadow: inset 0 0 0 1.4px #17212b;
 				}
-				#${HOST_ID} .nc-cursor.show{opacity:1}
+				#${HOST_ID} .nc-cursor.show{opacity:1;visibility:visible}
 				#${HOST_ID} .nc-cursor.click{
 					animation:ncCursorClick .12s ease-out forwards;
 				}
@@ -138,11 +150,13 @@
 			cursor = document.createElement('div')
 			cursor.className = 'nc-cursor'
 			cursor.setAttribute('data-naturalclick-ignore', 'true')
+			cursor.setAttribute('aria-hidden', 'true')
 			host.appendChild(cursor)
 		}
 
 		function renderIndexHighlights(indexedElements) {
 			ensureHost()
+			hidePointer({ keepPosition: false })
 			clearIndexHighlights()
 			if (!Array.isArray(indexedElements) || !indexedElements.length) {
 				unbindListeners()
@@ -366,11 +380,28 @@
 		async function movePointerTo(xRaw, yRaw, opts) {
 			ensureHost()
 			if (!cursor) return
-			const x = clamp(Number(xRaw), 0, window.innerWidth)
-			const y = clamp(Number(yRaw), 0, window.innerHeight)
+			const rawX = Number(xRaw)
+			const rawY = Number(yRaw)
 			const waitMs = Math.max(0, Number(opts?.waitMs) || 120)
+			if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
+				hidePointer({ keepPosition: false })
+				await sleep(waitMs)
+				return
+			}
+			const x = clamp(rawX, 0, Math.max(0, window.innerWidth - 1))
+			const y = clamp(rawY, 0, Math.max(0, window.innerHeight - 1))
+			if (cursorHideTimer) {
+				clearTimeout(cursorHideTimer)
+				cursorHideTimer = 0
+			}
 			cursor.style.left = `${x}px`
 			cursor.style.top = `${y}px`
+			cursorPositioned = true
+			if (opts?.show !== false) {
+				cursor.classList.remove('click')
+				cursor.classList.add('show')
+				if (opts?.autoHide !== false) scheduleCursorHide(opts?.hideDelayMs || POINTER_MOVE_HIDE_MS)
+			}
 			await sleep(waitMs)
 		}
 
@@ -378,11 +409,16 @@
 			ensureHost()
 			if (!cursor) return
 			const waitMs = Math.max(0, Number(opts?.waitMs) || 120)
+			if (!cursorPositioned) {
+				hidePointer({ keepPosition: false })
+				await sleep(waitMs)
+				return
+			}
 			cursor.classList.remove('click')
 			void cursor.offsetHeight
 			cursor.classList.add('show')
 			cursor.classList.add('click')
-			scheduleCursorHide(70)
+			scheduleCursorHide(opts?.hideDelayMs || POINTER_CLICK_HIDE_MS)
 			await sleep(waitMs)
 		}
 
@@ -394,9 +430,23 @@
 			}
 			cursorHideTimer = setTimeout(() => {
 				cursorHideTimer = 0
-				if (!cursor) return
-				cursor.classList.remove('show')
+				hidePointer({ keepPosition: true })
 			}, Math.max(40, Number(delayMs) || 0))
+		}
+
+		function hidePointer(opts) {
+			if (cursorHideTimer) {
+				clearTimeout(cursorHideTimer)
+				cursorHideTimer = 0
+			}
+			if (!cursor) return
+			cursor.classList.remove('show')
+			cursor.classList.remove('click')
+			if (opts?.keepPosition === false) {
+				cursor.style.left = '-9999px'
+				cursor.style.top = '-9999px'
+				cursorPositioned = false
+			}
 		}
 
 		function markActionTarget(element) {
@@ -408,7 +458,7 @@
 			box.className = 'nc-action-box'
 			placeBox(box, rect, 3)
 			host.appendChild(box)
-			setTimeout(() => box.remove(), 380)
+			setTimeout(() => box.remove(), 220)
 		}
 
 		function placeBox(node, rect, padding = 1) {
@@ -436,12 +486,10 @@
 		function dispose() {
 			clearIndexHighlights()
 			unbindListeners()
-			if (cursorHideTimer) {
-				clearTimeout(cursorHideTimer)
-				cursorHideTimer = 0
-			}
+			hidePointer({ keepPosition: false })
 			if (cursor) cursor.remove()
 			cursor = null
+			cursorPositioned = false
 			if (host) host.remove()
 			host = null
 			captureHideDepth = 0
@@ -454,6 +502,7 @@
 			setCaptureHidden,
 			movePointerTo,
 			clickPointer,
+			hidePointer,
 			markActionTarget,
 			dispose,
 		}

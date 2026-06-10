@@ -8,6 +8,9 @@
 		NO_EFFECT: 'no_effect',
 		FOCUSED: 'focused',
 		NONE: 'none',
+		VALUE_CHANGED: 'value_changed',
+		STATE_CHANGED: 'state_changed',
+		OPTIONS_VISIBLE: 'options_visible',
 	}
 
 	function shouldVerifyAction(action) {
@@ -64,6 +67,8 @@
 			name
 		)
 		if (!post?.ok) {
+			const fallbackVerdict = evaluateMissingPostObservationStructuredOutcome(action, execution)
+			if (fallbackVerdict) return fallbackVerdict
 			return { ok: false, reason: post?.error || '无法获取动作后页面状态' }
 		}
 
@@ -113,6 +118,9 @@
 				const byPoint = await verifyInputByPoint(session, point.x, point.y, expected)
 				if (byPoint.ok) return { ok: true, reason: '输入值与预期匹配(point)' }
 			}
+
+			const outcomeVerdict = evaluateStructuredOutcome(execution, { finalNoEffect: false })
+			if (outcomeVerdict) return outcomeVerdict
 
 			return { ok: false, reason: '输入值校验失败（值未写入目标元素）' }
 		}
@@ -174,6 +182,13 @@
 						reason: clearState.alreadyEmpty
 							? '搜索重置后目标字段已处于空状态'
 							: '搜索重置后字段已清空',
+					}
+				}
+				const networkClearState = getSearchWorkflowNetworkResetState(preObservation, postObs, input)
+				if (networkClearState.ok) {
+					return {
+						ok: true,
+						reason: `搜索重置后接口请求字段已不再携带旧筛选值（${networkClearState.detail}）`,
 					}
 				}
 				if (hasSearchWorkflowTrackedResetFields(input)) {
@@ -262,7 +277,8 @@
 		if (isSearchWorkflowStep(action, 'reset_filters')) {
 			const input = action?.input || {}
 			if (hasSearchWorkflowTrackedResetFields(input)) {
-				return getSearchWorkflowClearState(preObservation, postObservation, input).ok
+				return getSearchWorkflowClearState(preObservation, postObservation, input).ok ||
+					getSearchWorkflowNetworkResetState(preObservation, postObservation, input).ok
 			}
 			return hasPostObservationProgress(preObservation, postObservation) ||
 				buildTableSummarySignature(preObservation) !== buildTableSummarySignature(postObservation)
@@ -352,6 +368,42 @@
 			? actionContract.isProgressOutcome(kind)
 			: !!outcome?.progress
 		if (isProgress) return { ok: true, reason: `动作结果: ${kind}` }
+		return null
+	}
+
+	function evaluateMissingPostObservationStructuredOutcome(action, execution) {
+		const name = getEffectiveVerificationActionName(action)
+		const verdict = evaluateStructuredOutcome(execution, { finalNoEffect: false })
+		if ((name === 'input_text' || name === 'type') && verdict?.ok) {
+			return {
+				...verdict,
+				reason: `${verdict.reason}；动作后观察暂不可用，采用输入执行层结构化结果`,
+			}
+		}
+		if (isDropdownSelectionCommitAction(action) && verdict?.ok) {
+			return {
+				...verdict,
+				reason: `${verdict.reason}；动作后观察暂不可用，采用选择执行层结构化结果`,
+			}
+		}
+		if (isSearchWorkflowStep(action, 'submit_search') && execution?.success !== false) {
+			return {
+				ok: true,
+				reason: '搜索提交动作已执行；动作后观察暂不可用，交由搜索工作流记录为已提交待观察并继续恢复。',
+				outcome: createVerifierOutcome(OUTCOME_KIND.STATE_CHANGED, {
+					reason: 'search_submit_post_observation_unavailable',
+				}),
+			}
+		}
+		if (isSearchWorkflowStep(action, 'reset_filters') && verdict?.ok) {
+			return {
+				...verdict,
+				reason: `${verdict.reason}；搜索重置动作已执行且动作后观察暂不可用，采用执行层结构化结果并继续后续字段。`,
+				outcome: createVerifierOutcome(OUTCOME_KIND.STATE_CHANGED, {
+					reason: 'search_reset_post_observation_unavailable',
+				}),
+			}
+		}
 		return null
 	}
 
@@ -941,6 +993,76 @@
 		return getSearchWorkflowResetFieldIndexes(input).length > 0
 	}
 
+	function getSearchWorkflowNetworkResetState(preObservation, postObservation, input) {
+		const expected = normalizeVerifierKey(input?.workflow_test_value)
+		const labels = getSearchWorkflowResetFieldLabels(input)
+		if (!expected || !labels.length) {
+			return { ok: false, beforeMatched: false, afterMatched: false, detail: '缺少字段标签或测试值' }
+		}
+		const before = collectNetworkRequestValueMatches(preObservation, labels, expected)
+		const after = collectNetworkRequestValueMatches(postObservation, labels, expected)
+		const postRequests = countNetworkRequestsWithFields(postObservation)
+		const ok = before.matched && !after.matched && postRequests > 0
+		return {
+			ok,
+			beforeMatched: before.matched,
+			afterMatched: after.matched,
+			detail: `requestValue ${before.count}->${after.count}, postRequests=${postRequests}, labels=${labels.join('|')}`,
+		}
+	}
+
+	function getSearchWorkflowResetFieldLabels(input) {
+		const raw = [
+			input?.workflow_field_label,
+			...String(input?.workflow_filled_fields || '').split(/[|,，、\s]+/),
+		]
+		const seen = new Set()
+		const labels = []
+		for (const value of raw) {
+			const text = String(value || '').trim()
+			const key = normalizeVerifierKey(text)
+			if (!key || seen.has(key)) continue
+			seen.add(key)
+			labels.push(text)
+		}
+		return labels
+	}
+
+	function collectNetworkRequestValueMatches(observation, labels, expected) {
+		let count = 0
+		const matched = []
+		const normalizedLabels = (Array.isArray(labels) ? labels : [])
+			.map(normalizeVerifierKey)
+			.filter(Boolean)
+		for (const item of (Array.isArray(observation?.network) ? observation.network : [])) {
+			for (const field of (Array.isArray(item?.requestFields) ? item.requestFields : [])) {
+				if (!networkRequestFieldMatchesLabels(field, normalizedLabels)) continue
+				const value = normalizeVerifierKey(field?.value)
+				if (!value || value !== expected) continue
+				count += 1
+				matched.push(String(field?.path || field?.key || field?.label || '').trim())
+			}
+		}
+		return { matched: count > 0, count, fields: matched }
+	}
+
+	function networkRequestFieldMatchesLabels(field, normalizedLabels) {
+		if (!normalizedLabels.length) return false
+		const key = normalizeVerifierKey([
+			field?.key,
+			field?.path,
+			field?.label,
+		].filter(Boolean).join('|'))
+		if (!key) return false
+		return normalizedLabels.some((label) => key.includes(label) || label.includes(key))
+	}
+
+	function countNetworkRequestsWithFields(observation) {
+		return (Array.isArray(observation?.network) ? observation.network : [])
+			.filter((item) => Array.isArray(item?.requestFields) && item.requestFields.length > 0)
+			.length
+	}
+
 	function getSearchWorkflowResetFieldIndexes(input) {
 		const raw = [
 			input?.workflow_field_index,
@@ -1176,12 +1298,22 @@
 	}
 
 	function isObservedFilled(item) {
-		const signature = readObservedValueSignature(item).toLowerCase()
-		if (!signature) return false
-		if (/filled:|selected:/.test(signature)) return true
-		if (/\bchecked\b|\btrue\b/.test(signature)) return true
-		const parts = signature.split('|').map((part) => part.trim()).filter(Boolean)
-		return parts.some((part) => !/^(empty|unknown|false|null|undefined|-)$/.test(part))
+		if (!item || typeof item !== 'object') return false
+		const valueState = String(item.valueState || '').trim().toLowerCase()
+		if (/^(filled|selected):/.test(valueState)) return true
+		if (/^(checked|selected|true)$/.test(valueState)) return true
+		if (valueState && !isEmptyObservedValueToken(valueState)) return true
+		const value = String(item.value ?? '').trim().toLowerCase()
+		if (value && !isEmptyObservedValueToken(value)) return true
+		const checked = String(item.checked ?? '').trim().toLowerCase()
+		if (/^(true|checked|1)$/.test(checked)) return true
+		const selected = String(item.selected ?? '').trim().toLowerCase()
+		return /^(true|selected|1)$/.test(selected)
+	}
+
+	function isEmptyObservedValueToken(value) {
+		const text = String(value || '').replace(/\s+/g, '').toLowerCase()
+		return /^(empty|unknown|false|null|undefined|-|unchecked|unselected|collapsed|expanded|open|closed)$/.test(text)
 	}
 
 	async function verifyInputByIndex(session, index, expected) {

@@ -71,6 +71,8 @@
 				g.NC_BG_EXECUTOR.requestObservation(session.currentTabId)
 			)
 			if (finalizeIfAborted(session, sessions)) return
+			let decision = null
+			let observationData = observation?.data || null
 			if (!observation?.ok) {
 				const observationFailureDecision = g.NC_BG_PLANNER_WORKFLOWS?.deriveObservationFailureWorkflowDecision?.(
 					session,
@@ -80,28 +82,36 @@
 					finalizeDoneDecision(session, sessions, observationFailureDecision)
 					return
 				}
-				failSession(session, observation?.error || '无法读取页面状态', sessions)
-				return
+				if (observationFailureDecision?.action?.name) {
+					decision = observationFailureDecision
+					observationData = buildObservationFailureFallbackObservation(session, observationFailureDecision, observation?.error)
+					session.activityText = `第 ${session.step} 步：页面观察超时，使用工作流恢复动作...`
+					publishSession(session)
+				} else {
+					failSession(session, observation?.error || '无法读取页面状态', sessions)
+					return
+				}
 			}
-			session.observedFieldInventory = buildObservedFieldInventory(observation.data)
+			session.observedFieldInventory = buildObservedFieldInventory(observationData)
 
-			session.currentRuntimeProgress = null
-			session.planItems = derivePlanItems(session)
-			session.activityText = `第 ${session.step} 步：规划动作...`
-			publishSession(session)
+			if (!decision) {
+				session.currentRuntimeProgress = null
+				session.planItems = derivePlanItems(session)
+				session.activityText = `第 ${session.step} 步：规划动作...`
+				publishSession(session)
 
-			let decision = null
-			try {
-				decision = await withTimeout(
-					g.NC_BG_PLANNER.planAction(session, observation.data, {
-						onProgress: (event) => publishPlanningProgress(session, event),
-					}),
-					getPlanningTimeoutMs(session),
-					`第 ${session.step} 步规划动作超时`
-				)
-			} catch (error) {
-				failSession(session, `规划动作失败: ${String(error?.message || error || '未知错误')}`, sessions)
-				return
+				try {
+					decision = await withTimeout(
+						g.NC_BG_PLANNER.planAction(session, observationData, {
+							onProgress: (event) => publishPlanningProgress(session, event),
+						}),
+						getPlanningTimeoutMs(session),
+						`第 ${session.step} 步规划动作超时`
+					)
+				} catch (error) {
+					failSession(session, `规划动作失败: ${String(error?.message || error || '未知错误')}`, sessions)
+					return
+				}
 			}
 			if (finalizeIfAborted(session, sessions)) return
 			if (!decision?.action?.name) {
@@ -167,7 +177,7 @@
 				execution = await attemptExecutionVisionFallback(
 					session,
 					decision,
-					observation.data,
+					observationData,
 					execution
 				)
 				session.currentRuntimeProgress = null
@@ -189,7 +199,7 @@
 					() => g.NC_BG_VERIFIER.verifyExecutionOutcome(
 						session,
 						decision.action,
-						observation.data,
+						observationData,
 						execution
 					),
 					{ failedExecution: true }
@@ -272,7 +282,7 @@
 					() => g.NC_BG_VERIFIER.verifyExecutionOutcome(
 						session,
 						decision.action,
-						observation.data,
+						observationData,
 						execution
 					)
 				)
@@ -282,7 +292,7 @@
 					const recovery = await attemptVerificationRecovery(
 						session,
 						decision,
-						observation.data,
+						observationData,
 						verify.reason,
 						{
 							onProgress: (text) => {
@@ -453,6 +463,41 @@
 		})
 		publishSession(session)
 		sessions.delete(session.id)
+	}
+
+	function buildObservationFailureFallbackObservation(session, decision, error) {
+		const text = String(error || '无法读取页面状态').trim()
+		const input = decision?.action?.input || {}
+		return {
+			url: '',
+			title: '',
+			scrollY: 0,
+			activeElement: '',
+			viewport: { width: 0, height: 0 },
+			forms: [],
+			actions: [],
+			options: [],
+			popups: [],
+			panels: [],
+			tables: [],
+			network: [],
+			feedback: [],
+			candidateDiagnostics: [],
+			elements: [],
+			treeCandidates: [],
+			simplifiedDom: [],
+			rawCandidates: [],
+			observationFailed: true,
+			observationError: text,
+			content: [
+				'<observation_failure>',
+				`step=${Number(session?.step) || 0}`,
+				`action=${String(decision?.action?.name || '')}`,
+				`workflow_step=${String(input.workflow_step || '')}`,
+				`error="${text.replace(/"/g, '&quot;')}"`,
+				'</observation_failure>',
+			].join('\n'),
+		}
 	}
 
 	function recordWorkflowOutcome(session, decision, outcome) {

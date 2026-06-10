@@ -1457,6 +1457,7 @@
 		const actions = []
 		const missingSamples = (context.match(/^- search_data_requirement\b[^\n]*status="missing_table_samples"[^\n]*/m) || [])[0] || ''
 		if (missingSamples) {
+			const missingFields = extractAttr(missingSamples, 'fields')
 			actions.push({
 				name: 'request_context',
 				input: {
@@ -1464,6 +1465,24 @@
 					limit: 10,
 				},
 				reason: '搜索测试缺少列表样本，本地先补表格/列表上下文。',
+			})
+			actions.push({
+				name: 'request_context',
+				input: {
+					source: 'network',
+					limit: 10,
+				},
+				reason: '搜索测试缺少列表样本，本地继续补最近接口响应上下文。',
+			})
+			actions.push({
+				name: 'request_context',
+				input: {
+					source: 'raw_candidates',
+					region: 'content',
+					query: missingFields,
+					limit: 20,
+				},
+				reason: '搜索测试缺少列表样本，本地继续补页面原始文本/隐藏列候选上下文。',
 			})
 		}
 		const optionRequirementLines = context.match(/^- search_option_requirement\b[^\n]*status="(?:option_sample_mismatch|option_candidates_unobserved)"[^\n]*/gm) || []
@@ -1572,11 +1591,13 @@
 			const query = String(safeInput.query || '').trim()
 			const sourceLabels = {
 				tables: '表格/列表摘要',
+				network: '接口响应摘要',
 				forms: '表单字段',
 				actions: '可点击动作',
 				options: '候选项',
 				popups: '弹层候选',
 				raw_candidates: '原始候选',
+				raw_candidate: '原始候选',
 				simplified_dom: '精简 DOM',
 			}
 			const parts = [sourceLabels[source] || source, region ? `${region} 区域` : '', query ? `匹配 "${query}"` : ''].filter(Boolean)

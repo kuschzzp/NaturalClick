@@ -91,6 +91,13 @@
 				deriveUnresolvedNavigationTimeoutDecision(session, observation),
 		},
 		{
+			name: 'search-fields',
+			run: (session, observation, context) =>
+				typeof searchWorkflow.deriveSearchTimeoutRecoveryDecision === 'function'
+					? searchWorkflow.deriveSearchTimeoutRecoveryDecision(session, observation, context)
+					: null,
+		},
+		{
 			name: 'form-fill',
 			run: (session, observation) =>
 				deriveVisibleCascaderOptionTimeoutDecision(session, observation) ||
@@ -141,7 +148,7 @@
 		const informationRecovery = deriveInformationQueryPostContextDecision(session, workflowContextText, planningContext, context)
 		if (informationRecovery) return annotateWorkflowDecision(informationRecovery, 'information-query')
 		if (typeof searchWorkflow.deriveSearchPostContextDecision !== 'function') return null
-		const recovered = searchWorkflow.deriveSearchPostContextDecision(session, workflowContextText, planningContext)
+		const recovered = searchWorkflow.deriveSearchPostContextDecision(session, workflowContextText, planningContext, context)
 		return recovered ? annotateWorkflowDecision(recovered, 'search-fields') : null
 	}
 
@@ -237,7 +244,10 @@
 			recordNavigationWorkflowOutcome(session, routedDecision, outcome)
 			return
 		}
-		if (workflowName === 'record-view') return
+		if (workflowName === 'record-view') {
+			recordRecordViewWorkflowOutcome(session, routedDecision, outcome)
+			return
+		}
 		if (workflowName !== 'search-fields') return
 		if (typeof searchWorkflow.recordSearchWorkflowOutcome === 'function') {
 			searchWorkflow.recordSearchWorkflowOutcome(session, routedDecision, outcome)
@@ -257,7 +267,7 @@
 		const input = action?.input || {}
 		if (name === 'request_options_for') return Number.isFinite(Number(input.index))
 		if (name !== 'request_context') return false
-		return String(input.source || input.target || '').trim() === 'tables'
+		return ['tables', 'network'].includes(String(input.source || input.target || '').trim())
 	}
 
 	function inferWorkflowNameFromOutcome(session, decision, outcome) {
@@ -1185,9 +1195,9 @@
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		const operation = taskIntent?.getOperation?.(session) || ''
 		if (operation !== 'view_first_record_detail' && !isFirstRecordDetailTask(taskText)) return null
-		if (hasRecentSuccessfulRecordViewAttempt(session)) {
+		if (hasSuccessfulRecordViewAttempt(session)) {
 			if (taskHasPostRecordViewContinuation(taskText)) {
-				if (hasRecentRecordViewReturnAttempt(session)) return null
+				if (hasRecordViewReturnAttempt(session)) return null
 				const returnCandidate = findRecordViewReturnCandidate(observation)
 				if (!returnCandidate) return null
 				const label = getObservedItemLabel(returnCandidate) || '返回'
@@ -1225,7 +1235,7 @@
 		const unresolved = getExpectedNavigationKeys(session, state)
 			.filter((key) => !isNavigationTargetReachedForSession(session, observation, key, state))
 		if (unresolved.length) return null
-		if (hasRecentRecordViewAttempt(session)) return null
+		if (hasRecordViewAttempt(session)) return null
 		const hasRecordList = hasRecordListEvidence(observation)
 		const candidate = hasRecordList ? findFirstRecordDetailCandidate(observation) : null
 		if (candidate) {
@@ -1267,9 +1277,9 @@
 		if (!isSuccessfulDoneDecision(decision)) return null
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		if (!taskHasPostRecordViewContinuation(taskText)) return null
-		if (!hasRecentSuccessfulRecordViewAttempt(session)) return null
+		if (!hasSuccessfulRecordViewAttempt(session)) return null
 		const observation = context?.observation || null
-		const returnCandidate = !hasRecentRecordViewReturnAttempt(session)
+		const returnCandidate = !hasRecordViewReturnAttempt(session)
 			? findRecordViewReturnCandidate(observation)
 			: null
 		if (returnCandidate) {
@@ -1309,10 +1319,24 @@
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		const operation = taskIntent?.getOperation?.(session) || ''
 		if (operation !== 'view_first_record_detail' && !isFirstRecordDetailTask(taskText)) return []
+		if (
+			hasSuccessfulRecordViewAttempt(session) &&
+			taskHasPostRecordViewContinuation(taskText) &&
+			hasRecordViewReturnAttempt(session)
+		) {
+			return [
+				[
+					'- record_view',
+					'status="returned_continuation_ready"',
+					'position="first"',
+					'guidance="列表第一条记录详情已经查看且已返回列表；继续执行后续搜索/查询/筛选/表单任务，不要重复点击详情或返回入口。"',
+				].join(' '),
+			]
+		}
 		const unresolved = (Array.isArray(expectedKeys) ? expectedKeys : [])
 			.filter((key) => !isNavigationTargetReachedForSession(session, observation, key, state))
 		if (unresolved.length) return []
-		if (hasRecentSuccessfulRecordViewAttempt(session)) {
+		if (hasSuccessfulRecordViewAttempt(session)) {
 			if (!taskHasPostRecordViewContinuation(taskText)) return []
 			const candidate = findRecordViewReturnCandidate(observation)
 			return [
@@ -2258,8 +2282,21 @@
 		})
 	}
 
+	function hasRecordViewReturnAttempt(session) {
+		if (session?.workflowState?.recordView?.returned === true) return true
+		return hasHistoryItem(session, isRecordViewReturnHistoryItem)
+	}
+
 	function hasRecentSuccessfulRecordViewAttempt(session) {
 		return getRecentHistoryItems(session, 6).some((item) => {
+			if (item?.success === false) return false
+			return isRecordViewHistoryItem(item)
+		})
+	}
+
+	function hasSuccessfulRecordViewAttempt(session) {
+		if (session?.workflowState?.recordView?.viewed === true) return true
+		return hasHistoryItem(session, (item) => {
 			if (item?.success === false) return false
 			return isRecordViewHistoryItem(item)
 		})
@@ -2269,9 +2306,54 @@
 		return getRecentHistoryItems(session, 6).some((item) => isRecordViewHistoryItem(item))
 	}
 
+	function hasRecordViewAttempt(session) {
+		return hasSuccessfulRecordViewAttempt(session) || hasRecentRecordViewAttempt(session)
+	}
+
 	function isRecordViewHistoryItem(item) {
 		const input = item?.input || {}
 		return String(input.workflow_step || '') === 'view_first_record_detail'
+	}
+
+	function isRecordViewReturnHistoryItem(item) {
+		const input = item?.input || {}
+		return String(input.workflow_step || '') === 'return_after_record_view'
+	}
+
+	function hasHistoryItem(session, predicate) {
+		const history = Array.isArray(session?.history) ? session.history : []
+		return history.some((item) => {
+			try {
+				return !!predicate(item)
+			} catch (_) {
+				return false
+			}
+		})
+	}
+
+	function recordRecordViewWorkflowOutcome(session, decision, outcome) {
+		if (!session || !decision) return
+		if (!session.workflowState || typeof session.workflowState !== 'object') session.workflowState = {}
+		const state = session.workflowState.recordView && typeof session.workflowState.recordView === 'object'
+			? session.workflowState.recordView
+			: {}
+		session.workflowState.recordView = state
+		const input = decision?.action?.input || {}
+		const step = String(input.workflow_step || '').trim()
+		if (outcome?.success === false) {
+			state.failedReason = String(outcome?.output || outcome?.message || outcome?.reason || 'record-view action failed')
+			return
+		}
+		if (step === 'view_first_record_detail') {
+			state.viewed = true
+			state.failedReason = ''
+		} else if (step === 'return_after_record_view') {
+			state.returned = true
+			state.failedReason = ''
+		} else if (step === 'finish_record_view') {
+			state.finished = true
+			state.failedReason = ''
+		}
 	}
 
 	function isSuccessfulDoneDecision(decision) {
