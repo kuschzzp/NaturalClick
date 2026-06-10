@@ -177,11 +177,13 @@
 					}
 				}
 				if (hasSearchWorkflowTrackedResetFields(input)) {
+					const detail = formatSearchWorkflowClearStateDetail(clearState)
 					return {
 						ok: false,
-						reason: 'search_reset_field_not_cleared: 搜索重置后已知筛选字段仍未清空',
+						reason: `search_reset_field_not_cleared: 搜索重置后已知筛选字段仍未清空（${detail}）`,
 						outcome: createVerifierOutcome(OUTCOME_KIND.NO_EFFECT, {
 							reason: 'search_reset_field_not_cleared',
+							clearState: summarizeSearchWorkflowClearStateForOutcome(clearState),
 						}),
 					}
 				}
@@ -882,27 +884,57 @@
 
 	function getSearchWorkflowClearState(preObservation, postObservation, input) {
 		const indexes = getSearchWorkflowResetFieldIndexes(input)
-		if (!indexes.length) return { ok: false, alreadyEmpty: false, observed: 0 }
+		if (!indexes.length) return { ok: false, alreadyEmpty: false, observed: 0, total: 0, states: [] }
 		const states = indexes.map((index) => {
-			const before = findObservedIndexedItem(preObservation, index)
-			const after = findObservedIndexedItem(postObservation, index)
+			const beforeMatch = findObservedIndexedItemWithSource(preObservation, index)
+			const afterMatch = findObservedIndexedItemWithSource(postObservation, index)
+			const before = beforeMatch?.item || null
+			const after = afterMatch?.item || null
 			return {
 				index,
-				before,
-				after,
+				label: getObservedItemLabel(after || before),
+				beforeSource: beforeMatch?.source || '',
+				afterSource: afterMatch?.source || '',
+				beforeValue: summarizeObservedValueForClearState(before),
+				afterValue: summarizeObservedValueForClearState(after),
+				observedBefore: !!before,
+				observedAfter: !!after,
 				wasFilled: !!before && isObservedFilled(before),
 				nowFilled: !!after && isObservedFilled(after),
 			}
 		})
-		const observed = states.filter((state) => !!state.after)
-		if (!observed.length) return { ok: false, alreadyEmpty: false, observed: 0 }
+		const observed = states.filter((state) => !!state.observedAfter)
+		if (!observed.length) {
+			return {
+				ok: false,
+				alreadyEmpty: false,
+				observed: 0,
+				total: states.length,
+				states,
+				detail: formatSearchWorkflowClearStateDetail({ observed: 0, total: states.length, states }),
+			}
+		}
 		const filledBefore = observed.filter((state) => state.wasFilled)
 		if (filledBefore.length) {
 			const ok = filledBefore.every((state) => !state.nowFilled)
-			return { ok, alreadyEmpty: false, observed: observed.length }
+			return {
+				ok,
+				alreadyEmpty: false,
+				observed: observed.length,
+				total: states.length,
+				states,
+				detail: formatSearchWorkflowClearStateDetail({ observed: observed.length, total: states.length, states }),
+			}
 		}
 		const ok = observed.every((state) => !state.nowFilled)
-		return { ok, alreadyEmpty: ok, observed: observed.length }
+		return {
+			ok,
+			alreadyEmpty: ok,
+			observed: observed.length,
+			total: states.length,
+			states,
+			detail: formatSearchWorkflowClearStateDetail({ observed: observed.length, total: states.length, states }),
+		}
 	}
 
 	function hasSearchWorkflowTrackedResetFields(input) {
@@ -928,17 +960,76 @@
 	}
 
 	function findObservedIndexedItem(observation, index) {
+		return findObservedIndexedItemWithSource(observation, index)?.item || null
+	}
+
+	function findObservedIndexedItemWithSource(observation, index) {
 		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
 			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
-				if (Number(field?.index) === index) return field
+				if (Number(field?.index) === index) return { item: field, source: 'form' }
 			}
 		}
 		for (const listName of ['elements', 'actions']) {
 			for (const item of (Array.isArray(observation?.[listName]) ? observation[listName] : [])) {
-				if (Number(item?.index) === index) return item
+				if (Number(item?.index) === index) return { item, source: listName }
 			}
 		}
 		return null
+	}
+
+	function summarizeSearchWorkflowClearStateForOutcome(clearState) {
+		return {
+			observed: Number(clearState?.observed || 0),
+			total: Number(clearState?.total || 0),
+			detail: formatSearchWorkflowClearStateDetail(clearState),
+			states: (Array.isArray(clearState?.states) ? clearState.states : []).map((state) => ({
+				index: state.index,
+				label: state.label,
+				beforeSource: state.beforeSource,
+				afterSource: state.afterSource,
+				beforeValue: state.beforeValue,
+				afterValue: state.afterValue,
+				observedBefore: !!state.observedBefore,
+				observedAfter: !!state.observedAfter,
+				wasFilled: !!state.wasFilled,
+				nowFilled: !!state.nowFilled,
+			})),
+		}
+	}
+
+	function formatSearchWorkflowClearStateDetail(clearState) {
+		const states = Array.isArray(clearState?.states) ? clearState.states : []
+		const observed = Number(clearState?.observed || 0)
+		const total = Number(clearState?.total || states.length || 0)
+		if (!states.length) return `观察字段 ${observed}/${total}`
+		const uncleared = states.filter((state) => state.observedAfter && state.nowFilled)
+		const missing = states.filter((state) => !state.observedAfter)
+		const parts = []
+		if (uncleared.length) {
+			parts.push(`仍有值: ${uncleared.slice(0, 4).map(formatSearchWorkflowClearStateField).join('；')}`)
+		}
+		if (missing.length) {
+			parts.push(`未观察到: ${missing.slice(0, 4).map(formatSearchWorkflowClearStateField).join('；')}`)
+		}
+		if (!parts.length) {
+			parts.push(`观察字段 ${observed}/${total}`)
+		}
+		return parts.join('；')
+	}
+
+	function formatSearchWorkflowClearStateField(state) {
+		const label = String(state?.label || '未命名字段').replace(/\s+/g, ' ').trim()
+		const source = String(state?.afterSource || state?.beforeSource || 'unknown').trim()
+		const before = state?.observedBefore ? String(state?.beforeValue || (state?.wasFilled ? 'filled' : 'empty')) : 'not_observed'
+		const after = state?.observedAfter ? String(state?.afterValue || (state?.nowFilled ? 'filled' : 'empty')) : 'not_observed'
+		return `${label}[index=${state?.index},source=${source},before=${before},after=${after}]`
+	}
+
+	function summarizeObservedValueForClearState(item) {
+		if (!item) return ''
+		const value = readObservedValueSignature(item).replace(/\s+/g, ' ').trim()
+		const summary = value || (isObservedFilled(item) ? 'filled' : 'empty')
+		return summary.length > 80 ? `${summary.slice(0, 77)}...` : summary
 	}
 
 	function getObservedItemLabel(item) {

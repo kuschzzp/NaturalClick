@@ -43,6 +43,7 @@ const CONTENT_SCRIPT_FILES = [
 	'shared/protocol.js',
 	'shared/action-contract.js',
 	'shared/control-semantics.js',
+	'content/network-monitor.js',
 	'content/visual.js',
 	'content/semantics.js',
 	'content/observer.js',

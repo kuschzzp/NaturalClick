@@ -166,8 +166,8 @@
 		const selectionFields = sampleDependentFields.filter(isSelectionField)
 		const candidateSummary = buildSearchDataRequirementCandidateSummary(state, selectionFields)
 		const guidance = selectionFields.length
-			? '当前搜索选择字段缺少可用列表样本或任务显式值；即使下拉候选可见，也不要随意选择第一个候选；先 request_context source=tables 或 inspect_region content 获取对应列样本，不要填泛化测试词。'
-			: '当前搜索字段缺少可用列表样本；先 request_context source=tables 或 inspect_region content 获取列表数据，不要填泛化测试词。'
+			? '当前搜索选择字段缺少可用列表/API样本或任务显式值；即使下拉候选可见，也不要随意选择第一个候选；先 request_context source=tables、request_context source=network 或 inspect_region content 获取对应字段样本，不要填泛化测试词。'
+			: '当前搜索字段缺少可用列表/API样本；先 request_context source=tables、request_context source=network 或 inspect_region content 获取列表/接口数据，不要填泛化测试词。'
 		lines.push([
 			'- search_data_requirement',
 			'status="missing_table_samples"',
@@ -186,7 +186,7 @@
 			'status="available"',
 			`fields="${escapeAttr(samples.map((item) => item.label).join('|'))}"`,
 			`samples="${escapeAttr(samples.map((item) => `${item.label}:${item.value}`).join('; '))}"`,
-			'guidance="已从当前列表/表格提取字段样本；优先使用这些真实样本逐项测试，提交验证后先清空条件再进入下一项，不要随机造值。"',
+			'guidance="已从当前列表/表格/API响应提取字段样本；优先使用这些真实样本逐项测试，提交验证后先清空条件再进入下一项，不要随机造值。"',
 		].join(' '))
 	}
 
@@ -195,12 +195,12 @@
 		const samples = []
 		for (const field of (Array.isArray(fields) ? fields : [])) {
 			const value = buildSearchFieldTestValue(session, field, observation)
-			if (value.source !== 'table_sample' || !value.text) continue
+			if (!['table_sample', 'network_sample'].includes(value.source) || !value.text) continue
 			const label = getFieldLabel(field) || getFieldKey(field)
 			const key = `${normalizeText(label)}:${normalizeText(value.text)}`
 			if (!label || seen.has(key)) continue
 			seen.add(key)
-			samples.push({ label, value: value.text })
+			samples.push({ label, value: value.text, source: value.source })
 			if (samples.length >= 8) break
 		}
 		return samples
@@ -494,7 +494,9 @@
 			memory: `搜索测试按字段推进：填写当前字段后提交搜索，再重置进入下一字段。测试值来源=${source}${basis ? `，依据=${basis}` : ''}。`,
 			thought: source === 'table_sample'
 				? '该字段是可输入搜索条件，使用列表已有数据作为搜索值，避免随机词导致空结果。'
-				: '该字段是可输入搜索条件，写入可解释来源的测试值后提交验证。',
+				: source === 'network_sample'
+					? '该字段是可输入搜索条件，使用最近接口响应里的真实字段值作为搜索值，避免随机词导致空结果。'
+					: '该字段是可输入搜索条件，写入可解释来源的测试值后提交验证。',
 			next_goal: `填写搜索字段：${label}`,
 			action: {
 				name: 'input_text',
@@ -517,6 +519,20 @@
 		const visible = (Array.isArray(mismatch?.candidates) ? mismatch.candidates : [])
 			.slice(0, 8)
 			.join('|')
+		if (mismatch?.wrongTypedSample) {
+			return buildEvidenceStopOrSkipDecision(
+				state,
+				field,
+				`搜索字段 "${label}" 的列表样本 "${sample}" 与该选择字段候选类型明显不一致（可见候选：${visible || '无'}），疑似读取到相邻列/隐藏列样本；需要补充该字段真实列表/API样本或任务显式值，已停止以避免无依据搜索。`,
+				{
+					...buildFieldWorkflowInput(field),
+					workflow_missing_table_samples: true,
+					workflow_mismapped_table_sample: true,
+					workflow_table_sample: sample,
+					workflow_visible_candidates: visible,
+				}
+			)
+		}
 		return buildEvidenceStopOrSkipDecision(
 			state,
 			field,
@@ -788,11 +804,12 @@
 		const results = getOrderedSearchResults(state, { includeMissing: true })
 		const failed = getSearchResultFailures(state)
 		const issues = getSearchResultIssues(state)
-		const success = results.length > 0 && issues.length === 0
-		const status = success ? 'passed' : (failed.length ? 'failed' : 'inconclusive')
+		const passed = results.length > 0 && issues.length === 0
+		const status = passed ? 'passed' : (failed.length ? 'failed' : 'inconclusive')
+		const terminalSuccess = status !== 'failed'
 		const finalText = buildFinalSearchOutcomeText(results, issues, summary)
 		return finishSearchWorkflowDecision(
-			success,
+			terminalSuccess,
 			finalText,
 			{
 				workflow_result_status: status,
@@ -800,6 +817,38 @@
 				workflow_result_failures: failed.map((item) => `${item.label || item.key}: ${item.summary}`).join(' | '),
 			}
 		)
+	}
+
+	function deriveSearchObservationFailureDecision(session, error) {
+		const state = session?.workflowState?.search
+		if (!state || !hasSearchResultEvidence(state)) return null
+		const reason = compactSearchDiagnosticText(error || '无法读取页面状态', 240)
+		const decision = buildFinalSearchWorkflowDecision(state)
+		const input = decision?.action?.input || {}
+		const baseText = String(input.text || '').trim() || '搜索/筛选区域测试已有部分记录。'
+		return {
+			...decision,
+			evaluation_previous_goal: '读取页面状态失败，但搜索测试已有可汇总记录。',
+			memory: '最后一次页面观察失败时，优先输出已记录字段结果，避免只返回通信超时而丢失测试结论。',
+			thought: '当前无法继续安全观察页面；根据搜索工作流状态生成阶段性总结。',
+			next_goal: '输出搜索测试阶段性总结',
+			action: {
+				...decision.action,
+				input: {
+					...input,
+					text: `${baseText}最后一次页面观察失败：${reason}；已按当前已记录结果生成总结。`,
+					workflow_observation_failed: true,
+					workflow_observation_error: reason,
+				},
+			},
+		}
+	}
+
+	function hasSearchResultEvidence(state) {
+		if (!state || typeof state !== 'object') return false
+		if (state.resultsByKey && typeof state.resultsByKey === 'object' && Object.keys(state.resultsByKey).length) return true
+		if (Array.isArray(state.completedKeys) && state.completedKeys.length) return true
+		return Array.isArray(state.skippedKeys) && state.skippedKeys.length > 0
 	}
 
 	function buildFinalSearchOutcomeText(results, issues, summary) {
@@ -968,11 +1017,19 @@
 	}
 
 	function finishSearchWorkflowDecision(success, text, extraInput = {}) {
+		const status = String(extraInput?.workflow_result_status || '').trim()
+		const inconclusive = success && status === 'inconclusive'
 		return {
-			evaluation_previous_goal: success ? '搜索字段测试已完成。' : '搜索字段测试无法继续。',
-			memory: success ? '所有搜索/筛选字段均已按字段流程测试。' : String(text || ''),
-			thought: success ? '状态机已完成所有字段。' : '继续自动操作可能导致误选或循环，因此停止。',
-			next_goal: success ? '完成搜索字段测试' : '停止搜索字段测试',
+			evaluation_previous_goal: success
+				? (inconclusive ? '搜索字段测试已形成未完全确认的总结。' : '搜索字段测试已完成。')
+				: '搜索字段测试无法继续。',
+			memory: success ? (inconclusive ? String(text || '') : '所有搜索/筛选字段均已按字段流程测试。') : String(text || ''),
+			thought: success
+				? (inconclusive ? '状态机已覆盖可安全处理的字段，并输出未确认项原因。' : '状态机已完成所有字段。')
+				: '继续自动操作可能导致误选或循环，因此停止。',
+			next_goal: success
+				? (inconclusive ? '输出搜索字段测试总结' : '完成搜索字段测试')
+				: '停止搜索字段测试',
 			action: {
 				name: 'done',
 				input: {
@@ -1439,6 +1496,7 @@
 		const source = String(input.source || input.target || '').trim()
 		if (name === 'request_options_for') return true
 		if (name === 'request_context' && source === 'tables') return true
+		if (name === 'request_context' && source === 'network') return true
 		return /(empty_context|diagnostic_(?:options|popups)|候选未能与目标字段建立稳定归属|当前观察没有可见下拉候选|没有找到匹配上下文)/.test(text)
 	}
 
@@ -1457,7 +1515,7 @@
 			.filter(Boolean)
 		const picked = []
 		for (const line of lines) {
-			if (!/(empty_context|diagnostic_(?:options|popups)|visible_(?:options|popups)|native_options|当前观察没有可见下拉候选|候选未能与目标字段建立稳定归属|options_for|context_chunk|option \d+|popup index=|option index=)/.test(line)) continue
+			if (!/(empty_context|diagnostic_(?:options|popups)|visible_(?:options|popups)|native_options|当前观察没有可见下拉候选|候选未能与目标字段建立稳定归属|options_for|context_chunk|network method=|response method=|fields="|option \d+|popup index=|option index=)/.test(line)) continue
 			picked.push(line)
 			if (picked.length >= 8) break
 		}
@@ -1601,7 +1659,7 @@
 			? '列表样本与候选不匹配'
 			: evidence.optionCandidatesUnobserved
 				? '未观测到真实候选'
-				: '缺少真实列表样本'
+				: '缺少真实列表/API样本'
 		const suffix = diagnostic && !text.includes('最近补充上下文为空')
 			? ` 最近补充上下文为空：${diagnostic}`
 			: ''
@@ -2811,14 +2869,14 @@
 	}
 
 	function buildSearchFieldTestValue(session, field, observation, planningContext = []) {
-		const observedSample = pickSearchFieldSampleText(observation, field)
-		const contextSample = observedSample ? '' : pickSearchFieldSampleTextFromPlanningContext(planningContext, field)
-		const sampled = observedSample || contextSample
-		if (sampled) {
+		const observedSample = pickSearchFieldSampleDetail(observation, field)
+		const contextSample = observedSample.text ? { text: '' } : pickSearchFieldSampleDetailFromPlanningContext(planningContext, field)
+		const sampled = observedSample.text ? observedSample : contextSample
+		if (sampled?.text) {
 			return {
-				text: sampled,
-				source: 'table_sample',
-				basis: observedSample ? '当前列表已有数据' : '补充表格上下文已有数据',
+				text: sampled.text,
+				source: sampled.source || 'table_sample',
+				basis: sampled.basis || (sampled.source === 'network_sample' ? '最近接口响应已有数据' : '当前列表已有数据'),
 			}
 		}
 		const taskText = String(session?.latestTask || session?.task || '')
@@ -2830,7 +2888,7 @@
 				basis: '任务文本明确指定的搜索值',
 			}
 		}
-		return { text: '', source: 'missing_sample', basis: '无列表样本或任务显式值' }
+		return { text: '', source: 'missing_sample', basis: '无列表/API样本或任务显式值' }
 	}
 
 	function extractTaskValue(text, pattern, field = null) {
@@ -3065,15 +3123,19 @@
 		const failed = new Set((state?.failedLabelsByKey?.[key] || []).map(normalizeText).filter(Boolean))
 		const candidates = collectUsableOptionCandidates(state, field, observation)
 		const planningContext = Array.isArray(context?.planningContext) ? context.planningContext : []
-		const observedSample = pickSearchFieldSampleText(observation, field)
-		const contextSample = observedSample ? '' : pickSearchFieldSampleTextFromPlanningContext(planningContext, field)
-		const sample = observedSample || contextSample
-		const sampleBasisPrefix = observedSample ? '当前列表对应列已有' : '补充表格上下文对应列已有'
+		const observedSample = pickSearchFieldSampleDetail(observation, field)
+		const contextSample = observedSample.text ? { text: '' } : pickSearchFieldSampleDetailFromPlanningContext(planningContext, field)
+		const sampleDetail = observedSample.text ? observedSample : contextSample
+		const rawSample = String(sampleDetail?.text || '').trim()
+		const ignoredSample = isLikelyMismappedSelectionSample(rawSample, candidates, field) ? rawSample : ''
+		const sample = ignoredSample ? '' : rawSample
+		const sampleSource = String(sampleDetail?.source || 'table_sample').trim()
+		const sampleBasisPrefix = sampleDetail?.basis || (sampleSource === 'network_sample' ? '接口响应对应字段已有' : '当前列表对应列已有')
 		if (sample) {
 			if (isCascaderLikeField(field) && parseSearchCascaderCandidatePath(sample).length) {
 				return {
 					text: sample,
-					source: 'table_sample',
+					source: sampleSource,
 					basis: `${sampleBasisPrefix}级联路径：${sample}`,
 				}
 			}
@@ -3083,7 +3145,7 @@
 					const date = extractDateRangeBounds(sample) ? sample : (normalizeDateCandidate(sample) || sample)
 					return {
 						text: range,
-						source: 'table_sample',
+						source: sampleSource,
 						basis: `${sampleBasisPrefix}日期：${date}`,
 					}
 				}
@@ -3093,7 +3155,7 @@
 			if (matched) {
 				return {
 					text: matched,
-					source: 'table_sample',
+					source: sampleSource,
 					basis: `${sampleBasisPrefix}值：${sample}`,
 				}
 			}
@@ -3140,6 +3202,18 @@
 				basis: '任务文本明确指定的候选',
 			}
 		}
+		if (ignoredSample && !isCascaderLikeField(field)) {
+			const visible = pickFirstOptionCandidateFromList(candidates, failed)
+			if (visible) {
+				return {
+					text: visible,
+					source: 'visible_option',
+					basis: ignoredSample
+						? `列表样本疑似错列（${ignoredSample}），改用目标字段真实候选：${visible}`
+						: `目标字段真实候选：${visible}`,
+				}
+			}
+		}
 		return { text: '', source: '', basis: '' }
 	}
 
@@ -3160,6 +3234,14 @@
 			}
 		}
 		if (pickCandidateMatchingSample(candidates, sample, failed)) return null
+		if (isClearlyWrongTypedSelectionSample(sample, candidates, field)) {
+			return {
+				field,
+				sample,
+				candidates,
+				wrongTypedSample: true,
+			}
+		}
 		return {
 			field,
 			sample,
@@ -3269,6 +3351,55 @@
 			}
 		}
 		return { text: '', source: '', basis: '' }
+	}
+
+	function pickFirstOptionCandidateFromList(candidates, failed) {
+		for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
+			const text = String(candidate || '').trim()
+			const normalized = normalizeText(text)
+			if (!normalized || failed?.has(normalized)) continue
+			return text
+		}
+		return ''
+	}
+
+	function isLikelyMismappedSelectionSample(sample, candidates, field) {
+		const text = String(sample || '').trim()
+		if (!text || !Array.isArray(candidates) || !candidates.length) return false
+		if (isDateRangeField(field) || isCascaderLikeField(field)) return false
+		if (pickCandidateMatchingSample(candidates, text, new Set())) return false
+		if (!isCodeLikeTableSample(text)) return false
+		return !candidates.some((candidate) => isCodeLikeTableSample(candidate))
+	}
+
+	function isCodeLikeTableSample(value) {
+		const text = String(value || '').trim()
+		if (!text) return false
+		const compact = text.replace(/\s+/g, '')
+		const digits = countAsciiDigits(compact)
+		const letters = (compact.match(/[A-Za-z]/g) || []).length
+		if (letters <= 0 || digits <= 0) return false
+		if (/[_-]/.test(compact) && digits >= 3) return true
+		if (digits >= 5 && compact.length >= 8) return true
+		return /^[A-Za-z]{1,10}[_-]?\d{4,}$/.test(compact)
+	}
+
+	function isClearlyWrongTypedSelectionSample(sample, candidates, field) {
+		const text = String(sample || '').trim()
+		if (!text || !Array.isArray(candidates) || !candidates.length) return false
+		if (isTemporalSearchField(field) || isCascaderLikeField(field)) return false
+		const candidateTexts = candidates.map((candidate) => String(candidate || '').trim()).filter(Boolean)
+		if (!candidateTexts.length) return false
+		if (looksLikeTemporalSearchSample(text) && !candidateTexts.some(looksLikeTemporalSearchSample)) return true
+		if (isLongNumericTableSample(text) && !candidateTexts.some((candidate) => isLongNumericTableSample(candidate) || isCodeLikeTableSample(candidate))) return true
+		return false
+	}
+
+	function isLongNumericTableSample(value) {
+		const compact = String(value || '').replace(/\s+/g, '')
+		if (!compact) return false
+		const digits = countAsciiDigits(compact)
+		return digits >= 6 && digits / Math.max(1, compact.length) >= 0.6
 	}
 
 	function hasUsableOptionCandidate(state, field, observation = null) {
@@ -3451,29 +3582,75 @@
 	}
 
 	function pickSearchFieldSampleText(observation, field) {
-		if (!observation || !field) return ''
+		return pickSearchFieldSampleDetail(observation, field).text
+	}
+
+	function pickSearchFieldSampleDetail(observation, field) {
+		if (!observation || !field) return { text: '', source: '', basis: '' }
 		const tables = Array.isArray(observation?.tables) ? observation.tables : []
 		const labelCandidates = getFieldLabelCandidates(field)
 		for (const table of tables) {
 			const sample = pickTableSampleForField(table, labelCandidates, field)
-			if (sample) return sample
+			if (sample) {
+				return {
+					text: sample,
+					source: 'table_sample',
+					basis: '当前列表已有数据',
+				}
+			}
 		}
 		const rowSample = pickTextRowSampleForField(observation, labelCandidates, field)
-		return rowSample || ''
+		if (rowSample) {
+			return {
+				text: rowSample,
+				source: 'table_sample',
+				basis: '当前列表文本行已有数据',
+			}
+		}
+		const networkSample = pickNetworkSampleForField(observation, labelCandidates, field)
+		if (networkSample) {
+			return {
+				text: networkSample,
+				source: 'network_sample',
+				basis: '最近接口响应已有数据',
+			}
+		}
+		return { text: '', source: '', basis: '' }
 	}
 
 	function pickSearchFieldSampleTextFromPlanningContext(planningContext, field) {
-		if (!field) return ''
+		return pickSearchFieldSampleDetailFromPlanningContext(planningContext, field).text
+	}
+
+	function pickSearchFieldSampleDetailFromPlanningContext(planningContext, field) {
+		if (!field) return { text: '', source: '', basis: '' }
 		const contexts = Array.isArray(planningContext) ? planningContext : []
 		const labelCandidates = getFieldLabelCandidates(field)
-		if (!labelCandidates.length) return ''
+		if (!labelCandidates.length) return { text: '', source: '', basis: '' }
 		for (const context of contexts) {
 			const text = String(context?.text || '')
-			if (!isTablePlanningContext(context, text)) continue
-			const sample = pickContextTableSampleForField(text, labelCandidates, field)
-			if (sample) return sample
+			if (isTablePlanningContext(context, text)) {
+				const sample = pickContextTableSampleForField(text, labelCandidates, field)
+				if (sample) {
+					return {
+						text: sample,
+						source: 'table_sample',
+						basis: '补充表格上下文已有数据',
+					}
+				}
+			}
+			if (isNetworkPlanningContext(context, text)) {
+				const sample = pickContextNetworkSampleForField(text, labelCandidates, field)
+				if (sample) {
+					return {
+						text: sample,
+						source: 'network_sample',
+						basis: '补充接口上下文已有数据',
+					}
+				}
+			}
 		}
-		return ''
+		return { text: '', source: '', basis: '' }
 	}
 
 	function hasRejectedTemporalSampleForField(observation, planningContext, field) {
@@ -3556,6 +3733,15 @@
 		return /<context_chunk\b[^>]*\bsource=(["'])tables\1/i.test(String(text || ''))
 	}
 
+	function isNetworkPlanningContext(context, text = '') {
+		const name = String(context?.name || '').trim()
+		const input = context?.input || {}
+		const source = String(input.source || input.target || '').trim()
+		if (name === 'request_context' && source === 'network') return true
+		return /<context_chunk\b[^>]*\bsource=(["'])network\1/i.test(String(text || '')) ||
+			/\bnetwork\s+method=|\bresponse\s+method=/i.test(String(text || ''))
+	}
+
 	function pickContextTableSampleForField(text, labelCandidates, field) {
 		let headers = []
 		for (const line of String(text || '').split(/\n+/)) {
@@ -3575,6 +3761,86 @@
 			if (isUsableTableSample(value, labelCandidates, field)) return value
 		}
 		return ''
+	}
+
+	function pickContextNetworkSampleForField(text, labelCandidates, field) {
+		for (const line of String(text || '').split(/\n+/)) {
+			const trimmed = line.replace(/\s+/g, ' ').trim()
+			if (!trimmed || !/\b(?:network|response)\b/i.test(trimmed)) continue
+			const fieldsAttr = readContextLineAttribute(trimmed, 'fields') || trimmed
+			for (const label of (Array.isArray(labelCandidates) ? labelCandidates : [])) {
+				const sample = extractSampleAfterLabel(fieldsAttr, label)
+				if (isUsableTableSample(sample, labelCandidates, field)) return sample
+			}
+			const pairSample = pickDelimitedFieldSampleForLabels(fieldsAttr, labelCandidates, field)
+			if (pairSample) return pairSample
+		}
+		return ''
+	}
+
+	function pickNetworkSampleForField(observation, labelCandidates, field) {
+		const network = Array.isArray(observation?.network) ? observation.network : []
+		if (!network.length || !Array.isArray(labelCandidates) || !labelCandidates.length) return ''
+		for (const item of network) {
+			const fields = Array.isArray(item?.fields) ? item.fields : []
+			for (const entry of fields) {
+				if (!networkFieldMatchesLabels(entry, labelCandidates)) continue
+				const value = String(entry?.value || '').trim()
+				if (isUsableTableSample(value, labelCandidates, field)) return value
+			}
+		}
+		return ''
+	}
+
+	function networkFieldMatchesLabels(entry, labelCandidates) {
+		const labels = (Array.isArray(labelCandidates) ? labelCandidates : [])
+			.map((label) => ({
+				raw: normalizeText(label),
+				header: normalizeHeaderLabel(label),
+				token: normalizeNetworkFieldToken(label),
+			}))
+			.filter((item) => item.raw || item.header || item.token)
+		if (!labels.length) return false
+		const candidates = [
+			entry?.label,
+			entry?.key,
+			entry?.path,
+		].map((value) => ({
+			raw: normalizeText(value),
+			header: normalizeHeaderLabel(value),
+			token: normalizeNetworkFieldToken(value),
+		}))
+		return candidates.some((candidate) => labels.some((label) =>
+			fieldTokenMatches(candidate.raw, label.raw) ||
+			fieldTokenMatches(candidate.header, label.header) ||
+			fieldTokenMatches(candidate.token, label.token)
+		))
+	}
+
+	function pickDelimitedFieldSampleForLabels(text, labelCandidates, field) {
+		const pairs = String(text || '').split('|')
+		for (const pair of pairs) {
+			const match = String(pair || '').trim().match(/^(.{1,80}?)(?:=|:|：)\s*(.{1,96})$/)
+			if (!match) continue
+			const label = match[1]
+			if (!networkFieldMatchesLabels({ label, key: label, path: label }, labelCandidates)) continue
+			const value = String(match[2] || '').trim()
+			if (isUsableTableSample(value, labelCandidates, field)) return value
+		}
+		return ''
+	}
+
+	function normalizeNetworkFieldToken(value) {
+		return normalizeText(value)
+			.replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, '')
+			.toLowerCase()
+	}
+
+	function fieldTokenMatches(a, b) {
+		if (!a || !b) return false
+		if (a === b) return true
+		if (a.length >= 3 && b.length >= 3 && (a.includes(b) || b.includes(a))) return true
+		return false
 	}
 
 	function extractContextTableHeaders(line) {
@@ -3627,6 +3893,15 @@
 			}
 		}
 		const tables = Array.isArray(observation?.tables) ? observation.tables : []
+		if (networkResultContainsValue(observation, field, value)) {
+			return {
+				status: 'passed_match',
+				label,
+				value,
+				source,
+				summary: `搜索结果观察：最近接口响应摘要中能看到测试值 "${value}"。`,
+			}
+		}
 		if (!tables.length) {
 			if (textRowResultContainsValue(observation, field, value)) {
 				return {
@@ -3653,6 +3928,15 @@
 				value,
 				source,
 				summary: `搜索结果观察：结果列表中仍能看到测试值 "${value}"。`,
+			}
+		}
+		if (textRowResultContainsValue(observation, field, value)) {
+			return {
+				status: 'passed_match',
+				label,
+				value,
+				source,
+				summary: `搜索结果观察：结构化表格摘要未确认，但在列表/表格文本行中看到测试值 "${value}"。`,
 			}
 		}
 		const expectValueVisible = shouldExpectSearchValueVisible(source)
@@ -3699,6 +3983,25 @@
 
 	function shouldExpectSearchValueVisible(source) {
 		return /^(table_sample|task_value)$/i.test(String(source || '').trim())
+	}
+
+	function networkResultContainsValue(observation, field, value) {
+		const normalizedValue = normalizeText(value)
+		if (!normalizedValue) return false
+		const labelCandidates = getFieldLabelCandidates(field)
+		for (const item of (Array.isArray(observation?.network) ? observation.network : [])) {
+			const fields = Array.isArray(item?.fields) ? item.fields : []
+			for (const entry of fields) {
+				const entryValue = String(entry?.value || '').trim()
+				if (!entryValue || entryValue === '***') continue
+				const labelMatched = networkFieldMatchesLabels(entry, labelCandidates)
+				if (labelMatched && searchResultCellMatchesValue(entryValue, normalizedValue, value)) return true
+				if (!labelMatched && searchResultCellMatchesValue(entryValue, normalizedValue, value)) return true
+			}
+			const text = String(item?.textSample || '').trim()
+			if (text && searchResultCellMatchesValue(text, normalizedValue, value)) return true
+		}
+		return false
 	}
 
 	function recordSearchResultObservation(state, key, analysis) {
@@ -3804,6 +4107,7 @@
 		const key = String(source || '').trim()
 		const labels = {
 			table_sample: '列表样本',
+			network_sample: '接口响应样本',
 			task_value: '任务文本',
 			visible_option: '真实候选',
 			option_candidate: '真实候选',
@@ -4465,6 +4769,7 @@
 	g.NC_BG_SEARCH_WORKFLOW = {
 		buildSearchWorkflowHintLines,
 		deriveSearchWorkflowDecision,
+		deriveSearchObservationFailureDecision,
 		deriveSearchPostModelDecision,
 		deriveSearchPostContextDecision,
 		deriveSearchPostValidationDecision,
@@ -4479,6 +4784,7 @@
 		collectSearchFields,
 		createSearchState,
 		deriveSearchWorkflowDecision,
+		deriveSearchObservationFailureDecision,
 		deriveSearchPostModelDecision,
 		deriveSearchPostContextDecision,
 		deriveSearchPostValidationDecision,

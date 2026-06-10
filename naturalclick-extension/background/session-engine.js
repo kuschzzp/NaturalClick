@@ -72,6 +72,14 @@
 			)
 			if (finalizeIfAborted(session, sessions)) return
 			if (!observation?.ok) {
+				const observationFailureDecision = g.NC_BG_PLANNER_WORKFLOWS?.deriveObservationFailureWorkflowDecision?.(
+					session,
+					observation?.error || '无法读取页面状态'
+				)
+				if (observationFailureDecision?.action?.name === 'done') {
+					finalizeDoneDecision(session, sessions, observationFailureDecision)
+					return
+				}
 				failSession(session, observation?.error || '无法读取页面状态', sessions)
 				return
 			}
@@ -104,53 +112,7 @@
 			session.planItems = derivePlanItems(session)
 
 			if (decision.action.name === 'done') {
-				const unsafeDone = getUnsafeDoneSuccessReason(session, decision)
-				const doneSuccess = decision.action.input?.success !== false && !unsafeDone
-				session.status = doneSuccess ? 'completed' : 'error'
-				const doneText = decision.action.input?.text || '任务完成。'
-				session.activityText = unsafeDone ? `${doneText}（已拦截: ${unsafeDone}）` : doneText
-				const doneOutcome = doneSuccess
-					? null
-					: createActionOutcome('no_effect', {
-						progress: false,
-						reason: unsafeDone || doneText || 'done 失败结束',
-					})
-				const doneOutput = doneOutcome
-					? appendOutcomeSummary(session.activityText, doneOutcome)
-					: session.activityText
-				session.history.push({
-					stepIndex: session.step,
-					thought: decision.thought || '',
-					evaluationPreviousGoal: decision.evaluation_previous_goal || '',
-					memory: decision.memory || '',
-					nextGoal: decision.next_goal || '',
-					action: 'done',
-					input: decision.action.input || {},
-					success: doneSuccess,
-					output: doneOutput,
-					outcome: doneOutcome,
-				})
-				appendTrace(session, {
-					title: `步骤 ${session.step}: done`,
-					detail: doneOutput,
-					kind: doneSuccess ? 'step' : 'error',
-					reflection: buildReflection(decision),
-					action: {
-						name: 'done',
-						input: decision.action.input || {},
-						output: doneOutput,
-						outcome: doneOutcome,
-					},
-				})
-				recordWorkflowOutcomeAndRefreshPlan(session, decision, {
-					success: doneSuccess,
-					output: doneOutput,
-					outcome: doneOutcome,
-					reason: unsafeDone || doneText,
-					stage: 'done',
-				})
-				publishSession(session)
-				sessions.delete(session.id)
+				finalizeDoneDecision(session, sessions, decision)
 				return
 			}
 
@@ -440,6 +402,56 @@
 			failSession(session, '达到最大步数，任务未完成。', sessions)
 			return
 		}
+		sessions.delete(session.id)
+	}
+
+	function finalizeDoneDecision(session, sessions, decision) {
+		const unsafeDone = getUnsafeDoneSuccessReason(session, decision)
+		const doneSuccess = decision.action.input?.success !== false && !unsafeDone
+		session.status = doneSuccess ? 'completed' : 'error'
+		const doneText = decision.action.input?.text || '任务完成。'
+		session.activityText = unsafeDone ? `${doneText}（已拦截: ${unsafeDone}）` : doneText
+		const doneOutcome = doneSuccess
+			? null
+			: createActionOutcome('no_effect', {
+				progress: false,
+				reason: unsafeDone || doneText || 'done 失败结束',
+			})
+		const doneOutput = doneOutcome
+			? appendOutcomeSummary(session.activityText, doneOutcome)
+			: session.activityText
+		session.history.push({
+			stepIndex: session.step,
+			thought: decision.thought || '',
+			evaluationPreviousGoal: decision.evaluation_previous_goal || '',
+			memory: decision.memory || '',
+			nextGoal: decision.next_goal || '',
+			action: 'done',
+			input: decision.action.input || {},
+			success: doneSuccess,
+			output: doneOutput,
+			outcome: doneOutcome,
+		})
+		appendTrace(session, {
+			title: `步骤 ${session.step}: done`,
+			detail: doneOutput,
+			kind: doneSuccess ? 'step' : 'error',
+			reflection: buildReflection(decision),
+			action: {
+				name: 'done',
+				input: decision.action.input || {},
+				output: doneOutput,
+				outcome: doneOutcome,
+			},
+		})
+		recordWorkflowOutcomeAndRefreshPlan(session, decision, {
+			success: doneSuccess,
+			output: doneOutput,
+			outcome: doneOutcome,
+			reason: unsafeDone || doneText,
+			stage: 'done',
+		})
+		publishSession(session)
 		sessions.delete(session.id)
 	}
 

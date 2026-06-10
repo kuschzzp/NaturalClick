@@ -22,6 +22,9 @@
 	function detectActionLoop(session, decision) {
 		const actionName = normalizeHistoryActionName(decision?.action?.name, decision?.action?.input)
 		if (!actionName || actionName === 'done') return { blocked: false, reason: '' }
+		if (isWorkflowBookkeepingWait(actionName, decision?.action?.input)) {
+			return { blocked: false, reason: '' }
+		}
 		const nextGoal = normalizeLoopText(decision?.next_goal || '')
 		const thought = normalizeLoopText(decision?.thought || '')
 		const memory = normalizeLoopText(decision?.memory || '')
@@ -136,6 +139,13 @@
 			}
 		}
 		return { blocked: false, reason: '' }
+	}
+
+	function isWorkflowBookkeepingWait(actionName, input) {
+		if (actionName !== 'wait') return false
+		const workflow = String(input?.workflow || '').trim()
+		const step = String(input?.workflow_step || '').trim()
+		return workflow === 'search-fields' && step === 'skip_field'
 	}
 
 	function countRecentLoopGuardFailures(session) {

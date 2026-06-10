@@ -2,7 +2,7 @@
 	"manifest_version": 3,
 	"name": "NaturalClick Agent",
 	"description": "A side-panel autonomous browser agent with DOM-first planning and human-like actions.",
-	"version": "0.6.23",
+	"version": "0.6.28",
 	"icons": {
 		"16": "assets/icon16.png",
 		"32": "assets/icon32.png",
@@ -36,7 +36,26 @@
 	"side_panel": {
 		"default_path": "sidepanel.html"
 	},
+	"web_accessible_resources": [
+		{
+			"resources": [
+				"content/network-page-hook.js"
+			],
+			"matches": [
+				"<all_urls>"
+			]
+		}
+	],
 	"content_scripts": [
+		{
+			"matches": [
+				"<all_urls>"
+			],
+			"js": [
+				"content/network-monitor.js"
+			],
+			"run_at": "document_start"
+		},
 		{
 			"matches": [
 				"<all_urls>"

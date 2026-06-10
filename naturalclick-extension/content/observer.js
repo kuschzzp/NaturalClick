@@ -53,6 +53,7 @@
 			const popups = buildPopupCandidates(elements)
 			const panels = buildPanelCandidates(elements)
 			const tables = collectTableSummaries()
+			const network = collectNetworkSummaries()
 			const feedback = collectPageFeedbackMessages()
 			const candidateDiagnostics = buildCandidateDiagnostics(indexedElements)
 			const rawCandidates = lines
@@ -80,6 +81,7 @@
 				popups,
 				panels,
 				tables,
+				network,
 				feedback,
 				candidateDiagnostics,
 				elements,
@@ -93,6 +95,7 @@
 					popups,
 					panels,
 					tables,
+					network,
 					feedback,
 					candidateDiagnostics,
 					treeCandidates,
@@ -1179,6 +1182,16 @@
 		if (!inViewport) return false
 		if (style.pointerEvents === 'none' && !isTextInputControl(element)) return false
 		if (!isLikelyRenderedOnTop(element)) return false
+		return true
+	}
+
+	function isReadableDataNode(element) {
+		if (!(element instanceof HTMLElement)) return false
+		const rect = element.getBoundingClientRect()
+		if (rect.width < 2 || rect.height < 2) return false
+		const style = window.getComputedStyle(element)
+		if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false
+		if (style.contentVisibility === 'hidden') return false
 		return true
 	}
 
@@ -2431,25 +2444,29 @@
 	}
 
 	function buildTableSummary(root) {
-		const realHeaders = collectTableHeaders(root).slice(0, 12)
+		const realHeaders = collectTableHeaders(root).slice(0, 24)
 		let rows = collectTableRows(root, realHeaders.length).slice(0, 8)
 		if (!rows.length) {
 			rows = collectVisualTableRows(root, realHeaders.length).slice(0, 8)
 		}
 		const headers = realHeaders.length ? realHeaders : inferFallbackTableHeaders(rows)
 		if (!headers.length || !rows.length) return null
+		const horizontal = getHorizontalTableScrollInfo(root)
 		return {
 			kind: realHeaders.length ? undefined : 'unlabeled-table',
 			region: inferElementRegion(root),
 			headers,
 			rows,
+			horizontalScrollable: horizontal.scrollable || undefined,
+			scrollLeft: horizontal.scrollable ? horizontal.scrollLeft : undefined,
+			maxScrollLeft: horizontal.scrollable ? horizontal.maxScrollLeft : undefined,
 			rect: getElementRect(root),
 		}
 	}
 
 	function inferFallbackTableHeaders(rows) {
 		const maxCells = Math.min(
-			12,
+			24,
 			Math.max(0, ...((Array.isArray(rows) ? rows : [])
 				.map((row) => Array.isArray(row) ? row.filter(Boolean).length : 0)))
 		)
@@ -2482,17 +2499,17 @@
 		const cells = []
 		const seenNodes = new Set()
 		for (const rawNode of Array.from(body.querySelectorAll?.(selector) || [])) {
-			if (!(rawNode instanceof HTMLElement) || !isElementVisible(rawNode)) continue
+			if (!(rawNode instanceof HTMLElement) || !isReadableDataNode(rawNode)) continue
 			if (rawNode.closest('thead,.el-table__header-wrapper,.ant-table-header,.arco-table-header,.vxe-table--header,.ag-header,[role="columnheader"]')) continue
 			const cell = normalizeVisualTableCell(rawNode)
-			if (!(cell instanceof HTMLElement) || seenNodes.has(cell) || !isElementVisible(cell)) continue
+			if (!(cell instanceof HTMLElement) || seenNodes.has(cell) || !isReadableDataNode(cell)) continue
 			seenNodes.add(cell)
 			const text = getTableCellText(cell)
 			if (!text || isTableActionOnlyText(text)) continue
 			const rect = cell.getBoundingClientRect()
 			if (rect.width < 4 || rect.height < 4) continue
 			cells.push({ cell, text, rect })
-			if (cells.length >= 160) break
+			if (cells.length >= 260) break
 		}
 		return groupVisualTableCellsIntoRows(cells, headerCount)
 	}
@@ -2512,6 +2529,41 @@
 		].join(',')
 		const found = root.querySelector?.(selectors)
 		return found instanceof HTMLElement ? found : null
+	}
+
+	function getHorizontalTableScrollInfo(root) {
+		if (!(root instanceof HTMLElement)) return { scrollable: false }
+		const selectors = [
+			'.el-table__body-wrapper',
+			'.el-table__header-wrapper',
+			'.ant-table-body',
+			'.ant-table-content',
+			'.arco-table-body',
+			'.n-data-table-base-table-body',
+			'.vxe-table--body-wrapper',
+			'.ag-body-horizontal-scroll-viewport',
+			'.ag-center-cols-viewport',
+			'[class*="table-body"]',
+			'[class*="table-content"]',
+			'[class*="body-wrapper"]',
+		].join(',')
+		const nodes = [root, ...Array.from(root.querySelectorAll?.(selectors) || [])]
+		let best = null
+		for (const node of nodes) {
+			if (!(node instanceof HTMLElement) || !isReadableDataNode(node)) continue
+			const overflow = Math.round(Number(node.scrollWidth || 0) - Number(node.clientWidth || 0))
+			if (overflow <= 8) continue
+			if (!best || overflow > best.overflow) {
+				best = {
+					overflow,
+					scrollLeft: Math.round(Number(node.scrollLeft || 0)),
+					maxScrollLeft: overflow,
+				}
+			}
+		}
+		return best
+			? { scrollable: true, scrollLeft: best.scrollLeft, maxScrollLeft: best.maxScrollLeft }
+			: { scrollable: false }
 	}
 
 	function normalizeVisualTableCell(node) {
@@ -2549,8 +2601,8 @@
 			for (const value of values) {
 				if (deduped[deduped.length - 1] === value) continue
 				deduped.push(value)
-				if (headerCount > 0 && deduped.length >= headerCount) break
-				if (deduped.length >= 12) break
+				if (headerCount > 0 && deduped.length >= Math.min(headerCount, 24)) break
+				if (deduped.length >= 24) break
 			}
 			if (deduped.filter(Boolean).length < 2) continue
 			const key = deduped.join('|')
@@ -2799,7 +2851,7 @@
 			'.ag-header-cell',
 			'[role="columnheader"]',
 		].join(',')
-		return collectUniqueTableTexts(root, selectors, 16)
+		return collectUniqueTableTexts(root, selectors, 32)
 	}
 
 	function collectTableRows(root, headerCount) {
@@ -2847,12 +2899,12 @@
 		].join(',')
 		const cells = []
 		for (const cell of Array.from(row.querySelectorAll?.(selectors) || [])) {
-			if (!(cell instanceof HTMLElement) || !isElementVisible(cell)) continue
+			if (!(cell instanceof HTMLElement) || !isReadableDataNode(cell)) continue
 			const text = getTableCellText(cell)
 			if (!text) continue
 			cells.push(text)
-			if (headerCount > 0 && cells.length >= headerCount) break
-			if (cells.length >= 12) break
+			if (headerCount > 0 && cells.length >= Math.min(headerCount, 24)) break
+			if (cells.length >= 24) break
 		}
 		return cells.filter((value) => !isTableActionOnlyText(value))
 	}
@@ -2861,7 +2913,7 @@
 		const out = []
 		const seen = new Set()
 		for (const node of Array.from(root.querySelectorAll?.(selector) || [])) {
-			if (!(node instanceof HTMLElement) || !isElementVisible(node)) continue
+			if (!(node instanceof HTMLElement) || !isReadableDataNode(node)) continue
 			const text = getTableCellText(node)
 			const key = normalizeTableText(text)
 			if (!key || seen.has(key)) continue
@@ -2946,7 +2998,7 @@
 			return `[${item.index}]<${item.tag} ${attrs.join(' ')}>${shortText(item.text, 80)}</${item.tag}>`
 		}
 
-	function formatObservationText({ forms, actions, options, popups, panels, tables, feedback, candidateDiagnostics, treeCandidates, simplifiedDom, rawCandidates }) {
+	function formatObservationText({ forms, actions, options, popups, panels, tables, network, feedback, candidateDiagnostics, treeCandidates, simplifiedDom, rawCandidates }) {
 		const sections = []
 		if (Array.isArray(feedback) && feedback.length) {
 			sections.push('<feedback>')
@@ -2968,6 +3020,13 @@
 				sections.push(formatTableLine(table))
 			}
 			sections.push('</tables>')
+		}
+		if (Array.isArray(network) && network.length) {
+			sections.push('<network>')
+			for (const item of network.slice(0, 8)) {
+				sections.push(formatNetworkLine(item))
+			}
+			sections.push('</network>')
 		}
 		if (forms.length) {
 			sections.push('<forms>')
@@ -3082,8 +3141,11 @@
 		const headers = Array.isArray(table?.headers) ? table.headers : []
 		const rows = Array.isArray(table?.rows) ? table.rows : []
 		const kind = table?.kind ? ` kind=${table.kind}` : ''
+		const hscroll = table?.horizontalScrollable
+			? ` hscroll="${Math.max(0, Number(table.scrollLeft) || 0)}/${Math.max(0, Number(table.maxScrollLeft) || 0)}"`
+			: ''
 		const lines = [
-			`  table${kind} region=${table?.region || '-'} rect=${formatObservationRect(table?.rect)} headers="${shortText(headers.join('|'), 160)}"`,
+			`  table${kind} region=${table?.region || '-'} rect=${formatObservationRect(table?.rect)}${hscroll} headers="${shortText(headers.join('|'), 240)}"`,
 		]
 		for (let rowIndex = 0; rowIndex < rows.length && rowIndex < 6; rowIndex += 1) {
 			const cells = Array.isArray(rows[rowIndex]) ? rows[rowIndex] : []
@@ -3094,6 +3156,33 @@
 			lines.push(`    row ${rowIndex + 1}: ${shortText(pairs.join(' | '), 240)}`)
 		}
 		return lines.join('\n')
+	}
+
+	function collectNetworkSummaries() {
+		try {
+			const api = g.NC_CONTENT_NETWORK
+			if (!api || typeof api.collectNetworkSummaries !== 'function') return []
+			const summaries = api.collectNetworkSummaries()
+			return Array.isArray(summaries) ? summaries.slice(0, 12) : []
+		} catch (_) {
+			return []
+		}
+	}
+
+	function formatNetworkLine(item) {
+		const fields = Array.isArray(item?.fields) ? item.fields : []
+		const fieldText = fields
+			.slice(0, 12)
+			.map((field) => {
+				const label = field.label || field.key || field.path || 'field'
+				return `${shortText(label, 32)}=${shortText(field.value, 64)}`
+			})
+			.join(' | ')
+		return [
+			`  response method=${item?.method || '-'} status=${item?.status || '-'} ageMs=${Number(item?.ageMs) || 0}`,
+			`url="${shortText(item?.url || '', 120)}"`,
+			fieldText ? `fields="${shortText(fieldText, 320)}"` : '',
+		].filter(Boolean).join(' ')
 	}
 
 	function buildSimplifiedDom(elements) {

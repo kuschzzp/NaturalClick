@@ -233,6 +233,7 @@ async function main() {
 	assertTaskNavigationWorkflowBehavior()
 	assertSearchWorkflowBehavior()
 	assertObserverCapturesTableSummaries()
+	assertObserverCapturesWideTableAndNetworkSummaries()
 	assertPlannerWorkflowRegistryBehavior()
 	assertObserverUsesCentralSemantics()
 	assertObserverFieldInferenceStaysStructural()
@@ -6574,6 +6575,22 @@ function assertPlannerObservationOmissionHints() {
 	if (!fallbackTablesChunk.includes('星火科技') || fallbackTablesChunk.includes('no_observed_tables')) {
 		throw new Error(`tables request_context should fall back to table-like raw/list rows when structured tables are missing, got ${fallbackTablesChunk}`)
 	}
+	const unusableStructuredTableObservation = buildTestObservation()
+	unusableStructuredTableObservation.tables = [
+		{ headers: ['资料名称', '联系方式'], rows: [], region: 'content' },
+	]
+	unusableStructuredTableObservation.simplifiedDom = [
+		'row 1 region="content" table="list" 资料名称=星火科技 | 联系方式=13800138000',
+	]
+	unusableStructuredTableObservation.rawCandidates = []
+	const unusableStructuredTablesChunk = context.resolvePlanningContextRequest(
+		unusableStructuredTableObservation,
+		{ name: 'request_context', input: { source: 'tables', region: 'content', limit: 10 } },
+		0
+	).text
+	if (!unusableStructuredTablesChunk.includes('星火科技') || unusableStructuredTablesChunk.includes('资料名称"')) {
+		throw new Error(`tables request_context should fall back when structured table summaries have headers but no readable rows, got ${unusableStructuredTablesChunk}`)
+	}
 	if (!text.includes('<more_context source="simplified_dom" cursor="22" limit="40" action="request_context"')) {
 		throw new Error(`simplified_dom omission should include an explicit request_context hint, got ${text}`)
 	}
@@ -9516,6 +9533,33 @@ function assertLoopGuardBehavior() {
 	if (!sessionTests.detectActionLoop(repeatedWait, waitDecision).blocked) {
 		throw new Error('loop guard should block repeated passive waits before they become a dead loop')
 	}
+	const repeatedSearchSkipHistory = {
+		history: repeatedHistory('wait', {
+			workflow: 'search-fields',
+			workflow_step: 'skip_field',
+			workflow_field_key: 'index:35',
+			workflow_field_label: '筛选字段',
+			ms: 200,
+			reason: '记录搜索字段安全跳过：筛选字段',
+		}, '安全跳过搜索字段：筛选字段', 3),
+	}
+	const searchSkipDecision = {
+		next_goal: '安全跳过搜索字段：筛选字段',
+		action: {
+			name: 'wait',
+			input: {
+				workflow: 'search-fields',
+				workflow_step: 'skip_field',
+				workflow_field_key: 'index:35',
+				workflow_field_label: '筛选字段',
+				ms: 200,
+				reason: '记录搜索字段安全跳过：筛选字段',
+			},
+		},
+	}
+	if (sessionTests.detectActionLoop(repeatedSearchSkipHistory, searchSkipDecision).blocked) {
+		throw new Error('loop guard should not treat search skip bookkeeping waits as repeated passive waits')
+	}
 
 	const variedWaitHistory = [
 		{
@@ -10066,6 +10110,27 @@ async function assertNavigationRevealSkipsVerificationVisionRecovery() {
 	)
 	if (searchRecovery.success || visionCalled) {
 		throw new Error(`search submit verification failure should replan instead of triggering vision recovery: ${JSON.stringify(searchRecovery)}`)
+	}
+	visionCalled = false
+	const resetRecovery = await sandbox.NC_BG_SESSION_RECOVERY.attemptVerificationRecovery(
+		{},
+		{
+			action: {
+				name: 'click_element_by_index',
+				input: {
+					index: 9,
+					target_label: '清空',
+					workflow: 'search-fields',
+					workflow_step: 'reset_filters',
+					workflow_field_index: 2,
+				},
+			},
+		},
+		{},
+		'search_reset_field_not_cleared: 搜索重置后已知筛选字段仍未清空'
+	)
+	if (resetRecovery.success || visionCalled || !String(resetRecovery.message || '').includes('搜索重置动作校验失败后不做视觉恢复')) {
+		throw new Error(`search reset verification failure should return to search workflow instead of triggering vision recovery: ${JSON.stringify(resetRecovery)}`)
 	}
 }
 
@@ -12173,7 +12238,7 @@ function assertSharedActionContractLoadedEverywhere() {
 	const background = read('naturalclick-extension/background.js')
 	const manifest = JSON.parse(read('naturalclick-extension/manifest.json'))
 	const contentBridge = read('naturalclick-extension/content.js')
-	const scripts = manifest.content_scripts?.[0]?.js || []
+	const scripts = (manifest.content_scripts || []).find((entry) => Array.isArray(entry?.js) && entry.js.includes('content.js'))?.js || []
 	for (const file of ['shared/action-contract.js', 'shared/control-semantics.js', 'content/semantics.js', 'content/action-state.js', 'content/action-input.js', 'content/action-scroll.js', 'content/action-options.js', 'content/action-cascader.js', 'content/action-select.js']) {
 		if (!scripts.includes(file)) {
 			throw new Error(`manifest content script order is missing ${file}`)
@@ -14834,6 +14899,17 @@ function assertResultSummaryBehavior() {
 		String(sensitiveTerminalSummary.issues?.map((item) => item.summary).join('\n') || '').includes('Secret123')
 	) {
 		throw new Error(`search result summary should mask sensitive values in terminal reasons and diagnostics, got ${JSON.stringify(sensitiveTerminalSummary)}`)
+	}
+	const diagnosticPunctuationSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'error',
+		activityText: '需要用户补充信息：1 条记录显示搜索测试过程中需要用户确认、验证码、缺失账号信息或冲突字段新值；补足信息前不应继续猜测页面动作。',
+		history: [],
+	})
+	if (
+		JSON.stringify(diagnosticPunctuationSummary).includes('验证码已隐藏') ||
+		!JSON.stringify(diagnosticPunctuationSummary).includes('验证码、缺失账号信息')
+	) {
+		throw new Error(`generic sensitive redaction should not mask punctuation-separated diagnostic wording as a secret value, got ${JSON.stringify(diagnosticPunctuationSummary)}`)
 	}
 	const searchUserInputSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'error',
@@ -18622,6 +18698,7 @@ function assertSearchWorkflowBehavior() {
 	const stateSource = read('naturalclick-extension/background/search-workflow-state.js')
 	const historySource = read('naturalclick-extension/background/search-workflow-history.js')
 	const registrySource = read('naturalclick-extension/background/workflows.js')
+	const sessionEngineSource = read('naturalclick-extension/background/session-engine.js')
 	const sandbox = loadBackgroundModule('naturalclick-extension/background/search-workflow.js', {})
 	const workflow = sandbox.NC_BG_SEARCH_WORKFLOW_TESTS
 	const productionWorkflow = sandbox.NC_BG_SEARCH_WORKFLOW
@@ -18660,6 +18737,7 @@ function assertSearchWorkflowBehavior() {
 		!productionWorkflow?.buildSearchWorkflowHintLines ||
 		!productionWorkflow?.shouldRecordSearchWorkflowOutcome ||
 		!productionWorkflow?.deriveSearchWorkflowDecision ||
+		!productionWorkflow?.deriveSearchObservationFailureDecision ||
 		!productionWorkflow?.deriveSearchPostContextDecision ||
 		!productionWorkflow?.deriveSearchPostValidationDecision ||
 		productionWorkflow.hasActiveSearchWorkflow
@@ -18837,6 +18915,49 @@ function assertSearchWorkflowBehavior() {
 	) {
 		throw new Error(`search reset buttons must complete the active field without corrupting metadata, got ${JSON.stringify(fieldMetadataState)}`)
 	}
+	const searchObservationFailureDecision = workflow.deriveSearchObservationFailureDecision(
+		{
+			task: '测试搜索区域每一个搜索项',
+			history: [],
+			workflowState: {
+				search: {
+					version: 6,
+					phase: 'select_field',
+					fieldOrder: ['index:25', 'index:26'],
+					completedKeys: ['index:25'],
+					resetCompletedKeys: ['index:25'],
+					fields: {
+						'index:25': { key: 'index:25', index: 25, label: '字段名称' },
+						'index:26': { key: 'index:26', index: 26, label: '联系方式' },
+					},
+					resultsByKey: {
+						'index:25': {
+							key: 'index:25',
+							label: '字段名称',
+							value: '样本值',
+							source: 'table_sample',
+							status: 'passed_match',
+							summary: '搜索结果观察：结果列表中仍能看到测试值 "样本值"。',
+						},
+					},
+				},
+		},
+	},
+	'页面通信超时，执行脚本未响应。（观察耗时=10042ms，单次超时=5000ms，重试=1，tab=42）'
+)
+assertAction(searchObservationFailureDecision, 'done')
+if (
+	searchObservationFailureDecision.action.input.success !== true ||
+	searchObservationFailureDecision.action.input.workflow_observation_failed !== true ||
+	!String(searchObservationFailureDecision.action.input.text || '').includes('最后一次页面观察失败') ||
+	!String(searchObservationFailureDecision.action.input.text || '').includes('观察耗时=10042ms') ||
+	!String(searchObservationFailureDecision.action.input.workflow_result_summary || '').includes('联系方式=未确认:缺少结果记录')
+) {
+		throw new Error(`search observation failure should preserve recorded search results as an inconclusive summary, got ${JSON.stringify(searchObservationFailureDecision)}`)
+	}
+	if (workflow.deriveSearchObservationFailureDecision({ workflowState: { search: workflow.createSearchState() } }, '页面通信超时')) {
+		throw new Error('search observation failure should not fabricate a final summary before any searchable evidence is recorded')
+	}
 	if (
 		!planner.includes('derivePostContextWorkflowDecision') ||
 		!planner.includes('recordPlanningContextDeferral') ||
@@ -18846,7 +18967,10 @@ function assertSearchWorkflowBehavior() {
 		!workflowSource.includes('deriveSearchPostContextDecision') ||
 		!planner.includes('derivePostValidationWorkflowDecision') ||
 		!registrySource.includes('derivePostValidationWorkflowDecision') ||
-		!workflowSource.includes('deriveSearchPostValidationDecision')
+		!workflowSource.includes('deriveSearchPostValidationDecision') ||
+		!registrySource.includes('deriveObservationFailureWorkflowDecision') ||
+		!workflowSource.includes('deriveSearchObservationFailureDecision') ||
+		!sessionEngineSource.includes('deriveObservationFailureWorkflowDecision')
 	) {
 		throw new Error('search workflow should recover evidence-related context and validation failures before entering repeated model context loops')
 	}
@@ -19790,6 +19914,81 @@ function assertSearchWorkflowBehavior() {
 	if (sampledFieldDecision.action.input.text !== '星火科技有限公司') {
 		throw new Error(`search workflow should sample text search values from current table rows before generic fallback, got ${JSON.stringify(sampledFieldDecision)}`)
 	}
+	const networkSampleObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: 'Filters', fields: 'Record Status' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: 'Filters',
+				fields: [
+					{ index: 22, label: 'Record Status', fieldType: 'text', valueState: 'empty', role: 'textbox', type: 'text', region: 'content' },
+				],
+			},
+		],
+		actions: [
+			{ index: 30, actionIntent: 'search', label: 'Search', region: 'content' },
+			{ index: 31, actionIntent: 'reset', label: 'Reset', region: 'content' },
+		],
+		tables: [],
+		network: [
+			{
+				method: 'GET',
+				status: 200,
+				url: 'https://example.test/api/list',
+				fields: [
+					{ key: 'recordStatus', label: 'Record Status', path: 'data.0.recordStatus', value: 'Active' },
+					{ key: 'password', label: 'password', path: 'data.0.password', value: '***', masked: true },
+				],
+			},
+		],
+	}
+	const networkSampleDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: 'Test every filter field', history: [], workflowState: {} },
+		networkSampleObservation
+	)
+	assertAction(networkSampleDecision, 'input_text')
+	if (
+		networkSampleDecision.action.input.text !== 'Active' ||
+		networkSampleDecision.action.input.workflow_value_source !== 'network_sample'
+	) {
+		throw new Error(`search workflow should sample text search values from sanitized network summaries when page tables lack the field, got ${JSON.stringify(networkSampleDecision)}`)
+	}
+	const networkResultSession = { task: 'Test every filter field', history: [], workflowState: {} }
+	workflow.recordSearchWorkflowOutcome(networkResultSession, networkSampleDecision, { success: true, output: 'filled' })
+	const networkSubmitDecision = workflow.deriveSearchWorkflowDecision(networkResultSession, networkSampleObservation)
+	assertAction(networkSubmitDecision, 'click_element_by_index')
+	workflow.recordSearchWorkflowOutcome(networkResultSession, networkSubmitDecision, { success: true, output: 'searched' })
+	const networkResetDecision = workflow.deriveSearchWorkflowDecision(networkResultSession, {
+		...networkSampleObservation,
+		forms: [
+			{
+				id: 'filter',
+				name: 'Filters',
+				fields: [
+					{ index: 22, label: 'Record Status', fieldType: 'text', valueState: 'filled:Active', role: 'textbox', type: 'text', region: 'content' },
+				],
+			},
+		],
+		network: [
+			{
+				method: 'GET',
+				status: 200,
+				url: 'https://example.test/api/list?recordStatus=Active',
+				fields: [
+					{ key: 'recordStatus', label: 'Record Status', path: 'data.0.recordStatus', value: 'Active' },
+				],
+			},
+		],
+	})
+	assertAction(networkResetDecision, 'click_element_by_index')
+	if (
+		networkResetDecision.action.input.workflow_result_status !== 'passed_match' ||
+		!String(networkResetDecision.action.input.workflow_result_summary || '').includes('接口响应摘要')
+	) {
+		throw new Error(`search workflow should verify submitted search results from network summaries when the table omits the field, got ${JSON.stringify(networkResetDecision)}`)
+	}
 	const truncatedSampleDecision = workflow.deriveSearchWorkflowDecision(
 		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
 		{
@@ -20579,6 +20778,76 @@ function assertSearchWorkflowBehavior() {
 		!String(noSampleDecision.action.input.text || '').includes('没有可用列表样本')
 	) {
 		throw new Error(`search workflow should stop instead of using generic random text when visible tables are empty, got ${JSON.stringify(noSampleDecision)}`)
+	}
+	const codeLikeMismappedSampleDecision = workflow.deriveSearchWorkflowDecision(
+		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
+		{
+			panels: [
+				{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '状态' },
+			],
+			forms: [
+				{
+					id: 'filter',
+					name: '搜索/筛选区域',
+					fields: [
+						{ index: 33, label: '状态', fieldType: 'select', valueState: 'empty', role: 'combobox', region: 'content', optionLabels: ['启用', '禁用'] },
+					],
+				},
+			],
+			actions: [
+				{ index: 44, actionIntent: 'search', label: '搜索', region: 'content' },
+				{ index: 45, actionIntent: 'reset', label: '清空', region: 'content' },
+			],
+			tables: [{ headers: ['状态'], rows: [['KH_20260608003']] }],
+		}
+	)
+	assertAction(codeLikeMismappedSampleDecision, 'choose_dropdown_option')
+	if (
+		codeLikeMismappedSampleDecision.action.input.text !== '启用' ||
+		codeLikeMismappedSampleDecision.action.input.workflow_value_source !== 'visible_option' ||
+		!String(codeLikeMismappedSampleDecision.action.input.workflow_value_basis || '').includes('疑似错列')
+	) {
+		throw new Error(`selection search fields should ignore code-like mismapped table samples and use scoped options, got ${JSON.stringify(codeLikeMismappedSampleDecision)}`)
+	}
+	const wrongTypedSelectionSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
+	const wrongTypedSelectionObservation = {
+		panels: [
+			{ kind: 'filter', state: 'expanded', label: '搜索/筛选区域', fields: '成交状态' },
+		],
+		forms: [
+			{
+				id: 'filter',
+				name: '搜索/筛选区域',
+				fields: [
+					{ index: 37, label: '成交状态', fieldType: 'select', valueState: 'empty', role: 'combobox', region: 'content', optionLabels: ['未成交', '已成交'] },
+				],
+			},
+		],
+		actions: [
+			{ index: 44, actionIntent: 'search', label: '搜索', region: 'content' },
+			{ index: 45, actionIntent: 'reset', label: '清空', region: 'content' },
+		],
+		tables: [{ headers: ['成交状态'], rows: [['2026-06-08 16:40:27']] }],
+	}
+	const wrongTypedSelectionDecision = workflow.deriveSearchWorkflowDecision(wrongTypedSelectionSession, wrongTypedSelectionObservation)
+	assertAction(wrongTypedSelectionDecision, 'done')
+	if (
+		wrongTypedSelectionDecision.action.input.success !== false ||
+		wrongTypedSelectionDecision.action.input.workflow_missing_table_samples !== true ||
+		wrongTypedSelectionDecision.action.input.workflow_mismapped_table_sample !== true ||
+		!String(wrongTypedSelectionDecision.action.input.text || '').includes('候选类型明显不一致')
+	) {
+		throw new Error(`selection search fields should treat clearly wrong-typed table samples as missing evidence instead of looping on option mismatch, got ${JSON.stringify(wrongTypedSelectionDecision)}`)
+	}
+	workflow.recordSearchWorkflowDeferral(wrongTypedSelectionSession, wrongTypedSelectionDecision)
+	const wrongTypedSelectionSkip = workflow.deriveSearchWorkflowDecision(wrongTypedSelectionSession, wrongTypedSelectionObservation)
+	assertAction(wrongTypedSelectionSkip, 'wait')
+	if (
+		wrongTypedSelectionSkip.action.input.workflow_step !== 'skip_field' ||
+		wrongTypedSelectionSkip.action.input.workflow_result_status !== 'unknown_missing_sample' ||
+		!String(wrongTypedSelectionSkip.action.input.workflow_skip_reason || '').includes('候选类型明显不一致')
+	) {
+		throw new Error(`wrong-typed selection samples should become a field-level safe skip after evidence was requested, got ${JSON.stringify(wrongTypedSelectionSkip)}`)
 	}
 	const skipAfterEvidenceSession = { task: '测试搜索区域每一个搜索项', history: [], workflowState: {} }
 	const skipAfterEvidenceObservation = {
@@ -22121,6 +22390,24 @@ function assertSearchWorkflowBehavior() {
 	) {
 		throw new Error(`date range search results should pass when a result date falls inside the submitted range, got ${JSON.stringify(dateRangeResetDecision)}`)
 	}
+	const rawDateRangeResultSession = JSON.parse(JSON.stringify(dateRangeResultSession))
+	const rawDateRangeResultObservation = {
+		...dateRangeResultObservation,
+		tables: [
+			{ headers: ['名称'], rows: [] },
+		],
+		rawCandidates: [
+			'<div class="el-table__row"><span class="cell">创建时间：2026-06-02 09:10:00</span><span class="cell">名称：星火科技有限公司</span></div>',
+		],
+	}
+	const rawDateRangeResetDecision = workflow.deriveSearchWorkflowDecision(rawDateRangeResultSession, rawDateRangeResultObservation)
+	assertAction(rawDateRangeResetDecision, 'click_element_by_index')
+	if (
+		rawDateRangeResetDecision.action.input.workflow_result_status !== 'passed_match' ||
+		!String(rawDateRangeResetDecision.action.input.workflow_result_summary || '').includes('列表/表格文本行')
+	) {
+		throw new Error(`date range search results should use table-like text rows when structured tables miss the date column, got ${JSON.stringify(rawDateRangeResetDecision)}`)
+	}
 	const outOfRangeResultSession = JSON.parse(JSON.stringify(dateRangeResultSession))
 	const outOfRangeResultObservation = {
 		...dateRangeResultObservation,
@@ -22209,7 +22496,7 @@ function assertSearchWorkflowBehavior() {
 	const missingResultDoneDecision = workflow.deriveSearchWorkflowDecision(missingResultSession, missingResultObservation)
 	assertAction(missingResultDoneDecision, 'done')
 	if (
-		missingResultDoneDecision.action.input.success !== false ||
+		missingResultDoneDecision.action.input.success !== true ||
 		missingResultDoneDecision.action.input.workflow_result_status !== 'inconclusive' ||
 		!String(missingResultDoneDecision.action.input.text || '').includes('未确认 1 项') ||
 		!String(missingResultDoneDecision.action.input.text || '').includes('重点问题') ||
@@ -23357,7 +23644,7 @@ function assertSearchWorkflowBehavior() {
 	const sampledDropdownAfterFailure = workflow.deriveSearchWorkflowDecision(sampledDropdownSession, sampledDropdownObservation)
 	assertAction(sampledDropdownAfterFailure, 'done')
 	if (
-		sampledDropdownAfterFailure.action.input.success !== false ||
+		sampledDropdownAfterFailure.action.input.success !== true ||
 		sampledDropdownAfterFailure.action.input.workflow_result_status !== 'inconclusive' ||
 		!String(sampledDropdownAfterFailure.action.input.workflow_result_summary || '').includes('未确认:缺少真实样本/候选证据')
 	) {
@@ -24929,6 +25216,82 @@ function assertObserverCapturesTableSummaries() {
 	}
 	if (!workflowSource.includes('textRowResultContainsValue') || !workflowSource.includes('unknown_result_pending')) {
 		throw new Error('search workflow should record submitted results and verify fallback table-like text rows')
+	}
+}
+
+function assertObserverCapturesWideTableAndNetworkSummaries() {
+	const observer = read('naturalclick-extension/content/observer.js')
+	const plannerContext = read('naturalclick-extension/background/planner-context.js')
+	const workflowSource = read('naturalclick-extension/background/search-workflow.js')
+	const manifest = read('naturalclick-extension/manifest.json')
+	const background = read('naturalclick-extension/background.js')
+	const networkMonitor = read('naturalclick-extension/content/network-monitor.js')
+	const networkHook = read('naturalclick-extension/content/network-page-hook.js')
+	const buildTableSummaryFn = extractFunctionSource(observer, 'buildTableSummary')
+	const collectRowCellsFn = extractFunctionSource(observer, 'collectTableRowCells')
+	const collectVisualRowsFn = extractFunctionSource(observer, 'collectVisualTableRows')
+	if (
+		!observer.includes('function isReadableDataNode') ||
+		!collectRowCellsFn.includes('isReadableDataNode(cell)') ||
+		!collectVisualRowsFn.includes('isReadableDataNode(rawNode)') ||
+		!collectVisualRowsFn.includes('isReadableDataNode(cell)')
+	) {
+		throw new Error('observer table summaries should read rendered offscreen table cells without requiring click hit-testing')
+	}
+	for (const expected of ['slice(0, 24)', 'Math.min(headerCount, 24)', 'collectUniqueTableTexts(root, selectors, 32)']) {
+		if (!observer.includes(expected)) {
+			throw new Error(`observer wide table summaries should retain more horizontal columns: missing ${expected}`)
+		}
+	}
+	for (const expected of ['getHorizontalTableScrollInfo(root)', 'horizontalScrollable', 'maxScrollLeft', 'hscroll="']) {
+		if (!observer.includes(expected) || !plannerContext.includes(expected === 'getHorizontalTableScrollInfo(root)' ? 'hscroll="' : expected)) {
+			throw new Error(`table summaries should expose horizontal-scroll evidence to planner context: missing ${expected}`)
+		}
+	}
+	if (!buildTableSummaryFn.includes('horizontalScrollable') || !buildTableSummaryFn.includes('maxScrollLeft')) {
+		throw new Error('table summaries should include horizontal scroll metadata when a grid can scroll sideways')
+	}
+	for (const expected of ['content/network-monitor.js', 'content/network-page-hook.js', 'web_accessible_resources', 'document_start']) {
+		if (!manifest.includes(expected)) {
+			throw new Error(`manifest should install generic network response observation: missing ${expected}`)
+		}
+	}
+	const manifestJson = JSON.parse(manifest)
+	const contentScriptEntries = Array.isArray(manifestJson.content_scripts) ? manifestJson.content_scripts : []
+	const networkMonitorEntries = contentScriptEntries.filter((entry) => Array.isArray(entry?.js) && entry.js.includes('content/network-monitor.js'))
+	if (networkMonitorEntries.length !== 1 || String(networkMonitorEntries[0]?.run_at || '') !== 'document_start') {
+		throw new Error(`manifest should inject the network monitor exactly once at document_start, got ${JSON.stringify(networkMonitorEntries)}`)
+	}
+	const primaryContentEntry = contentScriptEntries.find((entry) => Array.isArray(entry?.js) && entry.js.includes('content.js'))
+	if (primaryContentEntry?.js?.includes?.('content/network-monitor.js')) {
+		throw new Error('manifest should not list content/network-monitor.js again in the document_idle content script bundle')
+	}
+	if (!background.includes('content/network-monitor.js')) {
+		throw new Error('programmatic content-script injection should include the network monitor before the observer')
+	}
+	for (const expected of ['NC_CONTENT_NETWORK', 'collectNetworkSummaries', 'SENSITIVE_KEY_RE', 'mask', 'sanitizeUrl', 'visitJsonValue']) {
+		if (!networkMonitor.includes(expected)) {
+			throw new Error(`network monitor should summarize and redact generic API response fields: missing ${expected}`)
+		}
+	}
+	for (const expected of ['window.fetch', 'XMLHttpRequest', 'response.clone()', 'NaturalClickNetworkHook']) {
+		if (!networkHook.includes(expected)) {
+			throw new Error(`network page hook should capture generic fetch/XHR responses: missing ${expected}`)
+		}
+	}
+	if (
+		!observer.includes('const network = collectNetworkSummaries()') ||
+		!observer.includes('<network>') ||
+		!plannerContext.includes("network: 'network'") ||
+		!plannerContext.includes('formatNetworkLine') ||
+		!plannerContext.includes('request_context source=network')
+	) {
+		throw new Error('observer/planner context should expose sanitized network summaries as a requestable evidence source')
+	}
+	for (const expected of ['network_sample', 'pickNetworkSampleForField', 'pickContextNetworkSampleForField', 'networkResultContainsValue', "source === 'network'"]) {
+		if (!workflowSource.includes(expected)) {
+			throw new Error(`search workflow should consume network summaries as generic sample/result evidence: missing ${expected}`)
+		}
 	}
 }
 
@@ -28197,6 +28560,40 @@ async function assertLocateByVisionDelegatesToExecutableCoordinateAction() {
 	if (missingTarget.success || !String(missingTarget.message || '').includes('target_description')) {
 		throw new Error(`locate_by_vision should fail without target_description, got ${JSON.stringify(missingTarget)}`)
 	}
+	const timeoutSandbox = loadBackgroundModule('naturalclick-extension/background/executor.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { OBSERVE: 'NC_OBSERVE' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async (_tabId, message, options) => {
+				if (message?.type !== 'NC_OBSERVE') throw new Error('unexpected message')
+				if (options?.timeoutMs !== 5000 || options?.maxRetries !== 1) {
+					throw new Error(`unexpected observe options ${JSON.stringify(options)}`)
+				}
+				throw new Error('页面通信超时，执行脚本未响应。')
+			},
+		},
+		NC_BG_VISION: {
+			attemptVisionFallback: async () => ({ success: false, message: 'unused' }),
+		},
+		NC_BG_TOOLS: {
+			hasTool: () => false,
+			executeTool: async () => ({ success: false, message: 'unused' }),
+		},
+	})
+	const observationTimeout = await timeoutSandbox.NC_BG_EXECUTOR.requestObservation(42)
+	if (
+		observationTimeout.ok ||
+		!String(observationTimeout.error || '').includes('页面通信超时') ||
+		!String(observationTimeout.error || '').includes('观察耗时=') ||
+		!String(observationTimeout.error || '').includes('单次超时=5000ms') ||
+		!String(observationTimeout.error || '').includes('重试=1') ||
+		!String(observationTimeout.error || '').includes('tab=42') ||
+		observationTimeout.meta?.timeoutMs !== 5000 ||
+		observationTimeout.meta?.maxRetries !== 1
+	) {
+		throw new Error(`requestObservation should return diagnostic timeout metadata, got ${JSON.stringify(observationTimeout)}`)
+	}
 }
 
 async function assertVisionFallbackPreservesCoordinateActionOutcome() {
@@ -28731,6 +29128,53 @@ async function assertVerifierAcceptsSearchWorkflowSemanticClicks() {
 	if (!alreadyEmptyResetResult.ok || !String(alreadyEmptyResetResult.reason || '').includes('处于空状态')) {
 		throw new Error(`search reset should pass when tracked fields are already empty after reset, got ${JSON.stringify(alreadyEmptyResetResult)}`)
 	}
+	const resetWithStaleTableValueSandbox = loadVerifier({
+		url: 'http://example.test/app',
+		content: 'same-dom with stale result row admin',
+		forms: [
+			{
+				fields: [
+					{ index: 2, label: '登录账号', valueState: 'empty', value: '' },
+				],
+			},
+		],
+		tables: [
+			{
+				headers: ['登录账号', '姓名'],
+				rows: [
+					['admin', '管理员'],
+				],
+			},
+		],
+	})
+	const resetWithStaleTableValueResult = await resetWithStaleTableValueSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				workflow: 'search-fields',
+				workflow_step: 'reset_filters',
+				workflow_field_index: 2,
+				workflow_filled_field_indexes: '2',
+				index: 9,
+			},
+		},
+		{
+			url: 'http://example.test/app',
+			content: 'same-dom',
+			forms: [
+				{
+					fields: [
+						{ index: 2, label: '登录账号', valueState: 'filled:admin', value: 'admin' },
+					],
+				},
+			],
+		},
+		{ success: true, message: '已点击重置。', meta: { outcome: { kind: 'none', progress: false } } }
+	)
+	if (!resetWithStaleTableValueResult.ok || !String(resetWithStaleTableValueResult.reason || '').includes('搜索重置后字段已清空')) {
+		throw new Error(`search reset should ignore stale result table values once tracked filter field is empty, got ${JSON.stringify(resetWithStaleTableValueResult)}`)
+	}
 	const dateSelectionSandbox = loadVerifier({
 		url: 'http://example.test/app',
 		content: 'date-option-selected',
@@ -28811,6 +29255,13 @@ async function assertVerifierAcceptsSearchWorkflowSemanticClicks() {
 	)
 	if (unchangedResetResult.ok || !String(unchangedResetResult.reason || '').includes('search_reset_field_not_cleared')) {
 		throw new Error(`search reset should fail when tracked fields remain filled, got ${JSON.stringify(unchangedResetResult)}`)
+	}
+	if (
+		!String(unchangedResetResult.reason || '').includes('登录账号[index=2') ||
+		!String(unchangedResetResult.reason || '').includes('before=filled:admin|admin') ||
+		!String(unchangedResetResult.reason || '').includes('after=filled:admin|admin')
+	) {
+		throw new Error(`search reset failure should include field-level diagnostics, got ${JSON.stringify(unchangedResetResult)}`)
 	}
 }
 

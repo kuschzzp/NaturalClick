@@ -82,6 +82,9 @@
 		if (String(input.workflow_step || '') === 'submit_search') {
 			return '搜索提交动作校验失败后不做视觉恢复，避免重复点击同一搜索按钮；交给重新观察规划。'
 		}
+		if (String(input.workflow_step || '') === 'reset_filters') {
+			return '搜索重置动作校验失败后不做视觉恢复，避免重复点击清空按钮；交给搜索工作流重新观察、重试或字段级清空。'
+		}
 		if (String(input.workflow_step || '') !== 'reveal_navigation_options') return ''
 		const text = String(reason || '')
 		if (!text) return '导航展开动作校验失败后不做视觉恢复，交给重新观察规划。'

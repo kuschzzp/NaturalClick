@@ -123,6 +123,12 @@
 		return runWorkflowList(TIMEOUT_RECOVERY_WORKFLOWS, session, observation, context)
 	}
 
+	function deriveObservationFailureWorkflowDecision(session, error) {
+		if (typeof searchWorkflow.deriveSearchObservationFailureDecision !== 'function') return null
+		const recovered = searchWorkflow.deriveSearchObservationFailureDecision(session, error)
+		return recovered ? annotateWorkflowDecision(recovered, 'search-fields') : null
+	}
+
 	function derivePostModelWorkflowDecision(session, decision, context = {}) {
 		const recordViewRecovery = deriveRecordViewPostModelDecision(session, decision, context)
 		if (recordViewRecovery) return annotateWorkflowDecision(recordViewRecovery, 'record-view')
@@ -4223,6 +4229,7 @@
 		derivePostModelWorkflowDecision,
 		derivePostContextWorkflowDecision,
 		derivePostValidationWorkflowDecision,
+		deriveObservationFailureWorkflowDecision,
 		deriveTimeoutRecoveryWorkflowDecision,
 		recordPlanningContextDeferral,
 		recordWorkflowOutcome,
@@ -4236,6 +4243,7 @@
 		derivePostContextWorkflowDecision,
 		recordPlanningContextDeferral,
 			derivePostValidationWorkflowDecision,
+			deriveObservationFailureWorkflowDecision,
 			deriveSearchWorkflowDecisionIfAllowed,
 			deriveInputFieldTestWorkflowDecision,
 			deriveTaskNavigationWorkflowDecision,

@@ -1,14 +1,49 @@
 ;(function (g) {
 	const { TYPES: MSG_TYPES } = g.NC_BG_CONSTANTS
 	const { sendTabMessage } = g.NC_BG_UTILS
+	const OBSERVATION_MESSAGE_TIMEOUT_MS = 5000
+	const OBSERVATION_MESSAGE_MAX_RETRIES = 1
 
 	async function requestObservation(tabId) {
+		const startedAt = Date.now()
 		try {
-			const data = await sendTabMessage(tabId, { type: MSG_TYPES.OBSERVE })
-			return { ok: true, data }
+			const data = await sendTabMessage(
+				tabId,
+				{ type: MSG_TYPES.OBSERVE },
+				{
+					timeoutMs: OBSERVATION_MESSAGE_TIMEOUT_MS,
+					maxRetries: OBSERVATION_MESSAGE_MAX_RETRIES,
+				}
+			)
+			return {
+				ok: true,
+				data,
+				meta: buildObservationTimingMeta(tabId, startedAt),
+			}
 		} catch (error) {
-			return { ok: false, error: String(error) }
+			return {
+				ok: false,
+				error: formatObservationError(error, tabId, startedAt),
+				meta: buildObservationTimingMeta(tabId, startedAt),
+			}
 		}
+	}
+
+	function buildObservationTimingMeta(tabId, startedAt) {
+		return {
+			tabId: Number(tabId) || 0,
+			elapsedMs: Math.max(0, Date.now() - Number(startedAt || Date.now())),
+			timeoutMs: OBSERVATION_MESSAGE_TIMEOUT_MS,
+			maxRetries: OBSERVATION_MESSAGE_MAX_RETRIES,
+		}
+	}
+
+	function formatObservationError(error, tabId, startedAt) {
+		const message = String(error?.message || error || '无法读取页面状态')
+			.replace(/^Error:\s*/i, '')
+			.trim() || '无法读取页面状态'
+		const meta = buildObservationTimingMeta(tabId, startedAt)
+		return `${message}（观察耗时=${meta.elapsedMs}ms，单次超时=${meta.timeoutMs}ms，重试=${meta.maxRetries}，tab=${meta.tabId || '-'}）`
 	}
 
 	async function executeAction(session, action) {
@@ -91,5 +126,6 @@
 		requestObservation,
 		executeAction,
 		buildVisionDelegatedAction,
+		formatObservationError,
 	}
 })(globalThis)

@@ -12,6 +12,7 @@
 		const popups = Array.isArray(observation?.popups) ? observation.popups : []
 		const panels = Array.isArray(observation?.panels) ? observation.panels : []
 		const tables = Array.isArray(observation?.tables) ? observation.tables : []
+		const network = Array.isArray(observation?.network) ? observation.network : []
 		const elements = Array.isArray(observation?.elements) ? observation.elements : []
 		const candidateDiagnostics = observation?.candidateDiagnostics && typeof observation.candidateDiagnostics === 'object'
 			? observation.candidateDiagnostics
@@ -62,6 +63,14 @@
 				parts.push(formatTableLine(table, compact ? 3 : 6))
 			}
 			parts.push('</tables>')
+		}
+
+		if (network.length) {
+			parts.push('<network>')
+			for (const item of network.slice(0, compact ? 4 : 8)) {
+				parts.push(formatNetworkLine(item, compact ? 6 : 12))
+			}
+			parts.push('</network>')
 		}
 
 		if (candidateDiagnostics && Number(candidateDiagnostics.textActionProbeCount || 0) > 0) {
@@ -254,7 +263,7 @@
 		if (name === 'request_context') {
 			const source = normalizeContextSource(input.source || input.target || 'simplified_dom')
 			if (source === 'tables') {
-				return '不要重复请求相同表格上下文；改用 inspect_region content、request_context source=raw_candidates region=content，或在缺少样本时 done(false) 说明原因。'
+				return '不要重复请求相同表格上下文；改用 request_context source=network、inspect_region content、request_context source=raw_candidates region=content，或在缺少页面/API样本时 done(false) 说明原因。'
 			}
 			if (source === 'actions') {
 				return '不要重复请求相同动作上下文；更换 query/region，改用 inspect_region content，或选择当前已确认的真实按钮。'
@@ -467,9 +476,10 @@
 	function buildEmptyContextGuidance(source, query, reason) {
 		if (source === 'tables') {
 			return reason === 'query_no_match'
-				? `当前表格摘要中没有匹配 "${query}" 的行；可放宽 query 或 inspect_region content 查看列表区域。`
-				: '当前观察没有表格摘要；可 inspect_region content 或 request_context source=raw_candidates 查看列表区域，缺样本时不要填写泛化搜索词。'
+				? `当前表格摘要中没有匹配 "${query}" 的行；可放宽 query、request_context source=network 或 inspect_region content 查看列表区域。`
+				: '当前观察没有表格摘要；可 request_context source=network、inspect_region content 或 request_context source=raw_candidates 查看列表区域，缺样本时不要填写泛化搜索词。'
 		}
+		if (source === 'network') return '当前观察没有接口响应摘要；可先触发列表刷新/搜索提交，或改用 tables/raw_candidates 查看页面已有数据。'
 		if (source === 'forms') return '当前观察没有匹配的表单字段；可 inspect_region content 或放宽 query。'
 		if (source === 'actions') return '当前观察没有匹配的动作按钮；可 inspect_region content 或放宽 query。'
 		if (source === 'raw_candidates' || source === 'simplified_dom') return '当前观察没有匹配的原始候选；可 inspect_region content 或更换 query。'
@@ -685,11 +695,19 @@
 			if (normalized === 'panels') return rows
 		}
 		if (normalized === 'all' || normalized === 'tables') {
+			const beforeTableRows = rows.length
 			for (const table of (Array.isArray(observation?.tables) ? observation.tables : [])) {
+				if (!isUsableContextTableSummary(table)) continue
 				rows.push(formatTableLine(table, 8))
 			}
-			if (!rows.length) rows.push(...collectFallbackTableContextRows(observation, region))
+			if (rows.length === beforeTableRows) rows.push(...collectFallbackTableContextRows(observation, region))
 			if (normalized === 'tables') return rows
+		}
+		if (normalized === 'all' || normalized === 'network') {
+			for (const item of (Array.isArray(observation?.network) ? observation.network : [])) {
+				rows.push(formatNetworkLine(item, 16))
+			}
+			if (normalized === 'network') return rows
 		}
 		if (normalized === 'all' || normalized === 'forms') {
 			for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
@@ -740,6 +758,16 @@
 				.filter((line) => !region || line.includes(`region="${region}"`))
 		}
 		return rows
+	}
+
+	function isUsableContextTableSummary(table) {
+		const headers = Array.isArray(table?.headers) ? table.headers : []
+		const rows = Array.isArray(table?.rows) ? table.rows : []
+		if (!headers.some((header) => String(header || '').trim())) return false
+		return rows.some((row) =>
+			Array.isArray(row) &&
+			row.some((cell) => String(cell || '').trim())
+		)
 	}
 
 	function collectFallbackTableContextRows(observation, region = '') {
@@ -1176,8 +1204,11 @@
 
 	function formatTableLine(table, rowLimit = 6) {
 		const headers = Array.isArray(table?.headers) ? table.headers : []
+		const hscroll = table?.horizontalScrollable
+			? `hscroll="${Math.max(0, Number(table.scrollLeft) || 0)}/${Math.max(0, Number(table.maxScrollLeft) || 0)}"`
+			: ''
 		const lines = [
-			`table region=${table?.region || '-'} rect=${formatRect(table?.rect)} headers="${shortText(headers.join('|'), 160)}"`,
+			`table region=${table?.region || '-'} rect=${formatRect(table?.rect)} ${hscroll} headers="${shortText(headers.join('|'), 240)}"`.replace(/\s+/g, ' ').trim(),
 		]
 		const rows = Array.isArray(table?.rows) ? table.rows : []
 		for (let rowIndex = 0; rowIndex < rows.length && rowIndex < rowLimit; rowIndex += 1) {
@@ -1189,6 +1220,22 @@
 			lines.push(`  row ${rowIndex + 1}: ${shortText(pairs.join(' | '), 240)}`)
 		}
 		return lines.join('\n')
+	}
+
+	function formatNetworkLine(item, fieldLimit = 12) {
+		const fields = Array.isArray(item?.fields) ? item.fields : []
+		const fieldText = fields
+			.slice(0, fieldLimit)
+			.map((field) => {
+				const label = field.label || field.key || field.path || 'field'
+				return `${shortText(label, 32)}=${shortText(field.value, 64)}`
+			})
+			.join(' | ')
+		return [
+			`network method=${item?.method || '-'} status=${item?.status || '-'} ageMs=${Number(item?.ageMs) || 0}`,
+			`url="${shortText(item?.url || '', 120)}"`,
+			fieldText ? `fields="${shortText(fieldText, 420)}"` : '',
+		].filter(Boolean).join(' ')
 	}
 
 	function formatRect(rect) {
@@ -1237,6 +1284,10 @@
 			element: 'elements',
 			table: 'tables',
 			tables: 'tables',
+			api: 'network',
+			network: 'network',
+			response: 'network',
+			responses: 'network',
 		}
 		return aliases[raw] || raw || 'simplified_dom'
 	}

@@ -3250,13 +3250,20 @@
 	function extractGenericSensitiveAssignments(text) {
 		const out = []
 		const source = String(text || '')
-		const pattern = /(?:密码|口令|验证码|校验码|动态码|安全码|密钥|令牌|password|passcode|pwd|otp|captcha|verification(?:\s*code)?|secret|token|api[_-]?key)\s*(是|为|=|:|：)?\s*([^\s,，;；。"'<>`]+)/gi
+		const pattern = /(?:密码|口令|验证码|校验码|动态码|安全码|密钥|令牌|password|passcode|pwd|otp|captcha|verification(?:\s*code)?|secret|token|api[_-]?key)\s*(是|为|=|:|：)?\s*([^\s,，、;；。"'<>`]+)/gi
 		for (const match of source.matchAll(pattern)) {
 			const hasSeparator = !!String(match[1] || '').trim()
 			const value = String(match[2] || '').trim()
+			if (!hasSeparator && isSensitiveAssignmentBoundaryText(value)) continue
 			if (value.length >= 4 && (hasSeparator || isLikelyGenericSecretToken(value))) out.push(value)
 		}
 		return out
+	}
+
+	function isSensitiveAssignmentBoundaryText(value) {
+		const text = String(value || '').trim()
+		if (!text) return true
+		return /^(?:缺失|缺少|需要|用户|确认|信息|或|和|及|与|字段|账号|账户|手机号|手机|动态码|验证码|校验码|安全码|冲突|替代|新值)/.test(text)
 	}
 
 	function isLikelyGenericSecretToken(value) {
