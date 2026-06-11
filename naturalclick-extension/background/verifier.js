@@ -154,6 +154,9 @@
 			}
 			const createEntryVerdict = evaluateCreateEntryClick(action, preObservation, postObs, urlChanged)
 			if (createEntryVerdict) return createEntryVerdict
+			if (isSearchWorkflowStep(action, 'expand_search_panel')) {
+				return evaluateSearchPanelExpansionAction(action, preObservation, postObs, execution)
+			}
 			if (isDropdownSelectionCommitAction(action)) {
 				if (hasObservedIndexedTargetValueChanged(preObservation, postObs, input.index)) {
 					return { ok: true, reason: '下拉选择后字段值已变化' }
@@ -215,14 +218,35 @@
 
 	async function requestPostObservationForVerification(session, action, preObservation, execution, effectiveName) {
 		const delays = getPostObservationRetryDelays(action, execution, effectiveName, preObservation)
+		const observationOptions = getPostObservationOptions(action, effectiveName)
 		let last = null
 		for (const delay of delays) {
 			if (delay > 0) await sleep(delay)
-			last = await requestObservation(session.currentTabId)
+			last = await requestObservation(session.currentTabId, observationOptions)
 			if (!last?.ok) continue
 			if (isPostObservationSatisfied(action, execution, preObservation, last.data)) return last
 		}
 		return last
+	}
+
+	function getPostObservationOptions(action, effectiveName) {
+		if (isSearchWorkflowStep(action, 'expand_search_panel')) {
+			return {
+				mode: 'verification',
+				reason: 'verify_expand_search_panel',
+				maxElements: 180,
+				includeTables: false,
+				includeNetwork: false,
+				includeCandidateDiagnostics: false,
+				includeTree: false,
+				includeRawCandidates: false,
+				renderHighlights: false,
+				timeoutMs: 3200,
+				maxRetries: 0,
+			}
+		}
+		void effectiveName
+		return {}
 	}
 
 	function getPostObservationRetryDelays(action, execution, effectiveName, preObservation) {
@@ -257,6 +281,9 @@
 	}
 
 	function isPostObservationSatisfied(action, execution, preObservation, postObservation) {
+		if (isSearchWorkflowStep(action, 'expand_search_panel')) {
+			return getSearchPanelExpansionEvidence(preObservation, postObservation, action).ok
+		}
 		if (isDropdownOpenProbeAction(action)) {
 			return hasDropdownProbeCandidates(execution, postObservation)
 		}
@@ -332,6 +359,170 @@
 		}
 	}
 
+	function evaluateSearchPanelExpansionAction(action, preObservation, postObservation, execution) {
+		const evidence = getSearchPanelExpansionEvidence(preObservation, postObservation, action)
+		if (evidence.ok) {
+			return {
+				ok: true,
+				reason: `搜索/筛选区域已展开（${evidence.reason}）`,
+				outcome: createVerifierOutcome(OUTCOME_KIND.STATE_CHANGED, {
+					reason: 'search_panel_expanded',
+					evidence: evidence.reason,
+				}),
+			}
+		}
+		const verdict = evaluateStructuredOutcome(execution, { finalNoEffect: false })
+		if (verdict?.ok) {
+			return {
+				...verdict,
+				reason: `${verdict.reason}；搜索区域展开动作已有执行层进展，但轻量观察未捕获到面板字段（${evidence.reason}）`,
+			}
+		}
+		return {
+			ok: false,
+			reason: `search_panel_not_expanded: 点击展开搜索后未观察到筛选面板展开或字段出现（${evidence.reason}）`,
+			outcome: createVerifierOutcome(OUTCOME_KIND.NO_EFFECT, {
+				reason: 'search_panel_not_expanded',
+				evidence: evidence.reason,
+			}),
+		}
+	}
+
+	function getSearchPanelExpansionEvidence(preObservation, postObservation, action) {
+		const postPanels = collectSearchLikePanels(postObservation)
+		const expandedPanels = postPanels.filter((panel) => /^expanded$/i.test(String(panel?.state || '')))
+		if (expandedPanels.length) {
+			return {
+				ok: true,
+				reason: `expandedPanels=${expandedPanels.length}`,
+			}
+		}
+
+		const preFields = collectSearchLikeFields(preObservation)
+		const postFields = collectSearchLikeFields(postObservation)
+		if (postFields.length > preFields.length && postFields.length > 0) {
+			return {
+				ok: true,
+				reason: `fields=${preFields.length}->${postFields.length}`,
+			}
+		}
+
+		const expectedLabels = collectCollapsedPanelFieldLabels(preObservation)
+		const matchedLabels = expectedLabels.length
+			? countMatchedSearchFieldLabels(postFields, expectedLabels)
+			: 0
+		if (matchedLabels >= Math.min(2, expectedLabels.length || 2)) {
+			return {
+				ok: true,
+				reason: `matchedPanelFields=${matchedLabels}/${expectedLabels.length}`,
+			}
+		}
+
+		const input = action?.input || {}
+		const triggerIndex = Number(input.index)
+		const trigger = Number.isFinite(triggerIndex)
+			? findObservedIndexedItem(postObservation, triggerIndex)
+			: null
+		const triggerState = String(trigger?.expandedState || trigger?.expanded || trigger?.state || '').toLowerCase()
+		if (/expanded|true|open/.test(triggerState)) {
+			return {
+				ok: true,
+				reason: `triggerExpanded=${triggerState}`,
+			}
+		}
+
+		return {
+			ok: false,
+			reason: [
+				`panels=${postPanels.length}`,
+				`expandedPanels=${expandedPanels.length}`,
+				`fields=${preFields.length}->${postFields.length}`,
+				expectedLabels.length ? `matchedPanelFields=${matchedLabels}/${expectedLabels.length}` : '',
+				triggerState ? `triggerState=${triggerState}` : '',
+			].filter(Boolean).join(' '),
+		}
+	}
+
+	function collectSearchLikePanels(observation) {
+		return (Array.isArray(observation?.panels) ? observation.panels : [])
+			.filter((panel) => isSearchLikePanel(panel))
+	}
+
+	function isSearchLikePanel(panel) {
+		if (!panel || typeof panel !== 'object') return false
+		const text = normalizeVerifierKey([
+			panel.kind,
+			panel.label,
+			panel.triggerLabel,
+			panel.fields,
+		].filter(Boolean).join(' '))
+		return /(filter|search|query|筛选|搜索|查询|过滤)/i.test(text)
+	}
+
+	function collectCollapsedPanelFieldLabels(observation) {
+		const labels = []
+		for (const panel of collectSearchLikePanels(observation)) {
+			if (!/^collapsed$/i.test(String(panel?.state || ''))) continue
+			for (const part of String(panel?.fields || '').split(/[|,，、;；]/)) {
+				const label = normalizeVerifierKey(part)
+				if (label && !labels.includes(label)) labels.push(label)
+			}
+		}
+		return labels
+	}
+
+	function collectSearchLikeFields(observation) {
+		const fields = []
+		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
+				if (isSearchLikeField(field, form)) fields.push(field)
+			}
+		}
+		for (const item of (Array.isArray(observation?.elements) ? observation.elements : [])) {
+			if (isSearchLikeField(item, null)) fields.push(item)
+		}
+		return fields
+	}
+
+	function isSearchLikeField(field, form) {
+		if (!field || typeof field !== 'object') return false
+		if (!Number.isFinite(Number(field.index))) return false
+		const region = normalizeVerifierKey(field.region || form?.region || '')
+		if (region && !/^(content|dialog|main|popover)$/.test(region)) return false
+		const kind = normalizeVerifierKey([field.kind, field.fieldType, field.control, field.role].filter(Boolean).join(' '))
+		const label = normalizeVerifierKey([
+			field.searchLabel,
+			field.label,
+			field.placeholder,
+			field.text,
+			field.name,
+			field.aliases,
+		].filter(Boolean).join(' '))
+		if (!label) return false
+		if (/(button|tab|menuitem|link|switch)/i.test(kind) && !/(input|textarea|select|combobox|picker|date|time|dropdown|checkbox|radio|field)/i.test(kind)) return false
+		if (/^(搜索|查询|筛选|清空|重置|提交|取消|确认|新增|新建|导出|删除|编辑|详情)$/i.test(label)) return false
+		return true
+	}
+
+	function countMatchedSearchFieldLabels(fields, expectedLabels) {
+		const fieldLabels = (Array.isArray(fields) ? fields : [])
+			.map((field) => normalizeVerifierKey([
+				field.searchLabel,
+				field.label,
+				field.placeholder,
+				field.text,
+				field.name,
+			].filter(Boolean).join(' ')))
+			.filter(Boolean)
+		let count = 0
+		for (const expected of expectedLabels) {
+			if (fieldLabels.some((label) => label === expected || label.includes(expected) || expected.includes(label))) {
+				count += 1
+			}
+		}
+		return count
+	}
+
 	function summarizeSearchSubmitEvidence(preObservation, postObservation, urlChanged, domChanged, tableChanged, feedback) {
 		return [
 			`urlChanged=${urlChanged ? 'true' : 'false'}`,
@@ -404,6 +595,15 @@
 				}),
 			}
 		}
+		if (isSearchWorkflowStep(action, 'expand_search_panel') && verdict?.ok) {
+			return {
+				...verdict,
+				reason: `${verdict.reason}；搜索区域展开动作后观察暂不可用，采用执行层结构化结果并继续复核。`,
+				outcome: createVerifierOutcome(OUTCOME_KIND.STATE_CHANGED, {
+					reason: 'search_panel_expand_post_observation_unavailable',
+				}),
+			}
+		}
 		return null
 	}
 
@@ -449,7 +649,6 @@
 		const evidence = summarizeFormSubmitEvidence(preObservation, postObservation, urlChanged, domChanged, feedback)
 		if (urlChanged) return { ok: true, reason: `表单提交后 URL 已变化（${evidence}）` }
 		if (hasDialogClosed(preObservation, postObservation)) return { ok: true, reason: `表单提交后弹层已关闭（${evidence}）` }
-		if (feedback.success) return { ok: true, reason: `表单提交后观察到成功反馈: ${feedback.success}（${evidence}）` }
 		if (feedback.error) {
 			return {
 				ok: false,
@@ -459,6 +658,7 @@
 				}),
 			}
 		}
+		if (feedback.success) return { ok: true, reason: `表单提交后观察到成功反馈: ${feedback.success}（${evidence}）` }
 		if (hasPersistentDialogForm(preObservation, postObservation)) {
 			return {
 				ok: false,
@@ -558,20 +758,93 @@
 	}
 
 	function getFormSubmitFeedback(preObservation, postObservation) {
-		const before = collectObservationFeedbackText(preObservation)
-		const afterText = collectObservationFeedbackText(postObservation)
-		const after = afterText
-			.split(/\n+/)
-			.map((line) => line.trim())
-			.filter((line) => line && !before.includes(line))
-			.join('\n') || afterText
-		const success = findFirstFeedback(after, [
+		const beforeVisible = collectObservationVisibleFeedbackText(preObservation)
+		const afterVisibleText = collectObservationVisibleFeedbackText(postObservation)
+		const afterVisible = getFeedbackDelta(afterVisibleText, beforeVisible) || afterVisibleText
+		const beforeValidation = collectObservationValidationFeedbackText(preObservation)
+		const afterValidationText = collectObservationValidationFeedbackText(postObservation)
+		const afterValidation = getFeedbackDelta(afterValidationText, beforeValidation) || afterValidationText
+		const success = findFirstFeedback(afterVisible, [
 			/操作成功|保存成功|提交成功|新增成功|创建成功|处理成功|已保存|已提交|成功保存|success(?:ful)?|saved|submitted|created/i,
 		])
-		const error = findFirstFeedback(after, [
+		const error = findFirstFeedback(`${afterValidation}\n${afterVisible}`, [
 			/不能为空|必填|请选择|请输入|请填写|请录入|校验失败|验证失败|格式错误|重复|已存在|已经存在|不能重复|唯一|保存失败|提交失败|操作失败|请求失败|提交异常|保存异常|is\s+required|required\s+field|invalid\s+(?:value|input|format)|duplicate|already\s+exists|\bunique\b|\berror\s*:|\bfailed\b/i,
 		])
 		return { success, error }
+	}
+
+	function getFeedbackDelta(afterText, beforeText) {
+		const before = String(beforeText || '')
+		return String(afterText || '')
+			.split(/\n+/)
+			.map((line) => line.trim())
+			.filter((line) => line && !before.includes(line))
+			.join('\n')
+	}
+
+	function collectObservationVisibleFeedbackText(observation) {
+		const parts = []
+		for (const item of (Array.isArray(observation?.feedback) ? observation.feedback : [])) {
+			parts.push(item?.text, item?.message, item?.kind)
+		}
+		for (const listName of ['actions', 'elements', 'options', 'popups']) {
+			for (const item of (Array.isArray(observation?.[listName]) ? observation[listName] : [])) {
+				parts.push(item?.label, item?.text, item?.valueState, item?.validationMessage, item?.error)
+			}
+		}
+		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
+			parts.push(form?.name)
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
+				parts.push(field?.label, field?.text, field?.placeholder, field?.valueState, field?.validationMessage, field?.error)
+			}
+		}
+		return parts.map(sanitizeFeedbackText).filter(Boolean).join('\n')
+	}
+
+	function collectObservationValidationFeedbackText(observation) {
+		const parts = []
+		for (const item of (Array.isArray(observation?.feedback) ? observation.feedback : [])) {
+			const text = sanitizeFeedbackText([item?.kind, item?.text, item?.message].filter(Boolean).join(' '))
+			if (isValidationFeedbackText(text)) parts.push(text)
+		}
+		for (const listName of ['actions', 'elements', 'options', 'popups']) {
+			for (const item of (Array.isArray(observation?.[listName]) ? observation[listName] : [])) {
+				appendValidationItemFeedback(parts, item)
+			}
+		}
+		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
+				appendValidationItemFeedback(parts, field)
+			}
+		}
+		const content = String(observation?.content || '')
+		for (const match of content.matchAll(/\b(?:error|validationMessage|validation|message)="([^"]{1,200})"/gi)) {
+			const text = sanitizeFeedbackText(match[1])
+			if (isValidationFeedbackText(text)) parts.push(text)
+		}
+		for (const line of content.split(/\n+/)) {
+			if (!/(?:invalid|aria-invalid|error=|validation)/i.test(line)) continue
+			const text = sanitizeFeedbackText(line)
+			if (isValidationFeedbackText(text)) parts.push(text)
+		}
+		return parts.filter(Boolean).join('\n')
+	}
+
+	function appendValidationItemFeedback(parts, item) {
+		if (!item || typeof item !== 'object') return
+		const label = getObservedItemLabel(item)
+		const validation = [
+			item.validationMessage,
+			item.error,
+			item.valueState,
+			item.invalid === true ? 'invalid=true' : '',
+		].map(sanitizeFeedbackText).filter(Boolean).join(' ')
+		if (!validation || !isValidationFeedbackText(validation)) return
+		parts.push([label, validation].map(sanitizeFeedbackText).filter(Boolean).join(': '))
+	}
+
+	function isValidationFeedbackText(value) {
+		return /不能为空|必填|请选择|请输入|请填写|请录入|校验失败|验证失败|格式错误|重复|已存在|已经存在|不能重复|唯一|保存失败|提交失败|操作失败|请求失败|提交异常|保存异常|required|invalid|duplicate|already\s+exists|\bunique\b|\berror\b|\bfailed\b/i.test(String(value || ''))
 	}
 
 	function getSearchSubmitFeedback(preObservation, postObservation) {

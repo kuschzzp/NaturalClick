@@ -55,6 +55,7 @@ async function main() {
 	assertPlannerFastPathBehavior()
 	assertInitialNavigationBehavior()
 	assertTaskIntentBehavior()
+	assertConversationMemoryBehavior()
 	await assertPlannerUsesModelDecisionOnTarget()
 	await assertPlannerTaskIntentBeforeNavigation()
 	await assertPlannerUsesOperationOnlyHeuristicOnLocalSurface()
@@ -1525,7 +1526,7 @@ function assertTaskIntentBehavior() {
 	if (!taskIntent?.normalizeTaskIntent || !taskIntent?.shouldRequestTaskIntent || !taskIntent?.deriveHeuristicTaskIntent) {
 		throw new Error('task-intent test contract is not exported')
 	}
-	if (taskIntent.TASK_INTENT_VERSION < 13) {
+	if (taskIntent.TASK_INTENT_VERSION < 15) {
 		throw new Error(`task-intent normalization changes should invalidate cached old intents, got version=${taskIntent.TASK_INTENT_VERSION}`)
 	}
 	const prompt = taskIntent.buildTaskIntentSystemPrompt()
@@ -1543,6 +1544,9 @@ function assertTaskIntentBehavior() {
 	}
 	if (!prompt.includes('operationScope') || !prompt.includes('all_matching_controls')) {
 		throw new Error('task-intent prompt should expose generic operation coverage scope for all-field search tests')
+	}
+	if (!prompt.includes('步骤编号') || !prompt.includes('礼貌词不是导航目标')) {
+		throw new Error('task-intent prompt should tell the model to ignore numbered step prefixes and polite helper words as navigation targets')
 	}
 	if (!prompt.includes('登录账号/密码只用于登录') || !prompt.includes('不要重复放入 formData')) {
 		throw new Error('task-intent prompt should keep login credentials out of later formData')
@@ -1870,6 +1874,19 @@ function assertTaskIntentBehavior() {
 	) {
 		throw new Error(`task-intent should preserve operation-only all-field search tests without navigation noise, got intent=${JSON.stringify(genericSearchIntent)} keys=${JSON.stringify(genericSearchKeys)} hints=${genericSearchHints}`)
 	}
+	const numberedSearchTask = '1.进入资料列表\n2.帮我检查查询区域，查询字段功能是否正常'
+	const numberedSearchIntent = taskIntent.deriveHeuristicTaskIntent(numberedSearchTask)
+	const numberedSearchSession = { task: numberedSearchTask, latestTask: numberedSearchTask, workflowState: {} }
+	taskIntent.storeTaskIntent(numberedSearchSession, numberedSearchIntent, { model: 'local-heuristic' })
+	const numberedSearchKeys = taskIntent.getNavigationTargetKeys(numberedSearchSession)
+	if (
+		numberedSearchIntent?.operation !== 'search' ||
+		numberedSearchIntent.operationScope !== 'all_matching_controls' ||
+		!numberedSearchKeys.includes('资料') ||
+		numberedSearchKeys.some((key) => /2|帮我|检查|查询区域|查询字段/.test(key))
+	) {
+		throw new Error(`task-intent should strip numbered helper clauses from search-test navigation targets, got intent=${JSON.stringify(numberedSearchIntent)} keys=${JSON.stringify(numberedSearchKeys)}`)
+	}
 	const recordSearchTask = '打开这个页面 http://example.test/ 账号 admin 密码 123456 找到资料管理。你现在帮我测试一下资料管理的每一个搜索功能是否正常实现。'
 	const recordSearchIntent = taskIntent.deriveHeuristicTaskIntent(recordSearchTask)
 	const recordSearchSession = { task: recordSearchTask, latestTask: recordSearchTask, workflowState: {} }
@@ -1957,6 +1974,98 @@ function assertTaskIntentBehavior() {
 	const fillKeys = taskIntent.getNavigationTargetKeys(fillSession)
 	if (fillIntent?.operation !== 'fill_form' || !fillKeys.includes('资料管理')) {
 		throw new Error(`task-intent heuristic should recognize fill-form tasks without treating fields as navigation targets, got intent=${JSON.stringify(fillIntent)} keys=${JSON.stringify(fillKeys)}`)
+	}
+	const referentialSearchTask = '查询刚才创建的资料'
+	const referentialSearchIntent = taskIntent.deriveHeuristicTaskIntent(referentialSearchTask)
+	const referentialSearchSession = { task: referentialSearchTask, latestTask: referentialSearchTask, workflowState: {} }
+	taskIntent.storeTaskIntent(referentialSearchSession, referentialSearchIntent, { model: 'local-heuristic' })
+	const referentialSearchKeys = taskIntent.getNavigationTargetKeys(referentialSearchSession)
+	if (referentialSearchIntent?.operation !== 'search' || referentialSearchKeys.length !== 0) {
+		throw new Error(`task-intent should treat referential previous-create queries as search with no invented navigation target, got intent=${JSON.stringify(referentialSearchIntent)} keys=${JSON.stringify(referentialSearchKeys)}`)
+	}
+	const normalizedReferentialCreateQuery = taskIntent.normalizeTaskIntent({
+		navigationTargets: [{ raw: '刚才创建的资料', canonical: '刚才创建的资料', aliases: ['刚才创建的资料'] }],
+		operation: 'create',
+	}, referentialSearchTask)
+	const normalizedReferentialSearchSession = { task: referentialSearchTask, latestTask: referentialSearchTask, workflowState: {} }
+	taskIntent.storeTaskIntent(normalizedReferentialSearchSession, normalizedReferentialCreateQuery, { model: 'fake-model' })
+	const normalizedReferentialSearchKeys = taskIntent.getNavigationTargetKeys(normalizedReferentialSearchSession)
+	if (normalizedReferentialCreateQuery.operation !== 'search' || normalizedReferentialSearchKeys.length !== 0) {
+		throw new Error(`task-intent normalization should override model create guesses for referential query tasks, got intent=${JSON.stringify(normalizedReferentialCreateQuery)} keys=${JSON.stringify(normalizedReferentialSearchKeys)}`)
+	}
+}
+
+function assertConversationMemoryBehavior() {
+	const background = read('naturalclick-extension/background.js')
+	const sidepanelHtml = read('naturalclick-extension/sidepanel.html')
+	const sidepanel = read('naturalclick-extension/sidepanel.js')
+	const prompt = read('naturalclick-extension/background/planner-prompt.js')
+	if (!background.includes('shared/conversation-memory.js') || background.indexOf('shared/conversation-memory.js') > background.indexOf('background/planner-prompt.js')) {
+		throw new Error('background should load conversation memory before planner prompts consume it')
+	}
+	if (!background.includes('conversationMemory') || !background.includes('normalizeConversationMemorySnapshot')) {
+		throw new Error('background should attach conversationMemory to each runtime session')
+	}
+	if (!sidepanelHtml.includes('shared/conversation-memory.js') || sidepanelHtml.indexOf('shared/conversation-memory.js') > sidepanelHtml.indexOf('sidepanel.js')) {
+		throw new Error('sidepanel should load conversation memory helper before sidepanel.js')
+	}
+	if (!sidepanel.includes('buildConversationMemoryForNextTask') || !sidepanel.includes('conversationMemory,') || !sidepanel.includes('startNewConversation ? null')) {
+		throw new Error('sidepanel should send only current-conversation memory when starting a continued task')
+	}
+	if (!prompt.includes('<conversation_memory>') || !prompt.includes('失败/未确认的创建或提交不能当作成功事实') || !prompt.includes('formatConversationMemoryForPrompt')) {
+		throw new Error('planner prompt should expose current-conversation memory and warn about failed create/submit facts')
+	}
+	const sandbox = { console }
+	sandbox.globalThis = sandbox
+	vm.runInNewContext(read('naturalclick-extension/shared/conversation-memory.js'), sandbox, {
+		filename: 'naturalclick-extension/shared/conversation-memory.js',
+	})
+	const memoryApi = sandbox.NC_CONVERSATION_MEMORY
+	if (!memoryApi?.createConversationMemorySnapshot || !memoryApi?.formatConversationMemoryForPrompt) {
+		throw new Error('conversation memory helper should expose snapshot and prompt formatting APIs')
+	}
+	const memory = memoryApi.createConversationMemorySnapshot({
+		task: '查询刚才创建的资料',
+		conversationId: 'c_test',
+		turnCount: 2,
+		traceItems: [
+			{ title: '用户输入 #1', kind: 'user', detail: '帮我新建一条资料' },
+			{
+				title: '步骤 1: input_text',
+				kind: 'step',
+				action: {
+					name: 'input_text',
+					input: { target_label: '记录编号', text: 'alpha-001' },
+					output: '已在索引 3 输入文本。 | 动作结果: value_changed progress=true',
+				},
+			},
+			{
+				title: '步骤 2: done',
+				kind: 'error',
+				action: {
+					name: 'done',
+					input: { text: '提交失败：必填项未选择。', success: false },
+					output: '提交失败：必填项未选择。',
+				},
+			},
+		],
+		resultSummary: {
+			title: '表单结果总结',
+			status: 'failed',
+			headline: '表单未提交成功。',
+			issues: [{ label: '提交结果', status: 'failed', summary: '缺少必填项。' }],
+		},
+		activityText: '提交失败：必填项未选择。',
+	})
+	const formatted = memoryApi.formatConversationMemoryForPrompt(memory)
+	if (
+		!formatted.includes('<conversation_memory') ||
+		!formatted.includes('alpha-001') ||
+		!formatted.includes('status=failed') ||
+		!formatted.includes('新建一条资料') ||
+		!formatted.includes('不是全局长期记忆')
+	) {
+		throw new Error(`conversation memory should preserve current-turn facts and failure state, got ${formatted}`)
 	}
 }
 
@@ -17370,6 +17479,44 @@ function assertPlannerRejectsCoveredIndexTargets() {
 	if (matchedCheckboxTargetLabelError) {
 		throw new Error(`matching checkbox field target labels should remain executable, got ${matchedCheckboxTargetLabelError}`)
 	}
+	const checkboxToolOnPlainDropdownError = validation.validateExecutableAction(
+		{ name: 'select_checkbox_option', input: { index: 34, text: '启用', target_label: '状态' } },
+		inputObservation,
+		[]
+	)
+	if (
+		!String(checkboxToolOnPlainDropdownError || '').includes('普通下拉/选择控件') ||
+		!String(checkboxToolOnPlainDropdownError || '').includes('choose_dropdown_option')
+	) {
+		throw new Error(`select_checkbox_option should steer plain dropdown fields to choose_dropdown_option before execution, got ${checkboxToolOnPlainDropdownError}`)
+	}
+	const staleOpenAfterFailedSelectionError = validation.validateActionAgainstHistory(
+		{
+			name: 'open_dropdown',
+			input: { index: 34, target_label: '状态' },
+		},
+		{
+			history: [
+				{
+					stepIndex: 1,
+					action: 'open_dropdown',
+					input: { index: 34, target_label: '状态' },
+					output: '已展开下拉框索引 34。 当前候选: 启用、停用 | 动作结果: options_visible candidates="启用|停用"',
+					outcome: { kind: 'options_visible', visibleOptions: ['启用', '停用'] },
+				},
+				{
+					stepIndex: 2,
+					action: 'select_checkbox_option',
+					input: { index: 34, text: '启用', target_label: '状态' },
+					success: false,
+					output: '未找到可见复选项 "启用"。 | 动作结果: failed progress=false requested="启用"',
+				},
+			],
+		}
+	)
+	if (staleOpenAfterFailedSelectionError) {
+		throw new Error(`open_dropdown should be allowed after a later failed selection made previous candidates stale, got ${staleOpenAfterFailedSelectionError}`)
+	}
 	const partialError = validation.validateExecutableAction(
 		{ name: 'click_element_by_index', input: { index: 31, target_label: '搜索' } },
 		partialObservation,
@@ -18597,7 +18744,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		workflowState: {
 			taskIntent: {
 				status: 'ready',
-				version: 13,
+				version: 15,
 				taskText: '打开数据单据新增页面，帮我新增一条数据',
 				intent: {
 					navigationTargets: [
@@ -26283,7 +26430,7 @@ function assertObserverCapturesWideTableAndNetworkSummaries() {
 		}
 	}
 	if (
-		!observer.includes('const network = collectNetworkSummaries()') ||
+		!observer.includes('collectNetworkSummaries()') ||
 		!observer.includes('<network>') ||
 		!observer.includes('request="') ||
 		!plannerContext.includes("network: 'network'") ||
@@ -26698,7 +26845,7 @@ function assertPlannerWorkflowRegistryBehavior() {
 		workflowState: {
 			taskIntent: {
 				status: 'ready',
-				version: 13,
+				version: 15,
 				taskText: chainedSearchTask,
 				intent: {
 					operation: 'view_first_record_detail',
@@ -29619,6 +29766,65 @@ async function assertVerifierSeparatesSubmitFromCreateEntryVerification() {
 		throw new Error(`submit click should fail with structured validation feedback, got ${JSON.stringify(rejectedValidation)}`)
 	}
 
+	const validationBeatsNetworkSuccessSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		...baseSandbox,
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					...preObservation,
+					content: [
+						'dialog-after-submit',
+						'<network url="/api/blade-system/region/listForCascader" method="GET" fields="code=200 | success=true | msg=操作成功">',
+						'field index=8 label="所属角色" invalid=true error="请选择所属角色"',
+					].join('\n'),
+					forms: [
+						{
+							id: 'dialog',
+							name: '弹层',
+							fields: [
+								{
+									index: 8,
+									region: 'dialog',
+									label: '所属角色',
+									valueState: 'empty',
+									role: 'combobox',
+									invalid: true,
+									validationMessage: '请选择所属角色',
+								},
+							],
+						},
+					],
+				},
+			}),
+		},
+	})
+	const rejectedValidationWithNetworkSuccess = await validationBeatsNetworkSuccessSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				index: 19,
+				workflow_step: 'submit_form_timeout_recovery',
+				workflow_submit_label: '保存',
+			},
+		},
+		preObservation,
+		{
+			success: true,
+			message: '已点击索引 19。',
+			meta: { outcome: { kind: 'dom_changed', progress: true } },
+		}
+	)
+	if (
+		rejectedValidationWithNetworkSuccess.ok ||
+		!String(rejectedValidationWithNetworkSuccess.reason || '').includes('form_submit_failed') ||
+		!String(rejectedValidationWithNetworkSuccess.reason || '').includes('请选择所属角色') ||
+		String(rejectedValidationWithNetworkSuccess.reason || '').includes('表单提交后观察到成功反馈')
+	) {
+		throw new Error(`visible validation errors must beat unrelated network success, got ${JSON.stringify(rejectedValidationWithNetworkSuccess)}`)
+	}
+
 	const duplicateFeedbackSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
 		...baseSandbox,
 		NC_BG_EXECUTOR: {
@@ -30117,6 +30323,53 @@ async function assertLocateByVisionDelegatesToExecutableCoordinateAction() {
 	) {
 		throw new Error(`requestObservation should return diagnostic timeout metadata, got ${JSON.stringify(observationTimeout)}`)
 	}
+	const lightObserveMessages = []
+	const lightObserveSandbox = loadBackgroundModule('naturalclick-extension/background/executor.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { OBSERVE: 'NC_OBSERVE' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async (_tabId, message, options) => {
+				lightObserveMessages.push({ message, options })
+				return { url: 'http://example.test/app', title: 'Example', observeMode: message?.payload?.mode || 'full' }
+			},
+		},
+		NC_BG_VISION: {
+			attemptVisionFallback: async () => ({ success: false, message: 'unused' }),
+		},
+		NC_BG_TOOLS: {
+			hasTool: () => false,
+			executeTool: async () => ({ success: false, message: 'unused' }),
+		},
+	})
+	const lightObservation = await lightObserveSandbox.NC_BG_EXECUTOR.requestObservation(42, {
+		mode: 'verification',
+		reason: 'verify_expand_search_panel',
+		maxElements: 120,
+		includeTables: false,
+		includeNetwork: false,
+		includeCandidateDiagnostics: false,
+		includeTree: false,
+		includeRawCandidates: false,
+		renderHighlights: false,
+		timeoutMs: 3000,
+		maxRetries: 0,
+	})
+	const lightRequest = lightObserveMessages[0] || {}
+	if (
+		!lightObservation.ok ||
+		lightObservation.data?.observeMode !== 'verification' ||
+		lightObservation.meta?.timeoutMs !== 3000 ||
+		lightObservation.meta?.maxRetries !== 0 ||
+		lightObservation.meta?.mode !== 'verification' ||
+		lightRequest.options?.timeoutMs !== 3000 ||
+		lightRequest.options?.maxRetries !== 0 ||
+		lightRequest.message?.payload?.mode !== 'verification' ||
+		lightRequest.message?.payload?.includeTables !== false ||
+		lightRequest.message?.payload?.includeCandidateDiagnostics !== false
+	) {
+		throw new Error(`requestObservation should pass compact verification observation options through the content bridge, got observation=${JSON.stringify(lightObservation)} request=${JSON.stringify(lightRequest)}`)
+	}
 }
 
 async function assertVisionFallbackPreservesCoordinateActionOutcome() {
@@ -30466,6 +30719,78 @@ async function assertVerifierAcceptsSearchWorkflowSemanticClicks() {
 			requestObservation: async () => ({ ok: true, data: postObservation }),
 		},
 	})
+	const expandObservationOptions = []
+	const expandSandbox = loadBackgroundModule('naturalclick-extension/background/verifier.js', {
+		NC_BG_CONSTANTS: {
+			TYPES: { VERIFY_INPUT: 'NC_VERIFY_INPUT', VERIFY_INPUT_POINT: 'NC_VERIFY_INPUT_POINT' },
+		},
+		NC_BG_UTILS: {
+			sendTabMessage: async () => ({ success: false, matched: false }),
+		},
+		NC_BG_EXECUTOR: {
+			requestObservation: async (_tabId, options) => {
+				expandObservationOptions.push(options || {})
+				return {
+					ok: true,
+					data: {
+						url: 'http://example.test/app',
+						content: 'light-search-panel',
+						observeMode: 'verification',
+						panels: [
+							{ kind: 'filter', label: '筛选区域', state: 'expanded', fields: '登录账号,姓名' },
+						],
+						forms: [
+							{
+								fields: [
+									{ index: 2, label: '登录账号', region: 'content', fieldType: 'text', role: 'textbox', valueState: 'empty' },
+									{ index: 3, label: '姓名', region: 'content', fieldType: 'text', role: 'textbox', valueState: 'empty' },
+								],
+							},
+						],
+					},
+				}
+			},
+		},
+	})
+	const expandResult = await expandSandbox.NC_BG_VERIFIER.verifyExecutionOutcome(
+		{ currentTabId: 1 },
+		{
+			name: 'click_element_by_index',
+			input: {
+				workflow: 'search-fields',
+				workflow_step: 'expand_search_panel',
+				index: 8,
+				target_label: '展开搜索',
+			},
+		},
+		{
+			url: 'http://example.test/app',
+			content: 'same-dom',
+			panels: [
+				{ kind: 'filter', label: '筛选区域', state: 'collapsed', triggerIndex: 8, triggerLabel: '展开搜索', fields: '登录账号,姓名' },
+			],
+			forms: [],
+		},
+		{
+			success: true,
+			message: '已点击索引 8。动作结果: focused progress=false',
+			meta: { outcome: { kind: 'focused', progress: false } },
+		}
+	)
+	if (!expandResult.ok || !String(expandResult.reason || '').includes('搜索/筛选区域已展开')) {
+		throw new Error(`search panel expansion should verify from lightweight expanded-panel evidence, got ${JSON.stringify(expandResult)}`)
+	}
+	const expandOptions = expandObservationOptions[0] || {}
+	if (
+		expandOptions.mode !== 'verification' ||
+		expandOptions.includeTables !== false ||
+		expandOptions.includeNetwork !== false ||
+		expandOptions.includeCandidateDiagnostics !== false ||
+		expandOptions.timeoutMs > 4000 ||
+		expandOptions.maxRetries !== 0
+	) {
+		throw new Error(`search panel expansion verification should request lightweight post-observation, got ${JSON.stringify(expandObservationOptions)}`)
+	}
 	const unchangedSubmitSandbox = loadVerifier({
 		url: 'http://example.test/app',
 		content: 'same-dom',

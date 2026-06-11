@@ -5,9 +5,10 @@
 		const semantics = g.NC_CONTENT_SEMANTICS || null
 		let previousElementSignatures = new Set()
 
-		function observePage() {
+		function observePage(rawOptions = {}) {
+			const observeOptions = normalizeObserveOptions(rawOptions)
 			selectorMap.clear()
-			const candidates = collectInteractiveCandidates()
+			const candidates = collectInteractiveCandidates(observeOptions)
 			const lines = []
 			const indexedElements = []
 			const elements = []
@@ -44,7 +45,7 @@
 				elements.push(snapshot)
 				lines.push(formatElementLine(snapshot))
 				idx += 1
-				if (idx >= 240) break
+				if (idx >= observeOptions.maxElements) break
 			}
 			previousElementSignatures = new Set(elements.map((item) => item.signature).filter(Boolean))
 			const forms = buildFormGroups(elements)
@@ -52,16 +53,16 @@
 			const options = buildOptionCandidates(elements)
 			const popups = buildPopupCandidates(elements)
 			const panels = buildPanelCandidates(elements)
-			const tables = collectTableSummaries()
-			const network = collectNetworkSummaries()
+			const tables = observeOptions.includeTables ? collectTableSummaries() : []
+			const network = observeOptions.includeNetwork ? collectNetworkSummaries() : []
 			const feedback = collectPageFeedbackMessages()
-			const candidateDiagnostics = buildCandidateDiagnostics(indexedElements)
-			const rawCandidates = lines
-			const treeCandidates = buildDomTree(elements)
+			const candidateDiagnostics = observeOptions.includeCandidateDiagnostics ? buildCandidateDiagnostics(indexedElements) : []
+			const rawCandidates = observeOptions.includeRawCandidates ? lines : []
+			const treeCandidates = observeOptions.includeTree ? buildDomTree(elements) : []
 			const simplifiedDom = buildSimplifiedDom(elements)
 
 			try {
-				if (visual?.renderIndexHighlights) {
+				if (observeOptions.renderHighlights && visual?.renderIndexHighlights) {
 					visual.renderIndexHighlights(indexedElements)
 				}
 			} catch (_) {}
@@ -71,6 +72,7 @@
 				title: document.title || '',
 				scrollY: window.scrollY || window.pageYOffset || 0,
 				activeElement: getActiveElementSummary(),
+				observeMode: observeOptions.mode,
 				viewport: {
 					width: window.innerWidth,
 					height: window.innerHeight,
@@ -145,7 +147,36 @@
 		}
 	}
 
-	function collectInteractiveCandidates() {
+	function normalizeObserveOptions(rawOptions = {}) {
+		const raw = rawOptions && typeof rawOptions === 'object' ? rawOptions : {}
+		const mode = String(raw.mode || 'full').trim() || 'full'
+		const light = /^(verification|verify|probe|light|compact)$/i.test(mode)
+		return {
+			mode: light ? 'verification' : 'full',
+			maxElements: normalizeObserveLimit(raw.maxElements, light ? 160 : 240, 40, 240),
+			includeTables: normalizeObserveBoolean(raw.includeTables, !light),
+			includeNetwork: normalizeObserveBoolean(raw.includeNetwork, !light),
+			includeCandidateDiagnostics: normalizeObserveBoolean(raw.includeCandidateDiagnostics, !light),
+			includeTree: normalizeObserveBoolean(raw.includeTree, !light),
+			includeRawCandidates: normalizeObserveBoolean(raw.includeRawCandidates, !light),
+			renderHighlights: normalizeObserveBoolean(raw.renderHighlights, !light),
+		}
+	}
+
+	function normalizeObserveLimit(value, fallback, min, max) {
+		const number = Number(value)
+		if (!Number.isFinite(number)) return fallback
+		return Math.max(min, Math.min(max, Math.floor(number)))
+	}
+
+	function normalizeObserveBoolean(value, fallback) {
+		if (typeof value === 'boolean') return value
+		if (value === 'true') return true
+		if (value === 'false') return false
+		return fallback
+	}
+
+	function collectInteractiveCandidates(options = {}) {
 		const primarySelector = [
 			'a[href]',
 			'a',
@@ -262,6 +293,7 @@
 
 		const seen = new Set()
 		const result = []
+		const softLimit = Math.max(80, Number(options?.maxElements || 240) * 2)
 		const addCandidate = (raw) => {
 			if (!(raw instanceof HTMLElement)) return
 			if (raw.tagName === 'LABEL' && !shouldKeepLabelCandidate(raw)) return
@@ -274,10 +306,14 @@
 		}
 
 		const primary = querySelectorAllDeep(primarySelector)
-		for (const node of primary) addCandidate(node)
+		for (const node of primary) {
+			addCandidate(node)
+			if (result.length >= softLimit) break
+		}
 
 		const extras = querySelectorAllDeep(extraSelector)
 		for (const node of extras) {
+			if (result.length >= softLimit) break
 			if (!(node instanceof HTMLElement)) continue
 			const cls = String(node.className || '')
 			const text = getElementText(node)

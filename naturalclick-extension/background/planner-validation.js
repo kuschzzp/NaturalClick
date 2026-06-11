@@ -108,6 +108,8 @@
 			if (selectionIntentError) return selectionIntentError
 			const optionError = validateSelectionTextAgainstVisibleOptions(input.index, getActionSelectionText(input), observation, name, input)
 			if (optionError) return optionError
+			const checkboxTargetError = validateCheckboxSelectionTarget(input.index, observation, name)
+			if (checkboxTargetError) return checkboxTargetError
 		}
 		if (name === 'select_cascader_path') {
 			const pathValue = Array.isArray(input.path) ? input.path.join('') : String(input.path || '')
@@ -167,6 +169,7 @@
 		const currentIndex = normalizeOptionalIndex(input.index)
 		const currentText = normalizeSelectionText(getActionSelectionText(input))
 		const recent = Array.isArray(session?.history) ? session.history.slice(-8).reverse() : []
+		let selectionFailedAfterVisibleCandidates = false
 		for (const item of recent) {
 			const historyName = normalizeActionName(item?.action)
 			if (!isSelectionActionName(historyName)) continue
@@ -174,6 +177,9 @@
 			if (currentIndex !== null && historyIndex !== null && currentIndex !== historyIndex) continue
 			const outcome = getHistoryOutcome(item)
 			if (outcome.kind === 'failed') {
+				if (currentIndex !== null && historyIndex === currentIndex) {
+					selectionFailedAfterVisibleCandidates = true
+				}
 				const requested = outcome.requestedText
 				const candidates = outcome.candidates
 				if (selectionTextMatchesRequested(currentText, requested)) {
@@ -185,6 +191,7 @@
 				}
 			}
 			if (outcome.kind === 'options_visible' && !currentText && currentIndex !== null) {
+				if (selectionFailedAfterVisibleCandidates) continue
 				const candidates = outcome.candidates
 				if (candidates) {
 					if (!visibleCandidatesLookReusableForRepeatedOpen(input, candidates, session)) continue
@@ -953,6 +960,52 @@
 			`${actionName} 目标 index=${index} 是非层级选择控件（label="${shortText(label, 48)}", control=${info.control || '-'}, role=${info.role || '-'}, fieldType=${info.fieldType || '-'}），不能按级联路径选择。`,
 			'请使用 open_dropdown/choose_dropdown_option/select_checkbox_option 处理普通选择控件；只有层级/树形/级联选择字段才使用 select_cascader_path。',
 		].join('')
+	}
+
+	function validateCheckboxSelectionTarget(indexValue, observation, actionName) {
+		const index = Number(indexValue)
+		if (!Number.isFinite(index)) return ''
+		const matches = findObservedIndexMatches(observation, index)
+		if (!matches.length) return ''
+		if (matches.some((entry) => isCheckboxSelectableTarget(entry.item, entry.source))) return ''
+		const selectionMatch = matches.find((entry) => isSelectionLikeItem(entry.item, entry.source) && !isOptionLikeSource(entry.source))
+		if (!selectionMatch) return ''
+		const item = selectionMatch.item || {}
+		if (!isPlainDropdownSelectionTarget(item, selectionMatch.source)) return ''
+		const info = describeObservedControl(item, selectionMatch.source)
+		const label = item.label || item.placeholder || item.text || ''
+		return [
+			`${actionName} 目标 index=${index} 是普通下拉/选择控件（label="${shortText(label, 48)}", control=${info.control || '-'}, role=${info.role || '-'}, fieldType=${info.fieldType || '-'}），不是复选/多选字段。`,
+			'请改用 choose_dropdown_option(index,text,target_label) 选择真实候选；若候选已收起，先 open_dropdown(index) 或 request_options_for(index) 重新确认。',
+		].join('')
+	}
+
+	function isCheckboxSelectableTarget(item, source) {
+		if (!item || typeof item !== 'object') return false
+		const descriptor = describeSelectableDescriptor(item)
+		if (/(checkbox|radio|switch|multi[-_\s]?select|multiselect|multiple|tag[-_\s]?select|tags)/i.test(descriptor)) return true
+		if (/checked|unchecked|selected|unselected/i.test(String(item.valueState || '')) && !isPlainDropdownSelectionTarget(item, source)) return true
+		return false
+	}
+
+	function isPlainDropdownSelectionTarget(item, source) {
+		if (!item || typeof item !== 'object') return false
+		if (isOptionLikeSource(source)) return false
+		const descriptor = describeSelectableDescriptor(item)
+		if (/(checkbox|radio|switch|multi[-_\s]?select|multiselect|multiple|tag[-_\s]?select|tags|cascader|tree|date|time|picker|range)/i.test(descriptor)) return false
+		return /(dropdown|combobox|select|listbox|option)/i.test(descriptor)
+	}
+
+	function describeSelectableDescriptor(item) {
+		return [
+			item?.selectionControl,
+			item?.controlKind,
+			item?.control,
+			item?.kind,
+			item?.fieldType,
+			item?.role,
+			item?.type,
+		].map((value) => String(value || '').toLowerCase()).join(' ')
 	}
 
 	function isCascaderParentTarget(item, source) {

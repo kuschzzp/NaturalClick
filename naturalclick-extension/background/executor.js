@@ -4,46 +4,84 @@
 	const OBSERVATION_MESSAGE_TIMEOUT_MS = 5000
 	const OBSERVATION_MESSAGE_MAX_RETRIES = 1
 
-	async function requestObservation(tabId) {
+	async function requestObservation(tabId, options = {}) {
 		const startedAt = Date.now()
+		const requestOptions = normalizeObservationRequestOptions(options)
 		try {
 			const data = await sendTabMessage(
 				tabId,
-				{ type: MSG_TYPES.OBSERVE },
+				{ type: MSG_TYPES.OBSERVE, payload: requestOptions.payload },
 				{
-					timeoutMs: OBSERVATION_MESSAGE_TIMEOUT_MS,
-					maxRetries: OBSERVATION_MESSAGE_MAX_RETRIES,
+					timeoutMs: requestOptions.timeoutMs,
+					maxRetries: requestOptions.maxRetries,
 				}
 			)
 			return {
 				ok: true,
 				data,
-				meta: buildObservationTimingMeta(tabId, startedAt),
+				meta: buildObservationTimingMeta(tabId, startedAt, requestOptions),
 			}
 		} catch (error) {
 			return {
 				ok: false,
-				error: formatObservationError(error, tabId, startedAt),
-				meta: buildObservationTimingMeta(tabId, startedAt),
+				error: formatObservationError(error, tabId, startedAt, requestOptions),
+				meta: buildObservationTimingMeta(tabId, startedAt, requestOptions),
 			}
 		}
 	}
 
-	function buildObservationTimingMeta(tabId, startedAt) {
+	function normalizeObservationRequestOptions(options = {}) {
+		const raw = options && typeof options === 'object' ? options : {}
+		const timeoutMs = normalizeTimeoutMs(raw.timeoutMs, OBSERVATION_MESSAGE_TIMEOUT_MS)
+		const maxRetries = normalizeMaxRetries(raw.maxRetries, OBSERVATION_MESSAGE_MAX_RETRIES)
+		const payload = {}
+		for (const key of [
+			'mode',
+			'reason',
+			'maxElements',
+			'includeTables',
+			'includeNetwork',
+			'includeCandidateDiagnostics',
+			'includeTree',
+			'includeRawCandidates',
+			'renderHighlights',
+		]) {
+			if (Object.prototype.hasOwnProperty.call(raw, key)) payload[key] = raw[key]
+		}
+		return { timeoutMs, maxRetries, payload }
+	}
+
+	function normalizeTimeoutMs(value, fallback) {
+		const number = Number(value)
+		if (!Number.isFinite(number) || number <= 0) return fallback
+		return Math.max(800, Math.min(15000, Math.floor(number)))
+	}
+
+	function normalizeMaxRetries(value, fallback) {
+		const number = Number(value)
+		if (!Number.isFinite(number) || number < 0) return fallback
+		return Math.max(0, Math.min(3, Math.floor(number)))
+	}
+
+	function buildObservationTimingMeta(tabId, startedAt, requestOptions = {}) {
 		return {
 			tabId: Number(tabId) || 0,
 			elapsedMs: Math.max(0, Date.now() - Number(startedAt || Date.now())),
-			timeoutMs: OBSERVATION_MESSAGE_TIMEOUT_MS,
-			maxRetries: OBSERVATION_MESSAGE_MAX_RETRIES,
+			timeoutMs: Number(requestOptions.timeoutMs) || OBSERVATION_MESSAGE_TIMEOUT_MS,
+			maxRetries: Number.isFinite(Number(requestOptions.maxRetries))
+				? Number(requestOptions.maxRetries)
+				: OBSERVATION_MESSAGE_MAX_RETRIES,
+			mode: String(requestOptions.payload?.mode || 'full'),
 		}
 	}
 
-	function formatObservationError(error, tabId, startedAt) {
+	function formatObservationError(error, tabId, startedAt, requestOptions = {}) {
 		const message = String(error?.message || error || '无法读取页面状态')
 			.replace(/^Error:\s*/i, '')
 			.trim() || '无法读取页面状态'
-		const meta = buildObservationTimingMeta(tabId, startedAt)
-		return `${message}（观察耗时=${meta.elapsedMs}ms，单次超时=${meta.timeoutMs}ms，重试=${meta.maxRetries}，tab=${meta.tabId || '-'}）`
+		const meta = buildObservationTimingMeta(tabId, startedAt, requestOptions)
+		const mode = meta.mode && meta.mode !== 'full' ? `，模式=${meta.mode}` : ''
+		return `${message}（观察耗时=${meta.elapsedMs}ms，单次超时=${meta.timeoutMs}ms，重试=${meta.maxRetries}，tab=${meta.tabId || '-'}${mode}）`
 	}
 
 	async function executeAction(session, action) {
@@ -127,5 +165,6 @@
 		executeAction,
 		buildVisionDelegatedAction,
 		formatObservationError,
+		normalizeObservationRequestOptions,
 	}
 })(globalThis)

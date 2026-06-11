@@ -2,6 +2,7 @@
 	const plannerContext = g.NC_BG_PLANNER_CONTEXT
 	if (!plannerContext) throw new Error('NC_BG_PLANNER_CONTEXT 未加载。')
 	const actionContract = g.NC_ACTION_CONTRACT || null
+	const conversationMemory = g.NC_CONVERSATION_MEMORY || null
 	const { shortText } = plannerContext
 
 	function buildPlannerSystemPrompt() {
@@ -21,6 +22,8 @@
 			'<workflow_hints> 是系统根据历史和任务抽取出的轻量提示；其中搜索字段测试可能已由本地状态机接管，模型只在状态机无法决策时继续规划。',
 			'<workflow_hints> 只提供导航状态、候选摘要和上下文建议；除非明确标注状态机已完成，真正的页面内动作仍需要你结合当前页面元素和用户任务自行判断。',
 			'<workflow_hints> 中的 task_intent 表示已把用户需求拆成“导航目标”和“页面内动作”；不要把新增/详情/编辑/搜索等动作词拼进导航目标。',
+			'<conversation_memory> 只包含当前侧边栏对话内的较近事实，不是全局长期记忆；优先用于解析“刚才/上次/前面/这个/它”等指代，但涉及页面记录是否存在仍必须结合当前页面、接口或反馈验证。',
+			'若 <conversation_memory> 中最近创建/提交/保存事实为 failed/error/unknown，不得把它当作已创建成功；应说明失败事实、继续补救，或只把已填写字段值作为待验证查询候选。',
 			'用户任务文本只表示意图和候选目标，不是 DOM 证据；不要把任务里的模块名/字段名直接当作 target_label 或 index 命中依据，必须能在当前观察、<planning_context>、<workflow_hints> 的已验证状态里找到对应页面证据。',
 			'如果目标页面、字段或按钮只来自任务文本而当前观察缺少对应元素，应先 request_context/inspect_region/inspect_index 或 ask_user，而不是猜测点击、填值或 done。',
 			'若 <workflow_hints> 中 task_intent operation=search scope=all_matching_controls，表示用户要测试当前目标页面所有匹配的搜索/查询/筛选控件；应逐项覆盖，不要只测一个字段或把搜索功能当导航目标。',
@@ -108,6 +111,7 @@
 			'若历史出现 create_form_not_opened，禁止重复同一新增 index/label；换 content/dialog/popover 候选，或 inspect/locate_by_vision 受限查找页面主体列表工具栏新增按钮，排除表格行、导入开关、筛选项、侧边栏。',
 			'若历史出现表单重复/已存在/唯一约束错误，禁止重复提交原值或重新点新增；用户明确给出的值需 ask_user 确认新值。若错误只说“重复”但没有字段名，不要默认继续修改名称字段，应根据可见字段级错误/历史改动重新判断或询问用户。',
 			'<workflow_hints> 只作为参考；目标模块 unresolved 时先定位/进入目标模块，不要测试泛化搜索区。',
+			'<conversation_memory> 只来自当前侧边栏对话；优先解析“刚才/上次/这个/它”等指代，但失败/未确认的创建或提交不能当作成功事实。',
 			'用户任务文本只表示意图和候选目标，不是 DOM 证据；不要把任务里的模块名/字段名直接当作 target_label 或 index 命中依据，必须能在当前观察、<planning_context>、<workflow_hints> 的已验证状态里找到对应页面证据。',
 			'如果目标页面、字段或按钮只来自任务文本而当前观察缺少对应元素，应先 request_context/inspect_region/inspect_index 或 ask_user，而不是猜测点击、填值或 done。',
 			'若 <workflow_hints> 中 task_intent operation=search scope=all_matching_controls，应把目标页面所有匹配搜索/查询/筛选控件作为覆盖范围，逐项测试并在每项提交后清空。',
@@ -148,6 +152,7 @@
 			? ['<planning_context>', ...planningContext.map((item) => item.text), '</planning_context>'].join('\n')
 			: ''
 		const workflowText = String(workflowContextText || '').trim()
+		const memoryText = formatConversationMemoryForPrompt(session?.conversationMemory, compactMode)
 		const formattedTabs = formatTabsSummaryForPrompt(tabsSummary, compactMode)
 		const formattedToolLines = formatToolLinesForPrompt(toolLines, compactMode)
 		return [
@@ -166,6 +171,8 @@
 			'',
 			workflowText,
 			workflowText ? '' : null,
+			memoryText,
+			memoryText ? '' : null,
 			contextText,
 			'',
 			'<planning_tools>',
@@ -193,6 +200,15 @@
 			'  "action": { "name": "动作名", "input": {} }',
 			'}',
 		].filter((line) => line !== null && line !== undefined).join('\n')
+	}
+
+	function formatConversationMemoryForPrompt(memory, compactMode) {
+		if (!conversationMemory || typeof conversationMemory.formatConversationMemoryForPrompt !== 'function') return ''
+		return conversationMemory.formatConversationMemoryForPrompt(memory, {
+			compact: !!compactMode,
+			maxItems: compactMode ? 12 : 24,
+			maxChars: compactMode ? 3600 : 7000,
+		})
 	}
 
 	function formatTabsSummaryForPrompt(tabsSummary, compact) {

@@ -434,6 +434,7 @@
 		const startNewConversation = !!options.newConversation
 		const previousSessionId = currentSessionId
 		const runToken = createLocalId('run')
+		const conversationMemory = startNewConversation ? null : buildConversationMemoryForNextTask(task)
 		if (startNewConversation) {
 			resetConversationState()
 			state.traceItems = []
@@ -453,6 +454,7 @@
 				config: currentConfig,
 				controllerTabId: active.tabId,
 				windowId: active.windowId,
+				conversationMemory,
 			})
 
 			if (!response?.ok) {
@@ -470,6 +472,24 @@
 		} finally {
 			taskStarting = false
 			render()
+		}
+	}
+
+	function buildConversationMemoryForNextTask(task) {
+		const builder = globalThis.NC_CONVERSATION_MEMORY?.createConversationMemorySnapshot
+		if (typeof builder !== 'function') return null
+		try {
+			return builder({
+				task,
+				conversationId: currentConversationId,
+				turnCount: currentConversationTurnCount,
+				traceItems: state.traceItems,
+				resultSummary: state.resultSummary,
+				activityText: state.activityText,
+				createdAt: Date.now(),
+			})
+		} catch (_) {
+			return null
 		}
 	}
 

@@ -26,7 +26,7 @@ It observes the active page through structured DOM extraction, sends the current
 
 This is **not** a stealth automation toolkit or a CAPTCHA bypass project. The goal is transparent, debuggable, user-controlled browser automation for real web workflows.
 
-Current extension version: `0.6.56`. The source of truth is `naturalclick-extension/manifest.json`.
+Current extension version: `0.6.60`. The source of truth is `naturalclick-extension/manifest.json`.
 
 ## Install
 

@@ -1,5 +1,5 @@
 ;(function (g) {
-	const TASK_INTENT_VERSION = 13
+	const TASK_INTENT_VERSION = 15
 	const READY_STATUSES = new Set(['ready', 'failed', 'invalid', 'skipped'])
 	const DEFAULT_CREATE_ENTRY_LABELS = ['新增', '新建', '创建', '添加', '新 增']
 	const DEFAULT_DETAIL_ENTRY_LABELS = ['详情', '查看', '明细', '预览']
@@ -27,7 +27,9 @@
 			'17. “测试 X 的每一个搜索功能/搜索项/筛选条件”属于 search 操作，导航目标是 X；如果没有 X，不要把“每一个/所有/全部/搜索功能/搜索项/筛选条件”当导航目标。',
 			'18. 英文 “go/open/navigate to X and test/check every filter/search field” 这类并列句中，X 是导航目标，test/check every filter/search field 是页面内 search 操作。',
 			'19. operationScope 表示页面内动作覆盖范围；“每一个/每个/所有/全部/all/every/each 搜索项/筛选条件/字段”写 all_matching_controls。',
-			'20. 不确定时保守输出 unknown 或空数组，不要编造页面不存在的菜单。',
+			'20. 任务可能按 1./2./3. 分步书写，步骤编号和“帮我/请/麻烦”等礼貌词不是导航目标。',
+			'21. “查询/查看刚才创建/上次新增/前面保存的记录”是引用当前对话历史的查询或查看任务，不是新的 create 任务；具体对象应交给 conversation memory 和当前页面证据确认。',
+			'22. 不确定时保守输出 unknown 或空数组，不要编造页面不存在的菜单。',
 			'输出 JSON Schema:',
 			'{',
 			'  "url": "string|null",',
@@ -245,12 +247,30 @@
 			if (!target.canonical && !target.aliases.length) continue
 			if (!target.aliases.includes(target.canonical)) target.aliases.unshift(target.canonical)
 			target.aliases = uniqueStrings(target.aliases).slice(0, 12)
+			if (shouldDropPreviousActionReferenceNavigationTarget(target, operation, taskText)) continue
 			if (shouldDropReferentialRecordNavigationTarget(target, operation, taskText)) continue
 			if (shouldDropGenericRecordNavigationTarget(target, operation, taskText)) continue
 			if (shouldDropImplicitOperationObjectNavigationTarget(target, operation, taskText)) continue
 			targets.push(target)
 		}
 		return targets.slice(0, 5)
+	}
+
+	function shouldDropPreviousActionReferenceNavigationTarget(target, operation, taskText = '') {
+		const op = String(operation || '').trim()
+		if (op !== 'search' && op !== 'view_detail' && op !== 'view_first_record_detail') return false
+		if (!hasPreviousActionReference(taskText)) return false
+		const rawValues = [
+			target?.canonical,
+			target?.raw,
+			target?.entity,
+			...(Array.isArray(target?.aliases) ? target.aliases : []),
+		].map((item) => String(item || '').replace(/\s+/g, '').trim()).filter(Boolean)
+		if (!rawValues.length) return false
+		return rawValues.some((value) =>
+			/(?:刚才|刚刚|上次|上一(?:个|步|轮|次)|之前|前面|先前)/.test(value) ||
+			/(?:创建|新增|新建|添加|保存|提交|填写|录入)/.test(value)
+		)
 	}
 
 	function shouldDropReferentialRecordNavigationTarget(target, operation, taskText = '') {
@@ -368,18 +388,21 @@
 		const searchNoun = '(?:搜索|查询|筛选|过滤|search|query|filter)'
 		const searchObject = '(?:功能|条件|项|字段|控件|输入框|field|fields|control|controls|condition|conditions|input|inputs)?'
 		return new RegExp(`(?:每一个|每个|全部|所有|各个|all|every|each).{0,18}${searchNoun}${searchObject}`, 'i').test(text) ||
-			new RegExp(`${searchNoun}${searchObject}.{0,18}(?:每一个|每个|全部|所有|各个|all|every|each)`, 'i').test(text)
+			new RegExp(`${searchNoun}${searchObject}.{0,18}(?:每一个|每个|全部|所有|各个|all|every|each)`, 'i').test(text) ||
+			new RegExp(`${searchNoun}(?:区域|区|面板|area|panel|section).{0,24}(?:${searchNoun})?(?:字段|项|条件|控件|输入框|field|fields|control|controls|condition|conditions|input|inputs).{0,16}(?:功能|正常|可用|实现|work|works|available|implemented)`, 'i').test(text)
 	}
 
 	function normalizeOperation(value, taskText = '') {
 		const raw = getIntentKey(value)
+		const text = String(taskText || '')
+		if (isReferentialPreviousActionSearchText(text)) return 'search'
+		if (isReferentialPreviousActionViewText(text)) return 'view_detail'
 		if (/^(create|add|new|新增|新建|创建|添加|增加)$/.test(raw)) return 'create'
 		if (/^(edit|modify|update|编辑|修改|更新)$/.test(raw)) return 'edit'
 		if (/^(viewfirstrecorddetail|view_first_record_detail|firstdetail|查看第一条详情|第一条详情)$/.test(raw)) return 'view_first_record_detail'
 		if (/^(viewdetail|view_detail|detail|details|查看详情|详情|明细|查看|预览)$/.test(raw)) return 'view_detail'
 		if (/^(search|query|filter|搜索|查询|筛选|过滤)$/.test(raw)) return 'search'
 		if (/^(fillform|fill_form|填写|填入|填表|录入|补全|设置字段)$/.test(raw)) return 'fill_form'
-		const text = String(taskText || '')
 		if (/(第一条|第一行|首条|首行|第\s*1\s*[条行]).{0,20}(详情|明细|查看|预览)/i.test(text)) return 'view_first_record_detail'
 		if (/(新增|新建|创建|添加|增加)/.test(text)) return 'create'
 		if (/(编辑|修改|更新)/.test(text)) return 'edit'
@@ -387,6 +410,27 @@
 		if (/(详情|明细|查看|预览)/.test(text)) return 'view_detail'
 		if (/(搜索|查询|筛选|过滤|search|query|filter)/i.test(text)) return 'search'
 		return 'unknown'
+	}
+
+	function isReferentialPreviousActionSearchText(value) {
+		const text = String(value || '')
+		if (!hasPreviousActionReference(text)) return false
+		return /(查询|搜索|查找|找到|检索|筛选|过滤|query|search|find|lookup|filter)/i.test(text)
+	}
+
+	function isReferentialPreviousActionViewText(value) {
+		const text = String(value || '')
+		if (!hasPreviousActionReference(text)) return false
+		return /(查看|看一下|详情|明细|打开|预览|view|detail|details|open|inspect)/i.test(text)
+	}
+
+	function hasPreviousActionReference(value) {
+		const text = String(value || '').replace(/\s+/g, '')
+		if (!text) return false
+		const action = '(?:创建|新增|新建|添加|增加|保存|提交|填写|填入|录入|建过|加过|create|created|add|added|new|save|saved|submit|submitted|fill|filled)'
+		const temporal = '(?:刚才|刚刚|刚|上次|上一(?:个|步|轮|次)|之前|前面|前一步|先前|刚才那个|刚刚那个|刚才的|刚刚的|previous|last|just|earlier)'
+		return new RegExp(`${temporal}.{0,24}${action}`, 'i').test(text) ||
+			new RegExp(`${action}.{0,16}(?:的|过的|好的)?(?:这个|那个|该|它|其|记录|数据|信息|对象|条目|用户|项目|内容)?`, 'i').test(text) && new RegExp(temporal, 'i').test(text)
 	}
 
 	function normalizeRecordSelector(value, taskText = '') {
@@ -555,13 +599,14 @@
 			.replace(/[“”‘’"'`<>《》【】[\]()（）{}]/g, ' ')
 			.replace(/\s+/g, '')
 			.trim()
+		text = stripTaskStepPrefix(text)
 		text = stripLeadingNoise(text)
 		for (let i = 0; i < 4; i++) {
-			const next = stripNavigationContextSuffix(stripActionAffixes(stripLeadingNoise(text)))
+			const next = stripNavigationContextSuffix(stripActionAffixes(stripLeadingNoise(stripTaskStepPrefix(text))))
 			if (next === text) break
 			text = next
 		}
-		text = stripLeadingNoise(text)
+		text = stripLeadingNoise(stripTaskStepPrefix(text))
 		if (!text || text.length < 2 || text.length > 24) return ''
 		if (isGenericNavigationName(text)) return ''
 		return text
@@ -575,9 +620,10 @@
 		text = text.replace(/[“”‘’"'`<>《》【】[\]()（）{}]/g, ' ')
 			.replace(/\s+/g, '')
 			.trim()
+		text = stripTaskStepPrefix(text)
 		text = stripLeadingNoise(text)
 		for (let i = 0; i < 4; i++) {
-			const next = stripNavigationContextSuffix(stripLeadingNoise(text))
+			const next = stripNavigationContextSuffix(stripLeadingNoise(stripTaskStepPrefix(text)))
 			if (next === text) break
 			text = next
 		}
@@ -589,7 +635,7 @@
 	function stripLeadingNoise(value) {
 		let text = String(value || '').trim()
 		for (let i = 0; i < 4; i++) {
-			const next = text
+			const next = stripTaskStepPrefix(text)
 				.replace(/^[，。；;、,.!?！？:：\s]+/g, '')
 				.replace(/^(?:然后|接着|再|并且|同时|随后|现在|当前|马上|立即|帮我|请|麻烦|你|我|先|去|到|把|将|给我|一条|一个|一笔|一份|1条|1个)+/g, '')
 				.replace(/^(?:找到|找出|进入|打开|前往|切换到|定位到|在)\s*/g, '')
@@ -599,6 +645,25 @@
 			text = next
 		}
 		return text
+	}
+
+	function stripTaskStepPrefix(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^[（(]?\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.)．、:：]\s*/g, '')
+				.replace(/^第\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*步\s*[:：、.)．-]?\s*/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
+	}
+
+	function normalizeTaskTextForHeuristic(value) {
+		return String(value || '')
+			.replace(/(^|[\n\r])\s*[（(]?\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.)．、:：]\s*/g, '$1')
+			.replace(/(^|[\n\r])\s*第\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*步\s*[:：、.)．-]?\s*/g, '$1')
 	}
 
 	function stripActionAffixes(value) {
@@ -617,7 +682,7 @@
 	}
 
 	function looksLikeStructuredPageTask(taskText) {
-		const text = String(taskText || '')
+		const text = normalizeTaskTextForHeuristic(taskText)
 			.replace(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi, ' ')
 		if (/(新增|新建|创建|添加|增加|编辑|修改|更新|详情|明细|查看|预览|填写|填入|填表|录入|补全|第一条|第一行|首条|首行|第\s*1\s*[条行])/.test(text)) {
 			return true
@@ -630,7 +695,7 @@
 	}
 
 	function extractHeuristicTargetMatches(taskText, operation) {
-		const text = String(taskText || '')
+		const text = normalizeTaskTextForHeuristic(taskText)
 			.replace(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi, ' ')
 		const matches = []
 		collectNavigationClauseMatches(matches, text)
@@ -711,8 +776,9 @@
 	}
 
 	function normalizeHeuristicTargetCandidate(value) {
-		return trimToLastTaskNavigationVerb(String(value || ''))
+		return stripTaskStepPrefix(trimToLastTaskNavigationVerb(String(value || '')))
 			.replace(/^[，。；;、,.!?！？:：\s]+/g, '')
+			.replace(/^[（(]?\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.)．、:：]\s*/g, '')
 			.replace(/^(?:一条|一个|一笔|一份|1条|1个)/g, '')
 			.replace(/^(?:现在|当前|马上|立即)(?:帮我|给我|请|麻烦)?/g, '')
 			.replace(/^(?:帮我|给我|请|麻烦)/g, '')

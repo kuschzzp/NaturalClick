@@ -3856,7 +3856,7 @@
 	}
 
 	function extractTaskNavigationTargetKeys(session) {
-		const text = String(session?.latestTask || session?.task || '')
+		const text = normalizeTaskTextForNavigation(String(session?.latestTask || session?.task || ''))
 		const labels = []
 		const chineseTargetContext = '(?:部分|模块|页面|网页|页|区域|列表|面板|菜单|标签页|中|里|内|下)'
 		const chinesePatterns = [
@@ -3881,7 +3881,7 @@
 	}
 
 	function normalizeTaskTargetLabel(value) {
-		const raw = trimToLastTaskNavigationVerb(String(value || ''))
+		const raw = stripTaskStepPrefix(trimToLastTaskNavigationVerb(String(value || '')))
 			.replace(/[“”"']/g, '')
 			.replace(/\s+/g, ' ')
 			.trim()
@@ -3935,7 +3935,7 @@
 	function stripTaskNavigationLeadingNoise(value) {
 		let text = String(value || '').trim()
 		for (let i = 0; i < 4; i++) {
-			const next = text
+			const next = stripTaskStepPrefix(text)
 				.replace(/^(?:然后|接着|再|并且|同时|随后|帮我|请|麻烦|你|我|先|去|到|把|将|给我)+/g, '')
 				.replace(/^(?:找到|找出|进入|打开|前往|切换到|定位到|在|查看)\s*/g, '')
 				.trim()
@@ -3943,6 +3943,25 @@
 			text = next
 		}
 		return text
+	}
+
+	function stripTaskStepPrefix(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 4; i++) {
+			const next = text
+				.replace(/^[（(]?\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.)．、:：]\s*/g, '')
+				.replace(/^第\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*步\s*[:：、.)．-]?\s*/g, '')
+				.trim()
+			if (next === text) break
+			text = next
+		}
+		return text
+	}
+
+	function normalizeTaskTextForNavigation(value) {
+		return String(value || '')
+			.replace(/(^|[\n\r])\s*[（(]?\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.)．、:：]\s*/g, '$1')
+			.replace(/(^|[\n\r])\s*第\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*步\s*[:：、.)．-]?\s*/g, '$1')
 	}
 
 	function stripTaskNavigationActionNoise(value) {

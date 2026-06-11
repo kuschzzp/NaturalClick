@@ -105,7 +105,7 @@
 			if (!message || typeof message !== 'object') return
 
 			if (message.type === TYPES.OBSERVE) {
-				sendResponse(observer.observePage())
+				sendResponse(observer.observePage(message.payload || {}))
 				return
 			}
 

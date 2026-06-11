@@ -1,5 +1,6 @@
 importScripts(
 	'shared/protocol.js',
+	'shared/conversation-memory.js',
 	'shared/action-contract.js',
 	'shared/control-semantics.js',
 	'background/constants.js',
@@ -144,6 +145,9 @@ async function startTask(message, sender) {
 		const storedConfig = await loadConfig()
 		const overrideConfig = normalizeConfig(message.config || storedConfig)
 		const runtimeConfig = overrideConfig
+		const conversationMemory = globalThis.NC_CONVERSATION_MEMORY?.normalizeConversationMemorySnapshot?.(
+			message.conversationMemory || null
+		) || null
 
 		const sessionId = generateId('s')
 		const session = {
@@ -159,6 +163,7 @@ async function startTask(message, sender) {
 				? [{ id: generateId('t'), title: '页面准备', detail: preparedTab.notice, kind: 'step' }]
 				: [],
 			config: runtimeConfig,
+			conversationMemory,
 			step: 0,
 			history: [],
 			workflowState: preparedTab.initialNavigation

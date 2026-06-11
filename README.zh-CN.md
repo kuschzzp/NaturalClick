@@ -26,7 +26,7 @@ NaturalClick Agent 是一个 Chrome 扩展，它把浏览器侧边栏变成一�
 
 这不是隐蔽自动化工具，也不是 CAPTCHA 绕过项目。目标是透明、可调试、用户可控的真实网页自动化。
 
-当前扩展版本：`0.6.56`。版本号以 `naturalclick-extension/manifest.json` 为准。
+当前扩展版本：`0.6.60`。版本号以 `naturalclick-extension/manifest.json` 为准。
 
 ## 安装
 
