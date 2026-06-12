@@ -3582,6 +3582,7 @@
 
 	function inferFieldType({ label, placeholder, text, type, role }) {
 		const haystack = `${label} ${placeholder} ${text}`.toLowerCase()
+		if (/搜索|search/.test(haystack) || type === 'search') return 'search'
 		if (role === 'combobox' || type === 'select-one' || type === 'select-multiple') return 'select'
 		const temporalType = inferTemporalFieldTypeFromText(haystack)
 		if (temporalType) return temporalType
@@ -3597,7 +3598,6 @@
 		if (/用户名|账号|账户|登录名|user\s*name|username|account|login/.test(haystack)) return 'username'
 		if (/邮箱|email|mail/.test(haystack) || type === 'email') return 'email'
 		if (/姓名|真实姓名|name/.test(haystack)) return 'name'
-		if (/搜索|search/.test(haystack) || type === 'search') return 'search'
 		return ''
 	}
 

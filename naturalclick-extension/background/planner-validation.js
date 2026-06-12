@@ -1413,6 +1413,7 @@
 	function isSelectionLikeItem(item, source) {
 		if (controlSemantics?.isObservedSelectionLike) return controlSemantics.isObservedSelectionLike(item, source)
 		if (!item || typeof item !== 'object') return false
+		if (isEditableComboboxTextEntryItem(item, source)) return false
 		const role = String(item.role || '').toLowerCase()
 		const tag = String(item.tag || '').toLowerCase()
 		const control = String(item.selectionControl || '').toLowerCase()
@@ -1433,12 +1434,30 @@
 
 	function describeObservedControl(item, source) {
 		if (controlSemantics?.describeObservedControl) return controlSemantics.describeObservedControl(item, source)
+		const editableComboboxTextEntry = isEditableComboboxTextEntryItem(item, source)
 		return {
 			role: String(item?.role || '').toLowerCase(),
 			control: String(item?.selectionControl || item?.control || '').toLowerCase(),
 			fieldType: String(item?.fieldType || '').toLowerCase(),
-			selectionLike: isSelectionLikeItem(item, source),
+			selectionLike: editableComboboxTextEntry ? false : isSelectionLikeItem(item, source),
+			editableComboboxTextEntry,
 		}
+	}
+
+	function isEditableComboboxTextEntryItem(item, source) {
+		if (!item || typeof item !== 'object') return false
+		if (String(source || '').split(':')[0] === 'options' || String(source || '').split(':')[0] === 'popups') return false
+		if (item.editable !== true) return false
+		if (Array.isArray(item.optionLabels) && item.optionLabels.length) return false
+		const control = String(item.selectionControl || item.control || '').toLowerCase()
+		if (control && control !== '-') return false
+		const tag = String(item.tag || '').toLowerCase()
+		if (!['input', 'textarea', 'contenteditable'].includes(tag)) return false
+		const role = String(item.role || '').toLowerCase()
+		if (role && !['combobox', 'searchbox', 'textbox'].includes(role)) return false
+		const fieldType = String(item.fieldType || '').toLowerCase().replace(/[-_\s]+/g, '')
+		const dropdownTypes = new Set(['select', 'date', 'time', 'daterange', 'datetimerange', 'timerange', 'month', 'monthrange', 'year', 'yearrange', 'week', 'weekrange', 'datetime'])
+		return role === 'combobox' || role === 'searchbox' || !fieldType || !dropdownTypes.has(fieldType)
 	}
 
 	function getHistoryOutcome(item) {

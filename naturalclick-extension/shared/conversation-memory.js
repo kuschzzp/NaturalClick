@@ -17,6 +17,7 @@
 		for (let index = 0; index < traceItems.length; index += 1) {
 			collectTraceMemoryItems(items, traceItems[index], index)
 		}
+		appendConfirmedRecordFactMemory(items, traceItems, source.resultSummary)
 		appendResultSummaryMemory(items, source.resultSummary)
 		appendActivityMemory(items, source.activityText)
 		const maxItems = clampNumber(source.maxItems, 1, 80, DEFAULT_MAX_ITEMS)
@@ -179,6 +180,71 @@
 			order: 100000,
 			priority: status === 'failed' ? 100 : 88,
 		})
+	}
+
+	function appendConfirmedRecordFactMemory(out, traceItems, resultSummary) {
+		if (!isConfirmedFormTaskSummary(resultSummary)) return
+		const fields = collectSuccessfulFormFieldFacts(traceItems)
+		if (!fields.length) return
+		const summary = fields
+			.slice(0, 10)
+			.map((item) => `${item.label}=${item.value}`)
+			.join('；')
+		const primary = choosePrimaryRecordFactValue(fields)
+		pushMemoryItem(out, {
+			type: 'record_fact',
+			status: 'passed',
+			label: '最近确认记录',
+			value: primary ? `${primary.label}=${primary.value}` : '',
+			summary: `当前会话已确认完成一条表单/记录：${summary}`,
+			title: cleanText(resultSummary?.title || '表单完成事实', 120),
+			order: 99990,
+			priority: 112,
+		})
+	}
+
+	function isConfirmedFormTaskSummary(summary) {
+		if (!summary || typeof summary !== 'object') return false
+		if (normalizeStatus(summary.status) !== 'passed') return false
+		const type = cleanText(summary.type, 80)
+		if (type === 'form_task') return true
+		const text = cleanText([summary.title, summary.headline].filter(Boolean).join(' '), 500)
+		return /(表单任务完成|表单完成|创建完成|新增完成|保存完成|已创建|已新增|已保存|form task completed|form completed|created|saved)/i.test(text)
+	}
+
+	function collectSuccessfulFormFieldFacts(traceItems) {
+		const byLabel = new Map()
+		for (const item of Array.isArray(traceItems) ? traceItems : []) {
+			const action = item?.action && typeof item.action === 'object' ? item.action : null
+			if (!action?.name || !FIELD_ACTIONS.has(cleanText(action.name, 80))) continue
+			const input = action.input && typeof action.input === 'object' ? action.input : {}
+			if (!isFormFieldMemoryAction(input)) continue
+			if (deriveTraceStatus(item, action) !== 'passed') continue
+			const label = extractActionLabel(input)
+			const value = extractActionValue(input)
+			if (!isUsefulRecordFactPart(label) || !isUsefulRecordFactPart(value)) continue
+			byLabel.set(label, { label, value })
+		}
+		return Array.from(byLabel.values())
+	}
+
+	function isFormFieldMemoryAction(input) {
+		const workflow = cleanText(input?.workflow, 80)
+		const step = cleanText(input?.workflow_step, 120)
+		if (/^(login|search-fields|field-test|task-navigation|record-view|information-query)$/i.test(workflow)) return false
+		if (/^(form-fill|create-task)$/i.test(workflow)) return true
+		return /^(fill_form_field_timeout_recovery|fill_form_field_task_value|open_form_dropdown_timeout_recovery|choose_form_dropdown_timeout_recovery|select_cascader_path_timeout_recovery|select_visible_cascader_option_timeout_recovery|resolve_duplicate_field_conflict|resolve_field_validation_error)$/i.test(step)
+	}
+
+	function isUsefulRecordFactPart(value) {
+		const text = cleanText(value, 120)
+		if (!text) return false
+		return !/^(请选择|请输入|选择|输入|保存|提交|确定|取消|登录|密码|验证码|search|query|filter)$/i.test(text)
+	}
+
+	function choosePrimaryRecordFactValue(fields) {
+		const list = Array.isArray(fields) ? fields : []
+		return list.find((item) => /(账号|账户|用户名|编号|编码|名称|姓名|email|mail|name|code|id)/i.test(item.label)) || list[0] || null
 	}
 
 	function appendActivityMemory(out, activityText) {

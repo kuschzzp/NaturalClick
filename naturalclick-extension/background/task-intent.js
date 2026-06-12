@@ -1,5 +1,5 @@
 ;(function (g) {
-	const TASK_INTENT_VERSION = 15
+	const TASK_INTENT_VERSION = 16
 	const READY_STATUSES = new Set(['ready', 'failed', 'invalid', 'skipped'])
 	const DEFAULT_CREATE_ENTRY_LABELS = ['新增', '新建', '创建', '添加', '新 增']
 	const DEFAULT_DETAIL_ENTRY_LABELS = ['详情', '查看', '明细', '预览']
@@ -335,7 +335,7 @@
 		const context = '(?:部分|模块|页面|网页|页|区域|面板|菜单|标签页|列表|page|screen|view|section|area|panel|menu|module|tab)'
 		const navVerb = '(?:找到|找出|进入|打开|前往|切换到|定位到|访问|在|open|goto|goto|navigateto|visit|switchto|find|enter)'
 		const directNavVerb = '(?:找到|找出|进入|打开|前往|切换到|定位到|访问|到|open|goto|navigateto|visit|switchto|find|enter)'
-		const directBoundary = '(?:$|[，。；;、,.!?]|现在|当前|马上|立即|帮我|请|麻烦|然后|接着|再|并且|同时|随后|按|按照|根据|依照|基于|创建|新增|新建|添加|增加|编辑|修改|更新|查看|测试|验证|检查|搜索|查询|筛选|填写|填入|填表|录入|and|then|by|basedon|create|add|new|edit|update|view|test|search|query|filter|fill)'
+		const directBoundary = '(?:$|[，。；;、,.!?]|后|之后|以后|现在|当前|马上|立即|帮我|请|麻烦|然后|接着|再|并且|同时|随后|按|按照|根据|依照|基于|创建|新增|新建|添加|增加|编辑|修改|更新|查看|测试|验证|检查|搜索|查询|筛选|填写|填入|填表|录入|and|then|after|by|basedon|create|add|new|edit|update|view|test|search|query|filter|fill)'
 		const actionQualifier = '(?:新增|新建|创建|添加|增加|编辑|修改|更新|详情|明细|查看|预览|create|new|add|edit|update|detail|details|view)?'
 		if (new RegExp(`${navVerb}${escaped}${actionQualifier}${context}`, 'i').test(text)) return true
 		if (new RegExp(`${escaped}${actionQualifier}${context}(?:中|里|内|下)?`, 'i').test(text)) return true
@@ -602,7 +602,7 @@
 		text = stripTaskStepPrefix(text)
 		text = stripLeadingNoise(text)
 		for (let i = 0; i < 4; i++) {
-			const next = stripNavigationContextSuffix(stripActionAffixes(stripLeadingNoise(stripTaskStepPrefix(text))))
+			const next = stripNavigationSequenceSuffix(stripNavigationContextSuffix(stripActionAffixes(stripLeadingNoise(stripTaskStepPrefix(text)))))
 			if (next === text) break
 			text = next
 		}
@@ -681,6 +681,33 @@
 			.trim()
 	}
 
+	function stripNavigationSequenceSuffix(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 3; i++) {
+			const next = removeOneNavigationSequenceSuffix(text)
+			if (next === text) break
+			text = next
+		}
+		return text.trim()
+	}
+
+	function removeOneNavigationSequenceSuffix(value) {
+		const text = String(value || '').trim()
+		if (!text) return ''
+		const afterMatch = text.match(/^(.+?)(?:之后|以后|后再|后就)$/)
+		if (afterMatch?.[1] && isLikelyNavigationSequenceStem(afterMatch[1])) return afterMatch[1].trim()
+		const bareAfterMatch = text.match(/^(.+?)后$/)
+		if (bareAfterMatch?.[1] && isLikelyNavigationSequenceStem(bareAfterMatch[1])) return bareAfterMatch[1].trim()
+		return text
+	}
+
+	function isLikelyNavigationSequenceStem(value) {
+		const text = String(value || '').replace(/\s+/g, '').trim()
+		if (text.length < 2) return false
+		return /(?:管理|中心|模块|页面|网页|页|区域|列表|面板|菜单|标签页|系统|设置|配置|审批|报表|工具)$/i.test(text) ||
+			/(?:page|screen|view|section|area|panel|menu|module|tab)$/i.test(text)
+	}
+
 	function looksLikeStructuredPageTask(taskText) {
 		const text = normalizeTaskTextForHeuristic(taskText)
 			.replace(/https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi, ' ')
@@ -719,7 +746,9 @@
 		const boundary = '(?:^|[，。；;、\\s])'
 		const politePrefix = '(?:(?:现在|当前|马上|立即|帮我|请|麻烦|先|给我)\\s*)*'
 		const chineseTargetContext = '(?:部分|模块|页面|网页|页|区域|列表|面板|菜单|标签页|中|里|内|下)'
+		const nextAction = '(?:新增|新建|创建|添加|增加|编辑|修改|更新|查看|预览|测试|验证|检查|排查|搜索|查询|筛选|过滤|填写|填入|填表|录入)'
 		collectTargetMatches(out, text, /(?:找到|进入|打开|前往|切换到|定位到|访问|查看)\s*[“"']([^”"']{1,56})[”"']/g)
+		collectTargetMatches(out, text, new RegExp(`${boundary}${politePrefix}(?:找到|进入|打开|前往|切换到|定位到|访问|查看|在)\\s*([^，。；;、\\n\\r]{2,40}?)(?=(?:后|之后|以后)(?:再|就)?${nextAction})`, 'g'))
 		collectTargetMatches(out, text, new RegExp(`${boundary}${politePrefix}(?:找到|进入|打开|前往|切换到|定位到|访问|查看|在)\\s*([^，。；;、\\n\\r]{1,56}?)${chineseTargetContext}`, 'g'))
 		collectTargetMatches(out, text, /在\s*([^，。；;、\n\r]{2,40}?)(?=(?:新增|新建|创建|添加|增加|编辑|修改|更新|查看|预览|测试|验证|检查|排查|搜索|查询|筛选|过滤|填写|填入|填表|录入))/g)
 		collectTargetMatches(out, text, new RegExp(`${boundary}${politePrefix}(?:找到|进入|前往|切换到|定位到|访问)\\s*([^，。；;、\\n\\r]{2,40})(?=[，。；;、\\n\\r]|$)`, 'g'))
@@ -776,7 +805,7 @@
 	}
 
 	function normalizeHeuristicTargetCandidate(value) {
-		return stripTaskStepPrefix(trimToLastTaskNavigationVerb(String(value || '')))
+		const text = stripTaskStepPrefix(trimToLastTaskNavigationVerb(String(value || '')))
 			.replace(/^[，。；;、,.!?！？:：\s]+/g, '')
 			.replace(/^[（(]?\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})\s*[.)．、:：]\s*/g, '')
 			.replace(/^(?:一条|一个|一笔|一份|1条|1个)/g, '')
@@ -788,6 +817,7 @@
 			.replace(/(?:新增|新建|创建|添加|增加|编辑|修改|更新|填写|填入|填表|录入|查看|预览|测试一下|测试|验证一下|验证|检查一下|检查|排查一下|排查|搜索|查询|筛选|过滤).+$/g, '')
 			.replace(/(?:并|且|然后|再|接着)?(?:测试|验证|检查|排查)(?:一下|下)?.*$/g, '')
 			.trim()
+		return stripNavigationSequenceSuffix(text)
 	}
 
 	function trimToLastTaskNavigationVerb(value) {

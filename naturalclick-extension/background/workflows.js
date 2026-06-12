@@ -28,10 +28,13 @@
 		return_after_record_view: 'record-view',
 		finish_record_view: 'record-view',
 		fill_form_field_timeout_recovery: 'form-fill',
+		fill_form_field_task_value: 'form-fill',
 		open_form_dropdown_timeout_recovery: 'form-fill',
 		choose_form_dropdown_timeout_recovery: 'form-fill',
 		select_cascader_path_timeout_recovery: 'form-fill',
 		select_visible_cascader_option_timeout_recovery: 'form-fill',
+		open_external_value_lookup_source: 'form-fill',
+		return_to_main_task_with_task_value: 'form-fill',
 		submit_form_timeout_recovery: 'form-fill',
 		resolve_duplicate_field_conflict: 'form-fill',
 		resolve_field_validation_error: 'form-fill',
@@ -50,6 +53,11 @@
 			name: 'login',
 			run: (session, observation) =>
 				loginWorkflow.deriveLoginWorkflowDecision(session, observation),
+		},
+		{
+			name: 'task-value-return',
+			run: (session, observation, context) =>
+				deriveTaskValueReturnToMainTabDecision(session, observation, context),
 		},
 		{
 			name: 'task-navigation',
@@ -79,10 +87,14 @@
 	]
 
 	const PRE_INTENT_WORKFLOWS = [
-		PRE_MODEL_WORKFLOWS[0],
-		PRE_MODEL_WORKFLOWS[1],
-		PRE_MODEL_WORKFLOWS[4],
-	]
+		getPreModelWorkflowByName('target-url'),
+		getPreModelWorkflowByName('login'),
+		getPreModelWorkflowByName('search-fields'),
+	].filter(Boolean)
+
+	function getPreModelWorkflowByName(name) {
+		return PRE_MODEL_WORKFLOWS.find((workflow) => workflow?.name === name) || null
+	}
 
 	const TIMEOUT_RECOVERY_WORKFLOWS = [
 		{
@@ -104,6 +116,8 @@
 				deriveFailedCascaderPathRetryTimeoutDecision(session, observation) ||
 				deriveFormAssignedFieldTimeoutDecision(session, observation) ||
 				deriveFormCascaderTimeoutDecision(session, observation) ||
+				deriveTaskValueExternalLookupDecision(session, observation) ||
+				deriveTaskValueMemoryFieldDecision(session, observation) ||
 				deriveFormSubmitTimeoutDecision(session, observation),
 		},
 		{
@@ -145,6 +159,10 @@
 	}
 
 	function derivePostContextWorkflowDecision(session, workflowContextText, planningContext, context = {}) {
+		const navigationRecovery = deriveNavigationPostContextDecision(session, context?.observation, planningContext)
+		if (navigationRecovery) return annotateWorkflowDecision(navigationRecovery, 'task-navigation')
+		const requiredSelectionRecovery = deriveRequiredSelectionPostContextDecision(session, context?.observation, planningContext)
+		if (requiredSelectionRecovery) return annotateWorkflowDecision(requiredSelectionRecovery, 'form-fill')
 		const informationRecovery = deriveInformationQueryPostContextDecision(session, workflowContextText, planningContext, context)
 		if (informationRecovery) return annotateWorkflowDecision(informationRecovery, 'information-query')
 		if (typeof searchWorkflow.deriveSearchPostContextDecision !== 'function') return null
@@ -170,6 +188,8 @@
 			deriveFailedCascaderPathRetryTimeoutDecision(session, observation) ||
 			deriveFormAssignedFieldTimeoutDecision(session, observation) ||
 			deriveFormCascaderTimeoutDecision(session, observation) ||
+			deriveTaskValueExternalLookupDecision(session, observation) ||
+			deriveTaskValueMemoryFieldDecision(session, observation) ||
 			deriveFormSubmitTimeoutDecision(session, observation)
 		return decision ? adaptPreModelFormFillDecision(decision) : null
 	}
@@ -221,6 +241,12 @@
 			if (String(line || '').trim()) lines.push(line)
 		}
 		for (const line of buildCreateTaskHintLines(session, observation, expectedKeys, state)) {
+			if (String(line || '').trim()) lines.push(line)
+		}
+		for (const line of buildRequiredSelectionHintLines(session, observation)) {
+			if (String(line || '').trim()) lines.push(line)
+		}
+		for (const line of buildTaskValueHintLines(session, observation, expectedKeys, state)) {
 			if (String(line || '').trim()) lines.push(line)
 		}
 		for (const line of buildInformationQueryHintLines(session, observation)) {
@@ -293,7 +319,9 @@
 		const unresolved = getExpectedNavigationKeys(session, state)
 			.filter((key) => !isNavigationTargetReachedForSession(session, observation, key, state))
 		if (!unresolved.length) return null
-		const revealDecision = buildNavigationRevealDecision(state, observation, unresolved, '模型规划超时')
+		const revealDecision = buildNavigationRevealDecision(state, observation, unresolved, '模型规划超时', {
+			allowExploratory: true,
+		})
 		if (revealDecision) return revealDecision
 		const missingContextDecision = buildMissingNavigationContextDecision(session, observation, unresolved)
 		if (missingContextDecision) return missingContextDecision
@@ -325,6 +353,24 @@
 		if (unresolved.length) return null
 		if (hasRecordCreateFormOpen(observation)) return null
 		if (hasRecentExecutedFormSubmitClick(session)) {
+			const submitBlocker = getVisibleFormCompletionBlockerText(observation)
+			if (submitBlocker) {
+				return {
+					evaluation_previous_goal: `最近已执行过当前创建表单的提交动作，但页面仍有错误/校验反馈：${submitBlocker}`,
+					memory: '提交后不能仅凭表单未出现就判定成功；若页面仍有错误反馈，应停止并报告未完成原因。',
+					thought: '表单提交后的错误反馈优先级高于 DOM 消失/变化，继续宣称成功会误导用户。',
+					next_goal: '停止创建任务并报告提交失败',
+					action: {
+						name: 'done',
+						input: {
+							success: false,
+							text: `表单提交未成功确认：${submitBlocker}`,
+							workflow: 'create-task',
+							workflow_step: 'finish_create_after_submit_no_form',
+						},
+					},
+				}
+			}
 			return {
 				evaluation_previous_goal: '最近已执行过当前创建表单的提交动作，且当前观察中已没有新增表单。',
 				memory: '提交后表单消失时，不再自动重新点击新增入口，避免重复创建同一条数据。',
@@ -454,9 +500,26 @@
 	}
 
 	function deriveInvalidFormFieldCorrectionDecision(session, observation) {
-		const candidates = collectObservedFormControlItems(observation)
+		const fields = collectObservedFormControlItems(observation)
 			.filter(isPageFormField)
 			.filter((field) => Number.isFinite(Number(field.index)))
+		const requiredSelection = collectRequiredSelectionValidationTargets(session, observation)
+		for (const match of requiredSelection) {
+			const answered = buildRequiredSelectionAnswerDecision(session, observation, match)
+			if (answered) return answered
+			const visibleOption = chooseSingleVisibleRequiredOption(session, observation, match.field)
+			if (visibleOption) return buildValidationChooseDropdownDecision(match.index, match.label, visibleOption, match.errorText)
+			const nativeOption = isCascaderFormField(match.field) ? '' : chooseSingleNativeRequiredOption(match.field)
+			const recentAttempt = hasRecentRequiredSelectionValidationAttempt(session, match.index, match.errorText)
+			if (nativeOption && !recentAttempt) {
+				return buildValidationChooseDropdownDecision(match.index, match.label, nativeOption, match.errorText)
+			}
+			if (!recentAttempt) return buildValidationOpenDropdownDecision(match.index, match.label, match.errorText)
+			if (shouldDeferRequiredSelectionToContext(session, observation, match)) continue
+			const userInputDecision = buildRequiredSelectionUserInputDecision(session, observation, match)
+			if (userInputDecision) return userInputDecision
+		}
+		const candidates = fields
 			.filter((field) => isPlainTextFormField(field))
 			.map((field) => {
 				const errorText = getFieldValidationErrorText(field)
@@ -493,6 +556,462 @@
 					workflow_validation_error: shortWorkflowText(match.errorText, 120),
 					workflow_value_source: 'page_validation',
 					workflow_value_basis: shortWorkflowText(match.errorText, 120),
+				},
+			},
+		}
+	}
+
+	function collectRequiredSelectionValidationTargets(session, observation) {
+		const recentSubmitValidationText = getRecentFormSubmitFailureValidationText(session)
+		return collectObservedFormControlItems(observation)
+			.filter(isPageFormField)
+			.filter((field) => Number.isFinite(Number(field.index)))
+			.filter((field) => isRequiredSelectionControlField(field))
+			.map((field) => {
+				const errorText = getFieldValidationErrorText(field)
+				return {
+					field,
+					errorText,
+					index: Number(field.index),
+					label: normalizeFormFieldLabel(getObservedItemLabel(field)) || '该字段',
+				}
+			})
+			.filter((item) => isRequiredSelectionValidationTarget(item.field, item.errorText, recentSubmitValidationText))
+			.sort((a, b) => getFormFieldOrderScore(a.field) - getFormFieldOrderScore(b.field))
+	}
+
+	function buildRequiredSelectionHintLines(session, observation) {
+		if (!isCreateOrFormFillTask(session)) return []
+		if (!hasRecordCreateFormOpen(observation)) return []
+		const lines = []
+		for (const match of collectRequiredSelectionValidationTargets(session, observation)) {
+			const recentAttempt = hasRecentRequiredSelectionValidationAttempt(session, match.index, match.errorText)
+			if (!recentAttempt) continue
+			const visibleLabels = collectVisibleRequiredSelectionOptionLabels(session, observation, match.field)
+			const nativeLabels = isCascaderFormField(match.field) ? [] : collectNativeRequiredOptionLabels(match.field)
+			if (visibleLabels.length || nativeLabels.length) continue
+			if (hasRecentRequiredSelectionAsk(session, match.index, match.errorText)) continue
+			lines.push(
+				`- form_required_selection_requirement status="candidates_unobserved" field="${escapeAttr(match.label)}" activeIndex="${match.index}" error="${escapeAttr(shortWorkflowText(match.errorText || 'required selection empty', 120))}" guidance="required selection was opened but no stable field-owned candidates were observed; request_options_for this index before repeating dropdown clicks or guessing."`
+			)
+		}
+		return lines
+	}
+
+	function isCreateOrFormFillTask(session) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		const operation = taskIntent?.getOperation?.(session) || ''
+		if (['create', 'edit', 'fill'].includes(operation)) return true
+		if (isCreateTask(taskText)) return true
+		return /(填写|录入|编辑|修改|补充|保存|提交).*(表单|字段|信息|记录|资料)?/i.test(taskText)
+	}
+
+	function shouldDeferRequiredSelectionToContext(session, observation, match) {
+		if (!match) return false
+		if (!hasRecentRequiredSelectionValidationAttempt(session, match.index, match.errorText)) return false
+		if (hasRecentRequiredSelectionAsk(session, match.index, match.errorText)) return false
+		if (collectVisibleRequiredSelectionOptionLabels(session, observation, match.field).length) return false
+		if (!isCascaderFormField(match.field) && collectNativeRequiredOptionLabels(match.field).length) return false
+		return true
+	}
+
+	function hasUnresolvedRequiredSelectionValidation(session, observation) {
+		return collectRequiredSelectionValidationTargets(session, observation).some((match) =>
+			shouldDeferRequiredSelectionToContext(session, observation, match) ||
+			(!chooseSingleVisibleRequiredOption(session, observation, match.field) &&
+				(isCascaderFormField(match.field) || !chooseSingleNativeRequiredOption(match.field)))
+		)
+	}
+
+	function deriveRequiredSelectionPostContextDecision(session, observation, planningContext) {
+		if (!isCreateOrFormFillTask(session)) return null
+		if (!hasRecordCreateFormOpen(observation)) return null
+		for (const match of collectRequiredSelectionValidationTargets(session, observation)) {
+			if (!hasRecentRequiredSelectionValidationAttempt(session, match.index, match.errorText)) continue
+			const contextOptions = collectRequiredSelectionContextOptions(planningContext, match)
+			if (!contextOptions.requested) continue
+			const labels = contextOptions.labels
+			if (labels.length === 1) {
+				const decision = buildValidationChooseDropdownDecision(match.index, match.label, labels[0], match.errorText)
+				decision.evaluation_previous_goal = `必填选择字段 "${match.label}" 展开后未稳定暴露候选，内部上下文补采集到唯一安全候选 "${labels[0]}"。`
+				decision.memory = `使用 request_options_for 补充的字段候选选择 "${match.label}"，避免重复展开同一下拉。`
+				decision.thought = '候选来自目标字段上下文，且过滤占位/诊断项后唯一，可以受限自动选择。'
+				decision.action.input.workflow_value_source = 'context_options'
+				decision.action.input.workflow_value_basis = 'request_options_for 字段候选上下文'
+				decision.action.input.workflow_context_recovered = true
+				return decision
+			}
+			const userInputDecision = buildRequiredSelectionUserInputDecision(session, observation, match, labels)
+			if (userInputDecision) {
+				userInputDecision.evaluation_previous_goal = labels.length
+					? `必填选择字段 "${match.label}" 补采集到多个候选，任务没有指定取值。`
+					: `必填选择字段 "${match.label}" 展开和补采集后仍没有稳定候选。`
+				userInputDecision.memory = labels.length
+					? `request_options_for 已拿到字段候选，但存在多个可选值，必须由用户确认。`
+					: `request_options_for 也没有拿到稳定候选，停止猜测并询问用户。`
+				userInputDecision.action.input.workflow_context_recovered = true
+				userInputDecision.action.input.workflow_value_basis = labels.length
+					? 'request_options_for 返回多个字段候选'
+					: 'request_options_for 未返回稳定字段候选'
+				return userInputDecision
+			}
+		}
+		return null
+	}
+
+	function collectRequiredSelectionContextOptions(planningContext, match) {
+		const context = findLatestRequiredSelectionOptionsContext(planningContext, match)
+		if (!context) return { requested: false, labels: [] }
+		return {
+			requested: true,
+			labels: extractRequiredSelectionContextLabels(String(context.text || ''), match.field),
+		}
+	}
+
+	function findLatestRequiredSelectionOptionsContext(planningContext, match) {
+		const contexts = Array.isArray(planningContext) ? planningContext : []
+		const targetIndex = Number(match?.index)
+		if (!Number.isFinite(targetIndex)) return null
+		for (let index = contexts.length - 1; index >= 0; index -= 1) {
+			const context = contexts[index]
+			if (String(context?.name || '').trim() !== 'request_options_for') continue
+			const inputIndex = Number(context?.input?.index ?? extractContextAttr(context?.text || '', 'index'))
+			if (Number.isFinite(inputIndex) && inputIndex !== targetIndex) continue
+			const text = String(context?.text || '')
+			if (text && !new RegExp(`<options_for\\b[^>]*index="${targetIndex}"`).test(text) && Number.isFinite(inputIndex) && inputIndex !== targetIndex) continue
+			return context
+		}
+		return null
+	}
+
+	function extractRequiredSelectionContextLabels(text, field) {
+		const labels = []
+		const addLabel = (value) => {
+			const label = decodeContextText(cleanAssignmentValue(value))
+			if (isSafeRequiredSelectionOptionLabel(label, field) && !labels.includes(label)) labels.push(label)
+		}
+		for (const section of extractContextSections(text, 'native_options')) {
+			for (const label of extractOptionLabelsFromContextBody(section.body)) addLabel(label)
+		}
+		for (const section of [
+			...extractContextSections(text, 'visible_options'),
+			...extractContextSections(text, 'visible_popups'),
+		]) {
+			if (!isUsableRequiredSelectionContextScope(section.attrs)) continue
+			for (const label of extractOptionLabelsFromContextBody(section.body)) addLabel(label)
+		}
+		for (const section of extractContextSections(text, 'target_matches')) {
+			for (const rawLine of String(section.body || '').split(/\n+/)) {
+				const options = extractContextAttr(rawLine, 'options')
+				if (!options) continue
+				for (const label of options.split('|')) addLabel(label)
+			}
+		}
+		return labels
+	}
+
+	function extractContextSections(text, tagName) {
+		const sections = []
+		const tag = escapeRegExp(tagName)
+		const pattern = new RegExp(`<${tag}\\b([^>]*)>([\\s\\S]*?)<\\/${tag}>`, 'gi')
+		for (const match of String(text || '').matchAll(pattern)) {
+			sections.push({
+				attrs: String(match[1] || ''),
+				body: String(match[2] || ''),
+			})
+		}
+		return sections
+	}
+
+	function extractOptionLabelsFromContextBody(body) {
+		const labels = []
+		for (const rawLine of String(body || '').split(/\n+/)) {
+			const line = rawLine.trim()
+			if (!line) continue
+			const attrLabel = extractContextAttr(line, 'label')
+			if (attrLabel) {
+				labels.push(attrLabel)
+				continue
+			}
+			const optionMatch = line.match(/^(?:[-*]\s*)?(?:option|candidate|item)\s*(?:index=\d+|\d+)?\s*:?\s*(.+)$/i)
+			if (optionMatch?.[1]) labels.push(optionMatch[1])
+		}
+		return labels
+	}
+
+	function isUsableRequiredSelectionContextScope(attrs) {
+		const text = getNavigationKey([
+			extractContextAttr(attrs, 'scoped'),
+			extractContextAttr(attrs, 'scope'),
+			attrs,
+		].filter(Boolean).join(' '))
+		if (/(diagnostic|globalfallback|globalpopup|globalselectable|unscoped|external)/.test(text)) return false
+		if (!text) return true
+		return /(explicit|field|active|owned|target|native|controlled|aria|geometry|popup)/.test(text)
+	}
+
+	function decodeContextText(value) {
+		return String(value || '')
+			.replace(/&quot;/g, '"')
+			.replace(/&amp;/g, '&')
+			.replace(/&lt;/g, '<')
+			.replace(/&gt;/g, '>')
+	}
+
+	function isRequiredSelectionControlField(field) {
+		return isDropdownFormField(field) || isCascaderFormField(field)
+	}
+
+	function isRequiredSelectionValidationTarget(field, errorText, submitErrorText = '') {
+		if (!field || !isEmptyFormField(field)) return false
+		const required = field.required === true || String(field.required || '').toLowerCase() === 'true'
+		const invalid = field.invalid === true || String(field.invalid || '').toLowerCase() === 'true'
+		const error = String(errorText || '').trim()
+		const submitError = String(submitErrorText || '').trim()
+		const label = normalizeFormFieldLabel(getObservedItemLabel(field))
+		const labelKey = getNavigationKey(label)
+		const submitKey = getNavigationKey(submitError)
+		const submitMentionsField = !!labelKey && !!submitKey && submitKey.includes(labelKey)
+		const requiredTextPattern = /(必填|不能为空|请选择|选择|未选择|required|please\s+select|must\s+select)/i
+		const submitHasRequiredSignal = requiredTextPattern.test(submitError)
+		if (!invalid && !error && !(submitMentionsField && submitHasRequiredSignal)) return false
+		if (invalid) return true
+		if (required && (error || (submitMentionsField && submitHasRequiredSignal))) return true
+		return requiredTextPattern.test([error, submitError].filter(Boolean).join(' '))
+	}
+
+	function chooseSingleNativeRequiredOption(field) {
+		const unique = collectNativeRequiredOptionLabels(field)
+		return unique.length === 1 ? unique[0] : ''
+	}
+
+	function collectNativeRequiredOptionLabels(field) {
+		const labels = (Array.isArray(field?.optionLabels) ? field.optionLabels : [])
+			.map((item) => cleanAssignmentValue(item))
+			.filter(Boolean)
+			.filter((item) => isSafeRequiredSelectionOptionLabel(item, field))
+		return [...new Set(labels)]
+	}
+
+	function isSafeRequiredSelectionOptionLabel(label, field) {
+		const text = cleanAssignmentValue(label)
+		if (!text) return false
+		const key = getNavigationKey(text)
+		const fieldLabel = getNavigationKey(getObservedItemLabel(field))
+		if (!key || key === fieldLabel) return false
+		if (/^(请选择|请选择一项|选择|全部|任意|不限|空|无|none|null|empty|select|pleasechoose|pleaseselect|choose)$/i.test(key)) return false
+		if (/请选择|please\s+select|choose\s+one/i.test(text)) return false
+		return true
+	}
+
+	function buildValidationOpenDropdownDecision(index, label, errorText) {
+		return {
+			evaluation_previous_goal: `当前必填选择字段 "${label}" 仍未选择：${errorText || '页面提示需要选择'}`,
+			memory: `使用通用表单校验恢复策略，先展开必填选择字段 "${label}" 获取真实候选。`,
+			thought: '提交后页面给出字段级必填/选择校验；必须先读取真实候选，避免臆造选项。',
+			next_goal: `展开${label}`,
+			action: {
+				name: 'open_dropdown',
+				input: {
+					index,
+					target_label: label,
+					workflow_step: 'resolve_field_validation_error',
+					workflow_field_label: label,
+					workflow_validation_error: shortWorkflowText(errorText || 'required selection empty', 120),
+					workflow_value_source: 'page_validation',
+					workflow_value_basis: '必填选择字段为空，需展开真实候选',
+				},
+			},
+		}
+	}
+
+	function buildValidationChooseDropdownDecision(index, label, value, errorText) {
+		return {
+			evaluation_previous_goal: `当前必填选择字段 "${label}" 仍未选择，且字段自身只暴露一个安全候选 "${value}"。`,
+			memory: `使用通用表单校验恢复策略，选择字段 "${label}" 的唯一真实候选。`,
+			thought: '候选来自字段自身 optionLabels，且过滤占位项后唯一，可受限自动选择。',
+			next_goal: `选择${label}`,
+			action: {
+				name: 'choose_dropdown_option',
+				input: {
+					index,
+					text: value,
+					target_label: label,
+					workflow_step: 'resolve_field_validation_error',
+					workflow_field_label: label,
+					workflow_validation_error: shortWorkflowText(errorText || 'required selection empty', 120),
+					workflow_value_source: 'page_validation',
+					workflow_value_basis: '字段自身唯一安全候选',
+				},
+			},
+		}
+	}
+
+	function buildRequiredSelectionAnswerDecision(session, observation, match) {
+		const answer = getRecentRequiredSelectionAnswer(session, match.label, match.index, match.errorText)
+		if (!answer.value && !answer.cancelled) return null
+		if (answer.cancelled) {
+			return {
+				evaluation_previous_goal: `字段 "${match.label}" 是必填选择项，但用户取消了继续补充。`,
+				memory: '必填选择项缺少明确取值，且用户取消补充；停止提交，避免创建错误记录。',
+				thought: '必填选择字段不能靠猜测补齐，用户取消后应明确失败。',
+				next_goal: '停止表单提交',
+				action: {
+					name: 'done',
+					input: {
+						success: false,
+						text: `表单提交失败：字段「${match.label}」是必填选择项，页面提示「${match.errorText || '需要选择'}」，但缺少可用取值。`,
+					},
+				},
+			}
+		}
+		const visible = chooseVisibleRequiredOptionForValue(session, observation, match.field, answer.value)
+		if (visible) {
+			const decision = buildValidationChooseDropdownDecision(match.index, match.label, visible, match.errorText)
+			decision.evaluation_previous_goal = `用户已为必填选择字段 "${match.label}" 提供取值 "${answer.value}"，且该候选当前可见。`
+			decision.memory = `使用用户补充的值选择字段 "${match.label}"。`
+			decision.action.input.workflow_value_source = 'user_input'
+			decision.action.input.workflow_value_basis = '用户提供的必填选择值'
+			decision.action.input.workflow_requested_text = answer.value
+			return decision
+		}
+		if (!hasRecentRequiredSelectionAnswerOpenAttempt(session, match.index, answer.value)) {
+			const decision = buildValidationOpenDropdownDecision(match.index, match.label, match.errorText)
+			decision.evaluation_previous_goal = `用户已为必填选择字段 "${match.label}" 提供取值 "${answer.value}"，但当前还没有看到匹配候选。`
+			decision.memory = `先重新展开字段 "${match.label}"，用用户提供的取值匹配真实候选。`
+			decision.action.input.workflow_value_source = 'user_input'
+			decision.action.input.workflow_value_basis = '用户提供的必填选择值'
+			decision.action.input.workflow_requested_text = answer.value
+			return decision
+		}
+		return {
+			evaluation_previous_goal: `用户为字段 "${match.label}" 提供了取值 "${answer.value}"，但页面候选中仍未看到可匹配项。`,
+			memory: '已避免继续猜测不可见选项；需要用户换一个页面真实存在的候选值，或手动处理后继续。',
+			thought: '用户给定值和当前候选不匹配，继续选择会被执行前校验拦截。',
+			next_goal: `询问${match.label}的可用候选`,
+			action: {
+				name: 'ask_user',
+				input: {
+					question: `字段「${match.label}」需要选择，但我没有在当前候选中找到「${answer.value}」。请回复页面真实存在的候选值；如果不继续请回复“取消”。`,
+					reason: `字段「${match.label}」是必填选择项，用户给定值「${answer.value}」未匹配当前可见候选。`,
+					placeholder: answer.value,
+					timeout_ms: 120000,
+					workflow_step: 'resolve_field_validation_error',
+					workflow_field_label: match.label,
+					workflow_field_index: match.index,
+					workflow_validation_error: shortWorkflowText(match.errorText || 'required selection empty', 120),
+					workflow_value_source: 'user_input_required',
+					workflow_requested_text: answer.value,
+				},
+			},
+		}
+	}
+
+	function chooseSingleVisibleRequiredOption(session, observation, field) {
+		const labels = collectVisibleRequiredSelectionOptionLabels(session, observation, field)
+		const unique = [...new Set(labels)]
+		return unique.length === 1 ? unique[0] : ''
+	}
+
+	function chooseVisibleRequiredOptionForValue(session, observation, field, value) {
+		const requested = cleanAssignmentValue(value)
+		if (!requested) return ''
+		const matches = collectVisibleRequiredSelectionOptionLabels(session, observation, field)
+			.filter((label) => labelsMatchAssignedValue(label, requested))
+		const unique = [...new Set(matches)]
+		return unique.length === 1 ? unique[0] : ''
+	}
+
+	function collectVisibleRequiredSelectionOptionLabels(session, observation, field) {
+		const fieldIndex = Number(field?.index)
+		if (!Number.isFinite(fieldIndex)) return []
+		const strong = []
+		const active = []
+		for (const item of collectVisibleSelectionOptionItems(observation)) {
+			if (Number(item?.index) === fieldIndex) continue
+			const label = cleanAssignmentValue(getObservedItemLabel(item))
+			if (!isSafeRequiredSelectionOptionLabel(label, field)) continue
+			const scope = getRequiredSelectionOptionScope(item, field)
+			if (scope === 'strong') strong.push(label)
+			else if (scope === 'active') active.push(label)
+		}
+		const source = strong.length ? strong : active
+		return [...new Set(source)]
+	}
+
+	function getRequiredSelectionOptionScope(item, field) {
+		if (item?.ambiguous === true || item?.owner === 'ambiguous') return ''
+		const diagnosticText = getNavigationKey([
+			item?.scoped,
+			item?.scope,
+			item?.ownerEvidence,
+			item?.source,
+			item?.relationHints,
+			item?.popupHints,
+		].filter(Boolean).join(' '))
+		if (/(diagnostic|globalfallback|globalpopup|globalselectable|unscoped|fieldexternal|externalcandidate)/.test(diagnosticText)) return ''
+		const fieldIndex = Number(field?.index)
+		const ownerIndex = Number(item?.ownerIndex ?? item?.owner_index ?? item?.fieldIndex ?? item?.targetIndex)
+		if (Number.isFinite(ownerIndex) && ownerIndex === fieldIndex) return 'strong'
+		const fieldLabel = getNavigationKey(getObservedItemLabel(field))
+		const ownerLabel = getNavigationKey(item?.ownerLabel || item?.fieldLabel || item?.targetLabel || item?.owner || '')
+		if (fieldLabel && ownerLabel && (ownerLabel === fieldLabel || ownerLabel.includes(fieldLabel) || fieldLabel.includes(ownerLabel))) return 'strong'
+		if (/(fieldscoped|explicit|geometry|controlled|popuplabelledby|aria)/.test(diagnosticText)) return 'strong'
+		if (!isObservedSelectionFieldOpen(field)) return ''
+		const region = getNavigationKey(item?.region)
+		const role = getNavigationKey(item?.role)
+		const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control || item?.kind || item?.fieldType)
+		if (region === 'popover' && (/^(option|menuitem|treeitem)$/.test(role) || /(option|select|dropdown|cascader|checkbox|radio)/.test(control))) return 'active'
+		return ''
+	}
+
+	function isObservedSelectionFieldOpen(field) {
+		const text = getNavigationKey([
+			field?.expandedState,
+			field?.stateHints,
+			field?.popupHints,
+			field?.relationHints,
+			field?.ariaExpanded,
+			field?.expanded,
+		].filter((part) => part !== undefined && part !== null).join(' '))
+		return /(expanded|open|opened|visible|active|true|展开|打开)/i.test(text)
+	}
+
+	function buildRequiredSelectionUserInputDecision(session, observation, match, contextLabels = []) {
+		if (hasRecentRequiredSelectionAsk(session, match.index, match.errorText)) return null
+		const supplied = Array.isArray(contextLabels) ? contextLabels : []
+		const labels = supplied.length
+			? [...new Set(supplied.map((item) => cleanAssignmentValue(item)).filter(Boolean))]
+			: [
+				...collectVisibleRequiredSelectionOptionLabels(session, observation, match.field),
+				...(isCascaderFormField(match.field) ? [] : collectNativeRequiredOptionLabels(match.field)),
+			].filter((label, index, list) => label && list.indexOf(label) === index)
+		const preview = labels.slice(0, 8).join('、')
+		const hasOptions = labels.length > 0
+		return {
+			evaluation_previous_goal: `字段 "${match.label}" 是必填选择项，自动恢复后仍缺少唯一安全取值。`,
+			memory: hasOptions
+				? `字段 "${match.label}" 有多个可见候选或字段候选，必须由用户确认取值，避免选择错误权限、分类或状态。`
+				: `字段 "${match.label}" 展开后仍没有稳定可见候选，必须由用户补充取值或手动处理。`,
+			thought: '必填选择字段没有任务指定值，不能随意猜一个候选当作完成。',
+			next_goal: `询问${match.label}的取值`,
+			action: {
+				name: 'ask_user',
+				input: {
+					question: hasOptions
+						? `字段「${match.label}」是必填选择项，页面提示「${match.errorText || '请选择'}」。我看到候选：${preview}${labels.length > 8 ? ' 等' : ''}。请回复要选择的值；如果不继续请回复“取消”。`
+						: `字段「${match.label}」是必填选择项，页面提示「${match.errorText || '请选择'}」，但我没有读取到稳定候选。请告诉我应选择哪个值；如果不继续请回复“取消”。`,
+					reason: hasOptions
+						? `字段「${match.label}」存在多个可见候选或字段候选，任务没有指定取值，自动选择可能造成错误数据。`
+						: `字段「${match.label}」必填但候选不可见或无法稳定归属，继续猜测会导致提交失败或错误数据。`,
+					placeholder: hasOptions ? labels[0] : '请输入页面真实存在的候选值',
+					timeout_ms: 120000,
+					workflow_step: 'resolve_field_validation_error',
+					workflow_field_label: match.label,
+					workflow_field_index: match.index,
+					workflow_validation_error: shortWorkflowText(match.errorText || 'required selection empty', 120),
+					workflow_value_source: 'user_input_required',
+					workflow_visible_options: labels.join('|'),
 				},
 			},
 		}
@@ -692,6 +1211,249 @@
 		}
 	}
 
+	function deriveTaskValueMemoryFieldDecision(session, observation) {
+		if (!isInformationValueLookupSubtask(session)) return null
+		const taskValues = collectTaskValueHints(session, observation)
+			.filter((item) => item.value)
+		if (!taskValues.length) return null
+		const formItems = collectObservedFormControlItems(observation)
+			.filter(isPageFormField)
+			.filter((field) => Number.isFinite(Number(field?.index)))
+			.filter(isPlainTextFormField)
+		for (const taskValue of taskValues) {
+			const match = chooseTaskValueTargetField(formItems, taskValue)
+			if (!match) continue
+			const index = Number(match.field.index)
+			if (hasRecentTaskValueFieldAttempt(session, index, taskValue.value)) continue
+			if (!isEmptyFormField(match.field) && observedFieldValueMatchesScalar(match.field, taskValue.value)) continue
+			if (!isEmptyFormField(match.field) && !isEditLikeFormAssignmentTask(session)) continue
+			const label = normalizeFormFieldLabel(getObservedItemLabel(match.field)) || taskValue.label || '目标字段'
+			return {
+				evaluation_previous_goal: `外部信息查询已得到可复用值 "${taskValue.value}"，当前表单中字段 "${label}" 与任务目标字段匹配。`,
+				memory: `使用当前任务变量填写 "${label}"；变量来源=${taskValue.source || 'recent_history'}，值=${taskValue.value}。`,
+				thought: '外部查询只是为主任务取得字段值；当前字段唯一匹配，直接把已确认值填入表单。',
+				next_goal: `填写${label}`,
+				action: {
+					name: 'input_text',
+					input: {
+						index,
+						text: taskValue.value,
+						target_label: label,
+						workflow_step: 'fill_form_field_task_value',
+						workflow_field_label: label,
+						workflow_task_value_label: taskValue.label || '',
+						workflow_value_source: taskValue.source || 'recent_history',
+						workflow_value_basis: taskValue.basis || '',
+					},
+				},
+			}
+		}
+		return null
+	}
+
+	function deriveTaskValueReturnToMainTabDecision(session, observation, context = {}) {
+		if (!isInformationValueLookupSubtask(session)) return null
+		const taskValues = collectTaskValueHints(session, observation).filter((item) => item.value)
+		if (!taskValues.length) return null
+		if (hasRecordCreateFormOpen(observation)) return null
+		const targetUrl = getMainTaskTargetUrl(session)
+		if (!targetUrl) return null
+		const tabs = Array.isArray(context?.tabsSummary) ? context.tabsSummary : []
+		const currentTab = tabs.find((tab) => tab?.current) || null
+		const currentUrl = String(observation?.url || currentTab?.url || '').trim()
+		if (currentUrl && fastPath.isSameUrlFamily?.(currentUrl, targetUrl)) return null
+		const tab = findMainTaskTabForTaskValueReturn(session, tabs, targetUrl)
+		if (!tab || hasRecentTaskValueReturnSwitch(session, tab)) return null
+		const valueSummary = taskValues
+			.slice(0, 3)
+			.map((item) => `${item.label || '字段'}=${item.value}`)
+			.join('，')
+		return {
+			evaluation_previous_goal: `外部信息查询已得到当前任务变量：${valueSummary}。当前仍停留在外部来源页，需要回到主任务页面继续填写。`,
+			memory: `当前任务变量已可用，先切回已打开的主任务标签页；变量=${valueSummary}。`,
+			thought: '外部查询只负责取值，主任务表单在另一个已打开标签页中，先切回去再填表。',
+			next_goal: '切回主任务页面继续填写表单',
+			action: {
+				name: 'switch_to_tab',
+				input: {
+					tab_id: tab.id,
+					target_label: shortWorkflowText(tab.title || tab.url || '主任务页面', 120),
+					target_url: String(tab.url || ''),
+					reason: '已取得外部查询值，切回主任务页面继续填写表单。',
+					workflow: 'form-fill',
+					workflow_step: 'return_to_main_task_with_task_value',
+					workflow_task_value_labels: taskValues.map((item) => item.label || '').filter(Boolean).join('|'),
+				},
+			},
+		}
+	}
+
+	function deriveTaskValueExternalLookupDecision(session, observation) {
+		if (!isInformationValueLookupSubtask(session)) return null
+		if (!hasRecordCreateFormOpen(observation)) return null
+		if (isExternalInformationSourceLocation(observation)) return null
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		const pendingValues = collectTaskValueHints(session, observation).filter((item) => !item.value)
+		if (!pendingValues.length) return null
+		const formItems = collectObservedFormControlItems(observation)
+			.filter(isPageFormField)
+			.filter((field) => Number.isFinite(Number(field?.index)))
+			.filter(isPlainTextFormField)
+		for (const taskValue of pendingValues) {
+			const match = chooseTaskValueTargetField(formItems, taskValue)
+			if (!match) continue
+			if (!isEmptyFormField(match.field) && !isEditLikeFormAssignmentTask(session)) continue
+			const lookup = extractExternalTaskValueLookup(taskText, taskValue)
+			if (!lookup) continue
+			if (hasRecentTaskValueLookupOpen(session, taskValue, lookup)) continue
+			const fieldLabel = normalizeFormFieldLabel(getObservedItemLabel(match.field)) || taskValue.label || '目标字段'
+			return {
+				evaluation_previous_goal: `当前表单字段 "${fieldLabel}" 需要外部查询值，但尚未取得可复用任务变量。`,
+				memory: `保留当前主任务表单，使用新标签页查询 "${lookup.query}"；取得值后再切回主任务继续填写。`,
+				thought: '这是填表中的外部取值子流程，必须保留主表单上下文，不能在当前标签页直接跳走。',
+				next_goal: `打开外部查询：${lookup.query}`,
+				action: {
+					name: 'open_new_tab',
+					input: {
+						url: lookup.url,
+						target_url: lookup.url,
+						target_label: `外部查询：${lookup.query}`,
+						reason: `为当前表单字段 "${fieldLabel}" 获取外部查询值，并保留主任务表单标签页。`,
+						workflow: 'form-fill',
+						workflow_step: 'open_external_value_lookup_source',
+						workflow_field_label: fieldLabel,
+						workflow_task_value_label: taskValue.label || '',
+						workflow_lookup_engine: lookup.engine,
+						workflow_lookup_query: lookup.query,
+					},
+				},
+			}
+		}
+		return null
+	}
+
+	function extractExternalTaskValueLookup(taskText, taskValue) {
+		const query = extractExternalTaskValueLookupQuery(taskText, taskValue)
+		if (!query) return null
+		const engine = detectExplicitSearchEngine(taskText)
+		if (!engine) return null
+		const url = buildSearchEngineUrl(engine, query)
+		return url ? { engine, query, url } : null
+	}
+
+	function extractExternalTaskValueLookupQuery(taskText, taskValue) {
+		const text = String(taskText || '').replace(/\s+/g, ' ').trim()
+		if (!text) return ''
+		const labelPattern = buildTaskValueTargetRegex(taskValue)
+		const patterns = [
+			new RegExp(`(?:${labelPattern}).{0,30}?(?:使用|用|采用|取用|use).{0,20}?(?:google|谷歌|百度|bing|duckduckgo)?\\s*(?:搜索一下|搜一下|查一下|查询一下|搜索|查询|检索|search(?:\\s+for)?|look\\s*up)\\s*([^，。；;\\n\\r]{2,100})`, 'i'),
+			/(?:google|谷歌|百度|bing|duckduckgo).{0,12}?(?:搜索一下|搜一下|查一下|查询一下|搜索|查询|检索|search(?:\s+for)?|look\s*up)?\s*([^，。；;\n\r]{2,100})/i,
+			/(?:搜索一下|搜一下|查一下|查询一下|搜索|查询|检索|search(?:\s+for)?|look\s*up)\s*([^，。；;\n\r]{2,100})/i,
+		]
+		for (const pattern of patterns) {
+			const match = text.match(pattern)
+			const query = cleanExternalTaskValueLookupQuery(match?.[1] || '', taskValue)
+			if (query) return query
+		}
+		return ''
+	}
+
+	function cleanExternalTaskValueLookupQuery(value, taskValue) {
+		let text = cleanAssignmentValue(value)
+		if (!text) return ''
+		text = text
+			.replace(/^(?:一下|请|帮我|帮忙|最新查询|查询|搜索|搜|查)+/g, '')
+			.replace(/(?:作为|当作|用作|用于|填入|填写到|写入|录入到|设置为|设为|命名为).*/g, '')
+			.replace(/(?:as|for|into)\s+(?:the\s+)?[A-Za-z][A-Za-z0-9 _-]{1,30}.*/i, '')
+			.trim()
+		const aliases = Array.isArray(taskValue?.aliases) ? taskValue.aliases : [taskValue?.label]
+		for (const alias of aliases) {
+			const normalized = normalizeFormFieldLabel(alias)
+			if (!normalized) continue
+			const aliasPattern = new RegExp(`(?:作为|当作|用作)?${escapeRegExp(normalized)}$`, 'i')
+			text = text.replace(aliasPattern, '').trim()
+		}
+		text = cleanAssignmentValue(text)
+		if (!text || text.length < 2 || text.length > 80) return ''
+		if (/(作为|当作|用作|填入|填写|写入|设置为|命名为)$/i.test(text)) return ''
+		return text
+	}
+
+	function detectExplicitSearchEngine(taskText) {
+		const text = String(taskText || '')
+		if (/百度|baidu/i.test(text)) return 'baidu'
+		if (/bing|必应/i.test(text)) return 'bing'
+		if (/duckduckgo|ddg/i.test(text)) return 'duckduckgo'
+		if (/google|谷歌/i.test(text)) return 'google'
+		return ''
+	}
+
+	function buildSearchEngineUrl(engine, query) {
+		const q = String(query || '').trim()
+		if (!q) return ''
+		const encoded = encodeURIComponent(q)
+		if (engine === 'baidu') return `https://www.baidu.com/s?wd=${encoded}`
+		if (engine === 'bing') return `https://www.bing.com/search?q=${encoded}`
+		if (engine === 'duckduckgo') return `https://duckduckgo.com/?q=${encoded}`
+		if (engine === 'google') return `https://www.google.com/search?q=${encoded}`
+		return ''
+	}
+
+	function hasRecentTaskValueLookupOpen(session, taskValue, lookup) {
+		const targetKey = getNavigationKey(taskValue?.label || '')
+		const queryKey = getNavigationKey(lookup?.query || '')
+		return getRecentHistoryItems(session, 12).some((item) => {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			if (action !== 'open_new_tab') return false
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'open_external_value_lookup_source') return false
+			const historyTargetKey = getNavigationKey(input.workflow_task_value_label || input.workflow_field_label || '')
+			const historyQueryKey = getNavigationKey(input.workflow_lookup_query || input.target_label || input.url || '')
+			return (!targetKey || !historyTargetKey || targetKey === historyTargetKey) &&
+				(!queryKey || !historyQueryKey || historyQueryKey.includes(queryKey) || queryKey.includes(historyQueryKey))
+		})
+	}
+
+	function getMainTaskTargetUrl(session) {
+		const startup = String(session?.workflowState?.initialNavigation?.targetUrl || '').trim()
+		if (startup) return startup
+		const taskText = String(session?.latestTask || session?.task || '')
+		return typeof fastPath.extractTargetUrl === 'function' ? fastPath.extractTargetUrl(taskText) : ''
+	}
+
+	function findMainTaskTabForTaskValueReturn(session, tabsSummary, targetUrl) {
+		const tabs = Array.isArray(tabsSummary) ? tabsSummary : []
+		const state = syncNavigationState(session)
+		const expectedKeys = getExpectedNavigationKeys(session, state)
+		let best = null
+		for (const tab of tabs) {
+			if (!tab || tab.current || !tab.id) continue
+			const url = String(tab.url || '').trim()
+			if (!/^https?:\/\//i.test(url)) continue
+			if (!fastPath.isSameUrlFamily?.(url, targetUrl)) continue
+			let score = 10
+			if (typeof fastPath.isTaskTargetLocation === 'function' && fastPath.isTaskTargetLocation(url, targetUrl)) score += 4
+			const tabText = getNavigationKey(`${tab.title || ''} ${url}`)
+			for (const key of expectedKeys) {
+				if (key && tabText.includes(key)) score += 5
+			}
+			if (!best || score > best.score) best = { ...tab, score }
+		}
+		return best
+	}
+
+	function hasRecentTaskValueReturnSwitch(session, tab) {
+		const targetId = String(tab?.id || '')
+		const targetUrl = String(tab?.url || '').trim()
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			if (action !== 'switch_to_tab') return false
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'return_to_main_task_with_task_value') return false
+			return String(input.tab_id || '') === targetId || (targetUrl && String(input.target_url || '') === targetUrl)
+		})
+	}
+
 	function buildOpenDropdownRecoveryDecision(index, label, value) {
 		return {
 			evaluation_previous_goal: `模型规划超时，但当前表单字段 "${label}" 与任务文字明确匹配，且任务文本给出了目标值 "${value}"。`,
@@ -747,6 +1509,76 @@
 			return { item, text }
 		}
 		return null
+	}
+
+	function getRecentFormSubmitFailureValidationText(session) {
+		for (const item of getRecentHistoryItems(session, 8)) {
+			if (isLoopGuardHistoryItem(item)) continue
+			if (item?.success !== false) continue
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'submit_form_timeout_recovery') continue
+			const text = getHistoryFailureText(item)
+			if (!text || isSystemRepeatGuardText(text)) continue
+			if (/(form_submit_failed|表单提交|校验|错误|请选择|必填|不能为空|required|please\s+select|must\s+select)/i.test(text)) {
+				return text
+			}
+		}
+		return ''
+	}
+
+	function getVisibleFormCompletionBlockerText(observation) {
+		const fieldIssues = []
+		for (const field of collectObservedFormControlItems(observation).filter(isPageFormField)) {
+			const errorText = getFieldValidationErrorText(field)
+			const invalid = field?.invalid === true || String(field?.invalid || '').toLowerCase() === 'true'
+			const requiredEmpty = isRequiredEmptyFormControl(field)
+			if (!invalid && !errorText && !requiredEmpty) continue
+			const label = normalizeFormFieldLabel(getObservedItemLabel(field)) || '未命名字段'
+			const detail = errorText || (requiredEmpty ? '必填字段仍为空' : '字段仍处于无效状态')
+			fieldIssues.push(`${label}: ${shortWorkflowText(detail, 90)}`)
+			if (fieldIssues.length >= 3) break
+		}
+		if (fieldIssues.length) return fieldIssues.join('；')
+		const feedback = collectVisibleFormCompletionFeedback(observation)
+		return feedback ? shortWorkflowText(feedback, 180) : ''
+	}
+
+	function collectVisibleFormCompletionFeedback(observation) {
+		const values = []
+		for (const item of (Array.isArray(observation?.feedback) ? observation.feedback : [])) {
+			values.push(item?.text, item?.message, item?.label)
+		}
+		for (const item of [
+			...(Array.isArray(observation?.actions) ? observation.actions : []),
+			...(Array.isArray(observation?.elements) ? observation.elements : []),
+			...(Array.isArray(observation?.popups) ? observation.popups : []),
+		]) {
+			values.push(item?.validationMessage, item?.errorText, item?.error, item?.message)
+		}
+		const content = String(observation?.content || '')
+		for (const line of content.split(/\n+/).slice(-80)) {
+			if (/(错误|失败|校验|验证|请选择|请输入|必填|不能为空|required|invalid|error|failed)/i.test(line)) {
+				values.push(line)
+			}
+		}
+		for (const value of values) {
+			const text = String(value || '').replace(/\s+/g, ' ').trim()
+			if (!text || !isFormCompletionErrorText(text)) continue
+			return text
+		}
+		return ''
+	}
+
+	function isRequiredEmptyFormControl(field) {
+		const required = field?.required === true || String(field?.required || '').toLowerCase() === 'true'
+		if (!required) return false
+		const value = extractObservedFieldValue(field)
+		const state = String(field?.valueState || '').toLowerCase()
+		return !String(value || '').trim() || /empty|blank|未填|未选|请选择|请输入/.test(state)
+	}
+
+	function isFormCompletionErrorText(value) {
+		return /(不能为空|必填|请选择|请输入|请填写|请录入|未选择|校验失败|验证失败|格式错误|重复|已存在|已经存在|不能重复|唯一|保存失败|提交失败|操作失败|请求失败|提交异常|保存异常|required\s+field|is\s+required|please\s+(?:select|enter|input)|must\s+select|invalid\s+(?:value|input|format)|duplicate|already\s+exists|\bunique\b|\berror\b|\bfailed\b)/i.test(String(value || ''))
 	}
 
 	function isDuplicateConstraintText(text) {
@@ -946,6 +1778,69 @@
 		})
 	}
 
+	function hasRecentRequiredSelectionValidationAttempt(session, index, errorText) {
+		const targetError = getNavigationKey(errorText || '')
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			if (action !== 'open_dropdown' && action !== 'choose_dropdown_option' && action !== 'select_dropdown_option') return false
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'resolve_field_validation_error') return false
+			if (Number(input.index) !== Number(index)) return false
+			const attemptedError = getNavigationKey(input.workflow_validation_error || '')
+			return !targetError || !attemptedError || attemptedError === targetError
+		})
+	}
+
+	function getRecentRequiredSelectionAnswer(session, label, index, errorText) {
+		for (const item of getRecentHistoryItems(session, 10)) {
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'resolve_field_validation_error') continue
+			if (String(item?.action || '').replace(/\..*$/, '') !== 'ask_user') continue
+			if (!isSameRequiredSelectionInput(input, label, index, errorText)) continue
+			if (item.success === false) return { value: '', cancelled: true }
+			const answer = parseAskUserAnswer(item)
+			if (!answer) continue
+			if (/^(取消|不用|不选|停止|算了|否|no|cancel)$/i.test(answer)) {
+				return { value: '', cancelled: true }
+			}
+			return { value: cleanAssignmentValue(answer), cancelled: false }
+		}
+		return { value: '', cancelled: false }
+	}
+
+	function hasRecentRequiredSelectionAsk(session, index, errorText) {
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const input = item?.input || {}
+			return String(input.workflow_step || '') === 'resolve_field_validation_error' &&
+				String(item?.action || '').replace(/\..*$/, '') === 'ask_user' &&
+				isSameRequiredSelectionInput(input, input.workflow_field_label || '', index, errorText)
+		})
+	}
+
+	function hasRecentRequiredSelectionAnswerOpenAttempt(session, index, requestedText) {
+		const targetText = getNavigationKey(requestedText || '')
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			if (action !== 'open_dropdown') return false
+			const input = item?.input || {}
+			if (String(input.workflow_step || '') !== 'resolve_field_validation_error') return false
+			if (Number(input.index) !== Number(index)) return false
+			const attemptedText = getNavigationKey(input.workflow_requested_text || '')
+			return !targetText || !attemptedText || attemptedText === targetText
+		})
+	}
+
+	function isSameRequiredSelectionInput(input, label, index, errorText) {
+		if (Number.isFinite(Number(input.workflow_field_index)) && Number(input.workflow_field_index) !== Number(index)) return false
+		const askedLabel = normalizeFormFieldLabel(input.workflow_field_label || '')
+		const currentLabel = normalizeFormFieldLabel(label || '')
+		if (askedLabel && currentLabel && askedLabel !== currentLabel) return false
+		const targetError = getNavigationKey(errorText || '')
+		const askedError = getNavigationKey(input.workflow_validation_error || '')
+		if (targetError && askedError && targetError !== askedError) return false
+		return true
+	}
+
 	function shortWorkflowText(value, maxLen) {
 		const text = String(value || '').replace(/\s+/g, ' ').trim()
 		const limit = Math.max(20, Number(maxLen) || 120)
@@ -955,6 +1850,7 @@
 	function deriveFormSubmitTimeoutDecision(session, observation) {
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		if (!taskText || !isCreateTask(taskText)) return null
+		if (hasUnresolvedRequiredSelectionValidation(session, observation)) return null
 		const state = syncNavigationState(session)
 		const unresolved = getExpectedNavigationKeys(session, state)
 			.filter((key) => !isNavigationTargetReached(observation, key))
@@ -1140,6 +2036,54 @@
 		return null
 	}
 
+	function deriveNavigationPostContextDecision(session, observation, planningContext) {
+		if (!observation || typeof observation !== 'object') return null
+		const state = syncNavigationState(session)
+		const unresolved = getExpectedNavigationKeys(session, state)
+			.filter((key) => !isNavigationTargetReachedForSession(session, observation, key, state))
+		if (!unresolved.length) return null
+		if (!hasRecentNavigationContextMiss(planningContext, unresolved)) return null
+		const revealDecision = buildNavigationRevealDecision(state, observation, unresolved, '补充上下文没有匹配到目标导航，改用受限导航探索', {
+			allowExploratory: true,
+		})
+		if (revealDecision) return revealDecision
+		return null
+	}
+
+	function hasRecentNavigationContextMiss(planningContext, unresolved) {
+		const contexts = Array.isArray(planningContext) ? planningContext.slice(-4) : []
+		if (!contexts.length) return false
+		const targetKeys = (Array.isArray(unresolved) ? unresolved : [])
+			.map(getNavigationKey)
+			.filter(Boolean)
+		if (!targetKeys.length) return false
+		return contexts.some((context) => {
+			const name = String(context?.name || '').trim()
+			if (name !== 'request_context' && name !== 'inspect_region') return false
+			const input = context?.input && typeof context.input === 'object' ? context.input : {}
+			const text = String(context?.text || '')
+			if (!/empty_context\b/.test(text) || !/reason="query_no_match"/.test(text)) return false
+			const query = getNavigationKey(input.query || extractContextAttr(text, 'query') || '')
+			if (!query) return true
+			return targetKeys.some((target) => navigationLookupTextMatchesTarget(query, target))
+		})
+	}
+
+	function navigationLookupTextMatchesTarget(query, targetKey) {
+		const queryKey = getNavigationKey(query)
+		const target = getNavigationKey(targetKey)
+		if (!queryKey || !target) return false
+		if (queryKey === target || queryKey.includes(target) || target.includes(queryKey)) return true
+		return getNavigationTargetAliases(target).some((alias) =>
+			alias && (queryKey.includes(alias) || alias.includes(queryKey))
+		)
+	}
+
+	function extractContextAttr(text, name) {
+		const match = String(text || '').match(new RegExp(`${name}="([^"]*)"`))
+		return match?.[1] || ''
+	}
+
 	function buildMissingNavigationContextDecision(session, observation, unresolved) {
 		const labels = (Array.isArray(unresolved) ? unresolved : [])
 			.map(getNavigationKey)
@@ -1180,6 +2124,14 @@
 		if (/^(about:blank|chrome:\/\/|edge:\/\/|moz-extension:\/\/|chrome-extension:\/\/)/i.test(url)) return true
 		if (/^https?:\/\/(?:www\.)?(google|bing|baidu|duckduckgo)\.[^/]+/i.test(url)) return true
 		return /^(google|bing|百度|duckduckgo|新标签页|newtab)$/.test(title)
+	}
+
+	function isExternalInformationSourceLocation(observation) {
+		const url = String(observation?.url || '').trim()
+		const title = getNavigationKey(observation?.title || '')
+		if (/^https?:\/\/(?:www\.)?(google|bing|baidu|duckduckgo)\.[^/]+/i.test(url)) return true
+		if (/(search|news|article|finance|market|price|财经|新闻|行情|价格|搜索|资讯)/i.test(`${url} ${title}`)) return true
+		return false
 	}
 
 	function hasRecentMissingNavigationContextAsk(session) {
@@ -1429,25 +2381,359 @@
 		return lines
 	}
 
+	function buildTaskValueHintLines(session, observation, expectedKeys = [], state = null) {
+		if (!isInformationValueLookupSubtask(session)) return []
+		const unresolved = (Array.isArray(expectedKeys) ? expectedKeys : [])
+			.filter((key) => !isNavigationTargetReachedForSession(session, observation, key, state))
+		if (unresolved.length && !isExternalInformationSourceLocation(observation)) return []
+		const values = collectTaskValueHints(session, observation)
+		if (!values.length) return []
+		return values.slice(0, 5).map((item) => [
+			'- task_value',
+			item.value ? 'status="available"' : 'status="pending"',
+			`field="${escapeAttr(item.label || '')}"`,
+			item.aliases?.length ? `aliases="${escapeAttr(item.aliases.join('|'))}"` : '',
+			item.value ? `value="${escapeAttr(item.value)}"` : '',
+			item.source ? `source="${escapeAttr(item.source)}"` : '',
+			item.basis ? `basis="${escapeAttr(shortWorkflowText(item.basis, 160))}"` : '',
+			item.value
+				? 'guidance="这是当前任务内取得的临时字段值；若主任务表单中出现匹配字段，应优先使用该值继续填写/提交，不要回外部来源重复查询。"'
+				: 'guidance="主任务需要外部查询值填入该字段；在信息来源页拿到可信值后，把值写入 memory/thought，再切回主任务页面继续。"',
+		].filter(Boolean).join(' '))
+	}
+
+	function collectTaskValueHints(session, observation = null) {
+		const taskText = String(session?.latestTask || session?.task || '').trim()
+		const targets = extractTaskValueTargets(taskText)
+		if (!targets.length) return []
+		const candidates = extractTaskValueCandidatesFromHistory(session, targets)
+		const visibleCandidates = extractTaskValueCandidatesFromObservation(observation, targets, taskText)
+		const output = []
+		for (const target of targets) {
+			const candidate = candidates.find((item) => item.targetKey === target.key) ||
+				visibleCandidates.find((item) => item.targetKey === target.key) ||
+				null
+			output.push({
+				...target,
+				value: candidate?.value || '',
+				source: candidate?.source || '',
+				basis: candidate?.basis || '',
+			})
+		}
+		return output
+	}
+
+	function extractTaskValueTargets(taskText) {
+		const text = String(taskText || '')
+		if (!text.trim()) return []
+		const labels = []
+		const addLabel = (value) => {
+			const label = normalizeTaskValueTargetLabel(value)
+			if (!label) return
+			addUnique(labels, label)
+		}
+		const patterns = [
+			/(?:作为|当作|用作|命名为|设为|设置为)\s*([^，。；;、\n\r]{2,24}?)(?:字段|输入框|账号|名称)?(?=$|[，。；;、\n\r\s])/g,
+			/(?:填入|填写到|写入|录入到)\s*([^，。；;、\n\r]{2,24}?)(?:字段|输入框)?(?=$|[，。；;、\n\r\s])/g,
+			/([^\s，。；;、\n\r]{2,18}?)(?:使用|采用|取用).{0,80}?(?:搜索|查询|查一下|搜一下|google|Google|百度|Bing|latest|search)/g,
+			/([^\s，。；;、\n\r]{2,18}?)(?<![使采取])用\s*(?:(?:google|Google|谷歌|百度|Bing|bing|duckduckgo|DuckDuckGo).{0,16}?)?(?:搜索|查询|查一下|搜一下|搜|查|latest|search|look\s*up)/g,
+		]
+		for (const pattern of patterns) {
+			for (const match of text.matchAll(pattern)) addLabel(match?.[1])
+		}
+		for (const match of text.matchAll(/(?:as|for)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9 _-]{1,30})(?:\s+field)?/gi)) {
+			addLabel(match?.[1])
+		}
+		return labels.slice(0, 6).map((label) => {
+			const aliases = buildTaskValueTargetAliases(label)
+			return {
+				key: getNavigationKey(label),
+				label,
+				aliases,
+			}
+		}).filter((item) => item.key)
+	}
+
+	function normalizeTaskValueTargetLabel(value) {
+		let text = cleanAssignmentValue(value)
+		if (!text) return ''
+		text = text
+			.replace(/^(?:这个|那个|该|本|此|当前|目标|主任务|页面|表单|作为|当作|用作)+/g, '')
+			.replace(/(?:字段|输入框|表单项|内容|值)$/g, '')
+			.replace(/^(?:the|a|an)\s+/i, '')
+			.trim()
+		if (!text || text.length < 2 || text.length > 30) return ''
+		if (/(搜索|查询|最新|价格|新闻|网页|网站|页面|结果|信息|值|数据)$/i.test(text) && !/(账号|用户名|名称|标题|邮箱|验证码|phone|email|code|name|title|username|account)/i.test(text)) return ''
+		return text
+	}
+
+	function buildTaskValueTargetAliases(label) {
+		const raw = normalizeFormFieldLabel(label)
+		const aliases = []
+		addUnique(aliases, raw)
+		const key = getNavigationKey(raw)
+		const push = (...values) => values.forEach((value) => addUnique(aliases, normalizeFormFieldLabel(value)))
+		if (/^(用户名|用户账号|账户名|账号|账户|登录账号|登陆账号)$/i.test(key) || /username|account|login/i.test(key)) {
+			push('用户名', '登录账号', '登陆账号', '账号', '账户', '账户名', '用户账号', 'username', 'account', 'login account')
+		}
+		if (/^(名称|姓名|名字|标题)$/i.test(key) || /name|title/i.test(key)) {
+			push('名称', '姓名', '名字', '标题', 'name', 'title')
+		}
+		if (/^(邮箱|电子邮箱|邮件|email|e-mail)$/i.test(key)) {
+			push('邮箱', '电子邮箱', '邮件', 'email', 'e-mail')
+		}
+		if (/^(验证码|校验码|动态码|otp|code|verificationcode)$/i.test(key)) {
+			push('验证码', '校验码', '动态码', 'otp', 'code', 'verification code')
+		}
+		if (/^(手机号|手机号码|电话|联系电话|phone|mobile|tel)$/i.test(key)) {
+			push('手机号', '手机号码', '电话', '联系电话', 'phone', 'mobile', 'tel')
+		}
+		return [...new Set(aliases.filter(Boolean))].slice(0, 12)
+	}
+
+	function extractTaskValueCandidatesFromHistory(session, targets) {
+		const candidates = []
+		const recent = getRecentHistoryItems(session, 16)
+		for (const item of recent) {
+			if (item?.success === false) continue
+			const input = item?.input || {}
+			for (const target of targets) {
+				const direct = extractDirectTaskValueFromInput(input, target)
+				if (direct) {
+					candidates.push({
+						targetKey: target.key,
+						value: direct,
+						source: 'previous_field_action',
+						basis: `历史字段动作 ${item.action || ''}`,
+					})
+					continue
+				}
+				const text = [
+					item?.memory,
+					item?.thought,
+					item?.nextGoal,
+					item?.evaluationPreviousGoal,
+					item?.output,
+				].map((value) => String(value || '')).filter(Boolean).join(' | ')
+				const value = extractTaskValueFromText(text, target)
+				if (!value) continue
+				candidates.push({
+					targetKey: target.key,
+					value,
+					source: 'recent_history',
+					basis: shortWorkflowText(text, 180),
+				})
+			}
+		}
+		return dedupeTaskValueCandidates(candidates)
+	}
+
+	function extractTaskValueCandidatesFromObservation(observation, targets, taskText) {
+		if (!observation || typeof observation !== 'object') return []
+		const text = collectInformationEvidenceSnippets(observation, taskText).join(' | ')
+		if (!text) return []
+		const candidates = []
+		for (const target of targets) {
+			const value = extractTaskValueFromText(text, target)
+			if (!value) continue
+			candidates.push({
+				targetKey: target.key,
+				value,
+				source: 'visible_evidence',
+				basis: shortWorkflowText(text, 180),
+			})
+		}
+		return dedupeTaskValueCandidates(candidates)
+	}
+
+	function extractDirectTaskValueFromInput(input, target) {
+		if (!input || typeof input !== 'object') return ''
+		const label = normalizeFormFieldLabel(input.workflow_field_label || input.target_label || input.label || '')
+		if (!taskValueTargetMatchesLabel(label, target)) return ''
+		return normalizeTaskValueCandidate(input.text || input.value || input.label || '')
+	}
+
+	function extractTaskValueFromText(text, target) {
+		const raw = String(text || '').replace(/\s+/g, ' ').trim()
+		if (!raw) return ''
+		const labelPattern = buildTaskValueTargetRegex(target)
+		const labelValuePattern = new RegExp(`(?:${labelPattern})\\s*(?:=|:|：|为|是|使用|采用|取值为|设置为|设为|填为|填写为)\\s*["“”']?([^"“”'，。；;|\\n\\r]{1,80})`, 'i')
+		const labelMatch = raw.match(labelValuePattern)
+		const labelValue = normalizeTaskValueCandidate(labelMatch?.[1] || '')
+		if (labelValue) return labelValue
+		const explicitPattern = /(?:提取到|得到|查到|查询到|找到|获取到|识别到|拿到|结果为|值为|候选值为|可用值为|价格为|报价为)\s*["“”']?([^"“”'，。；;|\n\r]{1,80})/i
+		const explicit = normalizeTaskValueCandidate(raw.match(explicitPattern)?.[1] || '')
+		if (explicit) return explicit
+		const codeMatch = raw.match(/(?:验证码|校验码|动态码|otp|code).{0,20}\b([A-Za-z0-9]{4,10})\b/i)
+		if (codeMatch?.[1] && target.aliases.some((alias) => /验证码|校验码|动态码|otp|code/i.test(alias))) {
+			return normalizeTaskValueCandidate(codeMatch[1])
+		}
+		if (/(价格|报价|行情|price|gold|黄金|latest)/i.test(raw)) {
+			const number = extractNumericTaskValue(raw)
+			if (number) return number
+		}
+		return ''
+	}
+
+	function buildTaskValueTargetRegex(target) {
+		const aliases = Array.isArray(target?.aliases) ? target.aliases : []
+		const parts = aliases
+			.map((alias) => normalizeFormFieldLabel(alias))
+			.filter(Boolean)
+			.sort((a, b) => b.length - a.length)
+			.map(escapeRegExp)
+		return parts.length ? parts.join('|') : escapeRegExp(target?.label || '')
+	}
+
+	function normalizeTaskValueCandidate(value) {
+		let text = cleanAssignmentValue(value)
+		if (!text) return ''
+		const email = text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/)?.[0]
+		if (email) return email
+		const number = extractNumericTaskValue(text)
+		if (number && /(价格|报价|行情|\$|¥|€|£|美元|美金|元|usd|cny|gold|黄金|price)/i.test(text)) return number
+		text = text.replace(/^(?:为|是|：|:|=)+/g, '').trim()
+		text = text.split(/\s*(?:\||，|,|。|；|;)\s*/)[0] || ''
+		text = cleanAssignmentValue(text)
+		if (!text || text.length > 80) return ''
+		if (/^(success|true|false|null|undefined|empty|unknown)$/i.test(text)) return ''
+		if (/^https?:\/\//i.test(text)) return ''
+		return text
+	}
+
+	function extractNumericTaskValue(text) {
+		const source = String(text || '')
+		const candidates = Array.from(source.matchAll(/(?:[$¥€£]\s*)?(\d[\d,]{1,12}(?:\.\d+)?)(?:\s*(?:美元|美金|人民币|元|usd|cny|eur|gbp|%|％|盎司|oz))?/gi))
+			.map((match) => buildNumericTaskValueCandidate(match, source))
+			.filter(Boolean)
+		if (!candidates.length) return ''
+		candidates.sort((a, b) => (b.score - a.score) || (a.index - b.index))
+		return candidates[0].value || ''
+	}
+
+	function buildNumericTaskValueCandidate(match, source) {
+		const value = String(match?.[1] || '').replace(/,/g, '')
+		const number = Number(value)
+		if (!Number.isFinite(number) || value.length < 2) return null
+		const full = String(match?.[0] || '')
+		const index = Number(match?.index || 0)
+		const before = source.slice(Math.max(0, index - 36), index)
+		const after = source.slice(index + full.length, index + full.length + 36)
+		const context = `${before} ${full} ${after}`
+		let score = 0
+		const hasCurrencyOrUnit = /[$¥€£]|美元|美金|人民币|元|usd|cny|eur|gbp|盎司|oz/i.test(full)
+		if (hasCurrencyOrUnit) score += 10
+		if (/(价格|报价|行情|现货|买入|卖出|涨跌|price|quote|market|spot|bid|ask|gold|黄金)/i.test(context)) score += 7
+		if (/\.\d+/.test(value)) score += 2
+		if (value.replace(/\D/g, '').length >= 4) score += 1
+		if (isLikelyDateNumberCandidate(value, number, context, hasCurrencyOrUnit)) score -= 12
+		if (number <= 31 && !hasCurrencyOrUnit) score -= 4
+		if (/^(?:00|0\d)$/.test(value)) score -= 5
+		return { value, score, index }
+	}
+
+	function isLikelyDateNumberCandidate(value, number, context, hasCurrencyOrUnit) {
+		if (hasCurrencyOrUnit) return false
+		const text = String(context || '')
+		if (/日期|时间|发布|更新|年|月|日|时|分|秒|date|time|updated|published/i.test(text)) {
+			if (/^\d{4}$/.test(value) && number >= 1900 && number <= 2099) return true
+			if (number >= 1 && number <= 31) return true
+		}
+		if (/^\d{4}$/.test(value) && number >= 1900 && number <= 2099 && /[-/.]\s*\d{1,2}|年|月|日/.test(text)) return true
+		return false
+	}
+
+	function dedupeTaskValueCandidates(candidates) {
+		const seen = new Set()
+		const output = []
+		for (const item of Array.isArray(candidates) ? candidates : []) {
+			const value = normalizeTaskValueCandidate(item?.value || '')
+			const key = `${item?.targetKey || ''}:${value}`
+			if (!value || seen.has(key)) continue
+			seen.add(key)
+			output.push({ ...item, value })
+		}
+		return output
+	}
+
+	function chooseTaskValueTargetField(fields, taskValue) {
+		const candidates = (Array.isArray(fields) ? fields : [])
+			.map((field) => {
+				const label = normalizeFormFieldLabel(getObservedItemLabel(field))
+				const score = scoreTaskValueFieldLabel(label, taskValue)
+				return { field, label, score }
+			})
+			.filter((item) => item.score < Number.MAX_SAFE_INTEGER)
+			.sort((a, b) => a.score - b.score || getFormFieldOrderScore(a.field) - getFormFieldOrderScore(b.field))
+		if (!candidates.length) return null
+		if (candidates.length === 1) return candidates[0]
+		const best = candidates[0]
+		const second = candidates[1]
+		return best.score + 4 <= second.score ? best : null
+	}
+
+	function scoreTaskValueFieldLabel(label, taskValue) {
+		const field = normalizeFormFieldLabel(label)
+		if (!field) return Number.MAX_SAFE_INTEGER
+		const aliases = Array.isArray(taskValue?.aliases) ? taskValue.aliases : [taskValue?.label]
+		let best = Number.MAX_SAFE_INTEGER
+		for (const alias of aliases) {
+			const target = normalizeFormFieldLabel(alias)
+			if (!target) continue
+			if (field === target) best = Math.min(best, 0)
+			else if (field.endsWith(target) || target.endsWith(field)) best = Math.min(best, 4)
+			else if (field.includes(target) || target.includes(field)) best = Math.min(best, 8)
+		}
+		return best
+	}
+
+	function taskValueTargetMatchesLabel(label, taskValue) {
+		return scoreTaskValueFieldLabel(label, taskValue) <= 8
+	}
+
+	function hasRecentTaskValueFieldAttempt(session, index, value) {
+		const target = getNavigationKey(cleanAssignmentValue(value))
+		return getRecentHistoryItems(session, 8).some((item) => {
+			const action = String(item?.action || '').replace(/\..*$/, '')
+			const input = item?.input || {}
+			if (action !== 'input_text' && action !== 'type') return false
+			if (Number(input.index) !== Number(index)) return false
+			if (String(input.workflow_step || '') !== 'fill_form_field_task_value') return false
+			const attempted = getNavigationKey(cleanAssignmentValue(input.text || ''))
+			return !target || !attempted || attempted === target
+		})
+	}
+
 	function buildInformationQueryHintLines(session, observation) {
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		if (!isInformationQueryTask(taskText)) return []
+		const valueLookup = isInformationValueLookupSubtask(session)
 		const snippets = collectInformationEvidenceSnippets(observation, taskText)
 		const sourceState = isSparseInformationSource(observation, snippets) ? 'sparse' : 'visible_evidence'
 		const lines = [
-			[
-				'- information_query',
-				'status="active"',
-				`sourceState="${sourceState}"`,
-				`evidenceCount="${snippets.length}"`,
-				'guidance="这是信息查询/问答任务；目标是收集少量可信可见证据后用 done 直接回答用户。不要把网页浏览本身当完成，也不要为了完美继续无限开链接、滚动或 inspect。"',
-			].join(' '),
-			'- information_answer_rule minEvidence="1" guidance="若当前观察、搜索结果摘要、文章标题/正文片段或已打开来源足以支撑结论，应输出 done(success=true) 给出答案、依据和不确定性；证据不足时也要明确缺口，不要空转。"',
+			valueLookup
+				? [
+					'- information_value_lookup',
+					'status="active"',
+					`sourceState="${sourceState}"`,
+					`evidenceCount="${snippets.length}"`,
+					'guidance="这是为主页面表单/页面操作取得外部字段值的子流程；拿到可信可见值后，必须切回主任务页面继续填写/提交，不要在查询页直接 done 成问答总结。"',
+				].join(' ')
+				: [
+					'- information_query',
+					'status="active"',
+					`sourceState="${sourceState}"`,
+					`evidenceCount="${snippets.length}"`,
+					'guidance="这是信息查询/问答任务；目标是收集少量可信可见证据后用 done 直接回答用户。不要把网页浏览本身当完成，也不要为了完美继续无限开链接、滚动或 inspect。"',
+				].join(' '),
+			valueLookup
+				? '- information_value_rule minEvidence="1" guidance="若当前观察、搜索结果摘要、文章标题/正文片段或已打开来源足以提取字段值，应把值写入 memory/thought，并切换回主任务页面继续操作；证据不足时请求上下文或换来源，不要输出最终问答。"'
+				: '- information_answer_rule minEvidence="1" guidance="若当前观察、搜索结果摘要、文章标题/正文片段或已打开来源足以支撑结论，应输出 done(success=true) 给出答案、依据和不确定性；证据不足时也要明确缺口，不要空转。"',
 		]
 		if (snippets.length) {
 			lines.push(`- information_evidence snippets="${escapeAttr(snippets.slice(0, 5).join(' | '))}"`)
 		}
-		if (sourceState === 'sparse' && hasRecentInformationSourceStall(session)) {
+		if (!valueLookup && sourceState === 'sparse' && hasRecentInformationSourceStall(session)) {
 			lines.push('- information_source status="unreadable" guidance="当前来源在等待/滚动/补上下文后仍缺少可读正文；下一步应切换到已打开的相关来源或搜索结果页，或 done(false) 说明来源不可读和已缺少哪些证据；不要重复同一方向滚动、重复点击同一查看原文链接或重复 inspect 同一区域。"')
 		}
 		return lines
@@ -1456,6 +2742,7 @@
 	function deriveInformationQueryPostContextDecision(session, workflowContextText, planningContext, context = {}) {
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		if (!isInformationQueryTask(taskText)) return null
+		if (isInformationValueLookupSubtask(session)) return null
 		if (!String(workflowContextText || '').includes('information_query')) return null
 		const requestCount = countInformationContentContextRequests(planningContext)
 		if (requestCount < 2) return null
@@ -1470,6 +2757,7 @@
 	function deriveInformationQueryRecoveryDecision(session, observation, context = {}, options = {}) {
 		const taskText = String(session?.latestTask || session?.task || '').trim()
 		if (!isInformationQueryTask(taskText)) return null
+		if (isInformationValueLookupSubtask(session)) return null
 		const snippets = collectInformationEvidenceSnippets(observation, taskText)
 		if (!isSparseInformationSource(observation, snippets) && !hasRecentInformationSourceStall(session)) return null
 		const tab = findInformationQueryAlternateTab(session, context?.tabsSummary || [], taskText)
@@ -1513,6 +2801,19 @@
 		if (!text) return false
 		if (/(测试|验证|检查|每个|每一个|所有|全部|功能是否|是否正常|test|verify|check)/i.test(text)) return false
 		return /(搜索一下|搜一下|查一下|查询一下|检索|网上搜索|最新|价格|行情|新闻|资讯|总结|分析|是否|是不是|值得|买入|卖出|search\s+(?:for|web)|look\s*up|research|latest|price|news|summari[sz]e|analy[sz]e|whether|worth)/i.test(text)
+	}
+
+	function isInformationValueLookupSubtask(session) {
+		const operation = String(
+			taskIntent?.getOperation?.(session) ||
+			session?.workflowState?.taskIntent?.intent?.operation ||
+			session?.taskIntent?.operation ||
+			''
+		).trim()
+		if (/^(create|edit|fill_form)$/i.test(operation)) return true
+		const text = String([session?.latestTask, session?.task].filter(Boolean).join(' ')).trim()
+		return /(创建|新增|新建|添加|编辑|修改|更新|填写|填入|填表|录入|设置|保存|提交|create|add|new|edit|update|change|fill|save|submit)/i.test(text) &&
+			/(作为|用于|用作|填入|填写|写入|设置为|命名为|字段|表单|账号|用户名|名称|标题|as\s+(?:the\s+)?|use\s+.+\s+as|field|form|username|account|name|title)/i.test(text)
 	}
 
 	function collectInformationEvidenceSnippets(observation, taskText) {
@@ -1671,10 +2972,10 @@
 		})
 	}
 
-	function buildNavigationRevealDecision(state, observation, unresolved, reason) {
+	function buildNavigationRevealDecision(state, observation, unresolved, reason, options = {}) {
 		const visionDecision = buildCompositeNavigationVisionDecision(state, observation, unresolved, reason)
 		if (visionDecision) return visionDecision
-		const revealCandidate = findNavigationRevealCandidate(observation, state, unresolved)
+		const revealCandidate = findNavigationRevealCandidate(observation, state, unresolved, options)
 		if (!revealCandidate) return null
 		const label = getObservedItemLabel(revealCandidate) || '更多'
 		addUnique(state.revealAttemptKeys, buildNavigationRevealAttemptKey(revealCandidate))
@@ -1962,7 +3263,7 @@
 		return labelKey.includes(target) ? target : ''
 	}
 
-	function findNavigationRevealCandidate(observation, state, targetKeys = []) {
+	function findNavigationRevealCandidate(observation, state, targetKeys = [], options = {}) {
 		const attempted = new Set((Array.isArray(state?.revealAttemptKeys) ? state.revealAttemptKeys : [])
 			.map((value) => String(value || '')))
 		const baseItems = collectObservedNavigationStateItems(observation)
@@ -1974,6 +3275,16 @@
 		if ((Array.isArray(targetKeys) ? targetKeys : []).map(getNavigationKey).some(Boolean)) {
 			const genericContainers = baseItems.filter(isGenericCollapsedNavigationContainer)
 			if (genericContainers.length === 1) return genericContainers[0]
+			const allowExploratory = Boolean(options?.allowExploratory)
+			const exploratoryContainers = allowExploratory
+				? baseItems.filter((item) => isExploratoryNavigationRevealCandidateItem(item, targetKeys))
+				: []
+			if (allowExploratory && exploratoryContainers.length) {
+				return exploratoryContainers.sort((a, b) =>
+					scoreExploratoryNavigationRevealCandidate(a, targetKeys) -
+					scoreExploratoryNavigationRevealCandidate(b, targetKeys)
+				)[0]
+			}
 		}
 		return null
 	}
@@ -1991,6 +3302,42 @@
 		const hasPopup = /haspopup|dropdown|menu|list/.test(rel)
 		const expandable = expanded === 'collapsed' || hasPopup || /(submenu|dropdown|menu|collapsed|fold)/.test(stateText)
 		return expandable && isStructuralNavigationContainerLabel(label)
+	}
+
+	function isExploratoryNavigationRevealCandidateItem(item, targetKeys = []) {
+		const region = getNavigationKey(item?.region)
+		if (region !== 'header' && region !== 'sidebar') return false
+		if (isSelectedOrActiveObservedItem(item)) return false
+		const role = getNavigationKey(item?.role)
+		if (!/^(menuitem|button|link|tab)$/.test(role)) return false
+		const control = getNavigationKey(item?.selectionControl || item?.controlKind || item?.control)
+		if (/^(textbox|combobox|option|checkbox|radio|switch|listbox)$/.test(role)) return false
+		if (/(dropdown|select|checkbox|radio|cascader)/i.test(control)) return false
+		const label = getNavigationKey(getObservedItemLabel(item))
+		if (!isSafeExploratoryNavigationContainerLabel(label)) return false
+		if (!isExpandableNavigationContainer(item)) return false
+		if ((Array.isArray(targetKeys) ? targetKeys : []).some((target) => labelMatchesNavigationKey(label, getNavigationKey(target)))) return false
+		return true
+	}
+
+	function isExpandableNavigationContainer(item) {
+		const rel = getNavigationKey(item?.rel || item?.ariaControls || item?.ariaOwns || '')
+		const expanded = getNavigationKey(item?.expandedState || item?.expanded || '')
+		const stateText = getNavigationKey(item?.stateHints || item?.state || '')
+		return expanded === 'collapsed' ||
+			/haspopup|dropdown|menu|list/.test(rel) ||
+			/(submenu|sub-menu|dropdown|menu|collapsed|fold|expandable|haschildren|has-children|treeitem)/.test(stateText)
+	}
+
+	function isSafeExploratoryNavigationContainerLabel(label) {
+		const key = getNavigationKey(label)
+		if (!key) return false
+		if (key.length > 30) return false
+		if (isStructuralNavigationContainerLabel(key)) return true
+		if (/^(首页|主页|home|搜索|查询|筛选|搜索内容|登录|登陆|退出|退出登录|个人信息|用户中心|消息|通知|帮助|刷新|返回|关闭|取消|保存|提交|确定|上一页|下一页|分页|新建|新增|创建|添加|编辑|删除|详情|导入|导出)$/i.test(key)) {
+			return false
+		}
+		return !/(新增|新建|创建|添加|编辑|删除|详情|明细|导入|导出|保存|提交|确定|取消)$/i.test(key)
 	}
 
 	function isStructuralNavigationContainerLabel(label) {
@@ -2079,6 +3426,14 @@
 		else if (region === 'header') score -= 1
 		const rect = item?.rect || {}
 		return score * 1000000 + (Number(rect.top) || 0) * 1000 + (Number(rect.left) || 0)
+	}
+
+	function scoreExploratoryNavigationRevealCandidate(item, targetKeys = []) {
+		const label = getNavigationKey(getObservedItemLabel(item))
+		let score = scoreNavigationRevealCandidate(item, targetKeys)
+		if (isStructuralNavigationContainerLabel(label)) score -= 8000000
+		if (/(管理|中心|系统|设置|配置|工具|console|admin|management|settings|config)$/i.test(label)) score -= 2000000
+		return score
 	}
 
 	function scoreNavigationParentRelation(label, targetKey) {
@@ -2762,6 +4117,7 @@
 			const step = String(input.workflow_step || '')
 			const workflow = String(input.workflow || '')
 			if (workflow && workflow !== 'form-fill') return false
+			if ((action === 'input_text' || action === 'type') && step === 'fill_form_field_task_value') return true
 			if (action === 'select_cascader_path' && step === 'select_cascader_path_timeout_recovery') return true
 			return action === 'click_element_by_index' && step === 'select_visible_cascader_option_timeout_recovery'
 		})
@@ -2797,6 +4153,7 @@
 		const step = String(input.workflow_step || '')
 		if (action === 'input_text' || action === 'type') {
 			return step === 'fill_form_field_timeout_recovery' ||
+				step === 'fill_form_field_task_value' ||
 				step === 'resolve_duplicate_field_conflict' ||
 				step === 'resolve_field_validation_error'
 		}
@@ -2884,7 +4241,24 @@
 		const value = String(item?.valueState || item?.value || item?.selected || '').trim()
 		if (!value) return true
 		if (/^(empty|空|未选择|未填写)$/i.test(value)) return true
+		if ((isDropdownFormField(item) || isCascaderFormField(item)) && isPlaceholderSelectionValue(value, item)) return true
 		if (/^(filled|selected|checked):/i.test(value)) return false
+		return false
+	}
+
+	function isPlaceholderSelectionValue(value, item) {
+		const raw = String(value || '').trim()
+		if (!raw) return true
+		const match = raw.match(/^(?:selected|filled):\s*(.+)$/i)
+		const text = cleanAssignmentValue(match?.[1] || raw)
+		if (!text) return true
+		const key = getNavigationKey(text)
+		const labelKey = getNavigationKey(getObservedItemLabel(item))
+		if (!key) return true
+		if (labelKey && key === labelKey) return true
+		if (/^(empty|unknown|null|undefined|none|select|choose|pleaseselect|pleasechoose|请选择|请选择一项|选择|展开选项|全部|任意|不限|无|空)$/i.test(key)) return true
+		if (/^请选择/i.test(text)) return true
+		if (/^(选择|please\s+select|choose|select)(\s|$)/i.test(text)) return true
 		return false
 	}
 
@@ -3498,7 +4872,7 @@
 			if (Number(input.index) !== Number(index)) return false
 			if (String(actionName || '') && action !== actionName) return false
 			const step = String(input.workflow_step || '')
-			if (!/^(fill_form_field_timeout_recovery|open_form_dropdown_timeout_recovery|choose_form_dropdown_timeout_recovery)$/.test(step)) return false
+			if (!/^(fill_form_field_timeout_recovery|fill_form_field_task_value|open_form_dropdown_timeout_recovery|choose_form_dropdown_timeout_recovery)$/.test(step)) return false
 			if (!target) return true
 			const attempted = getNavigationKey(cleanAssignmentValue(input.text || input.label || input.workflow_requested_text || ''))
 			return !attempted || attempted === target
@@ -3859,8 +5233,10 @@
 		const text = normalizeTaskTextForNavigation(String(session?.latestTask || session?.task || ''))
 		const labels = []
 		const chineseTargetContext = '(?:部分|模块|页面|网页|页|区域|列表|面板|菜单|标签页|中|里|内|下)'
+		const nextAction = '(?:新增|新建|创建|添加|增加|编辑|修改|更新|查看|预览|测试|验证|检查|排查|搜索|查询|筛选|过滤|填写|填入|填表|录入)'
 		const chinesePatterns = [
 			/(?:找到|进入|打开|前往|切换到|定位到|访问|查看)\s*[“"']([^”"']{1,48})[”"']/g,
+			new RegExp(`(?:找到|进入|打开|前往|切换到|定位到|访问|查看|在)\\s*([^，。；;,\\n\\r]{2,40}?)(?=(?:后|之后|以后)(?:再|就)?${nextAction})`, 'g'),
 			new RegExp(`(?:找到|进入|打开|前往|切换到|定位到|访问|查看|在)\\s*([^，。；;,\\n\\r]{1,56}?)${chineseTargetContext}`, 'g'),
 			/在\s*([^，。；;,\n\r]{2,40}?)(?=(?:新增|新建|创建|添加|增加|编辑|修改|更新|查看|预览|测试|验证|检查|排查|搜索|查询|筛选|过滤|填写|填入|填表|录入))/g,
 			/(?:找到|进入|前往|切换到|定位到|访问)\s*([^，。；;,\n\r]{2,40})(?=[，。；;,\n\r]|$)/g,
@@ -3904,10 +5280,38 @@
 	}
 
 	function stripTaskNavigationContextSuffix(value) {
-		return String(value || '')
+		const text = String(value || '')
 			.replace(/(?:部分|模块|页面|网页|页|区域|列表|面板|菜单|标签页|中|里|内|下)$/gi, '')
 			.replace(/\s+(?:page|screen|view|section|area|panel|menu|module|tab)$/i, '')
 			.trim()
+		return stripTaskNavigationSequenceSuffix(text)
+	}
+
+	function stripTaskNavigationSequenceSuffix(value) {
+		let text = String(value || '').trim()
+		for (let i = 0; i < 3; i++) {
+			const next = removeOneTaskNavigationSequenceSuffix(text)
+			if (next === text) break
+			text = next
+		}
+		return text.trim()
+	}
+
+	function removeOneTaskNavigationSequenceSuffix(value) {
+		const text = String(value || '').trim()
+		if (!text) return ''
+		const afterMatch = text.match(/^(.+?)(?:之后|以后|后再|后就)$/)
+		if (afterMatch?.[1] && isLikelyNavigationSequenceStem(afterMatch[1])) return afterMatch[1].trim()
+		const bareAfterMatch = text.match(/^(.+?)后$/)
+		if (bareAfterMatch?.[1] && isLikelyNavigationSequenceStem(bareAfterMatch[1])) return bareAfterMatch[1].trim()
+		return text
+	}
+
+	function isLikelyNavigationSequenceStem(value) {
+		const text = String(value || '').replace(/\s+/g, '').trim()
+		if (text.length < 2) return false
+		return /(?:管理|中心|模块|页面|网页|页|区域|列表|面板|菜单|标签页|系统|设置|配置|审批|报表|工具)$/i.test(text) ||
+			/(?:page|screen|view|section|area|panel|menu|module|tab)$/i.test(text)
 	}
 
 	function trimToLastTaskNavigationVerb(value) {

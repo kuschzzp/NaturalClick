@@ -26,7 +26,12 @@
 				}
 				state.seededFromHistory = true
 			}
-			if (state.activeFieldKey && !getFieldByKey(fields, state.activeFieldKey) && !isTerminalSearchPhase(state.phase)) {
+			if (
+				state.activeFieldKey &&
+				!getFieldByKey(fields, state.activeFieldKey) &&
+				!canKeepTemporarilyMissingActiveField(state, state.activeFieldKey) &&
+				!isTerminalSearchPhase(state.phase)
+			) {
 				state.activeFieldKey = ''
 				state.phase = state.phase === 'failed' ? 'failed' : 'select_field'
 			}
@@ -105,49 +110,163 @@
 		function refreshSearchStateFields(state, fields) {
 			const nextFields = {}
 			const nextOrder = []
+			const previousFields = state.fields && typeof state.fields === 'object' ? state.fields : {}
+			const previousIdentityCounts = countSearchFieldIdentities(Object.values(previousFields))
+			const currentIdentityCounts = countSearchFieldIdentities(fields || [])
+			const usedPreviousKeys = new Set()
+			const keyAliases = {}
 			for (const field of fields || []) {
 				const key = getFieldKey(field)
 				if (!key || nextFields[key]) continue
+				const previousKey = findPreviousFieldKeyForCurrentField({
+					state,
+					field,
+					key,
+					nextFields,
+					previousIdentityCounts,
+					currentIdentityCounts,
+					usedPreviousKeys,
+				})
+				if (previousKey && previousKey !== key) {
+					keyAliases[previousKey] = key
+					usedPreviousKeys.add(previousKey)
+				}
 				nextOrder.push(key)
 				nextFields[key] = {
-					...(state.fields?.[key] || {}),
+					...(previousFields[previousKey || key] || {}),
 					key,
 					index: Number(field.index),
 					label: getFieldLabel(field),
 					fieldType: String(field?.fieldType || ''),
+					temporarilyMissing: false,
+					missingObservationCount: 0,
 				}
 			}
+			preserveTemporarilyMissingSearchFields(state, previousFields, nextFields, nextOrder, keyAliases)
 			state.fieldOrder = nextOrder
 			state.fields = nextFields
-			state.completedKeys = (Array.isArray(state.completedKeys) ? state.completedKeys : []).filter((key) => !!nextFields[key])
-			state.skippedKeys = (Array.isArray(state.skippedKeys) ? state.skippedKeys : []).filter((key) => !!nextFields[key])
-			state.resetCompletedKeys = (Array.isArray(state.resetCompletedKeys) ? state.resetCompletedKeys : []).filter((key) => !!nextFields[key])
+			state.activeFieldKey = remapSearchFieldKey(state.activeFieldKey, keyAliases)
+			state.lastSearchedFieldKey = remapSearchFieldKey(state.lastSearchedFieldKey, keyAliases)
+			state.pendingDropdownFieldKey = remapSearchFieldKey(state.pendingDropdownFieldKey, keyAliases)
+			state.terminalFieldKey = remapSearchFieldKey(state.terminalFieldKey, keyAliases)
+			state.completedKeys = remapSearchFieldKeyList(state.completedKeys, nextFields, keyAliases)
+			state.skippedKeys = remapSearchFieldKeyList(state.skippedKeys, nextFields, keyAliases)
+			state.resetCompletedKeys = remapSearchFieldKeyList(state.resetCompletedKeys, nextFields, keyAliases)
 			if (!state.resultsByKey || typeof state.resultsByKey !== 'object') state.resultsByKey = {}
-			for (const key of Object.keys(state.resultsByKey || {})) {
-				if (!nextFields[key]) delete state.resultsByKey[key]
-			}
+			state.resultsByKey = remapSearchFieldKeyedObject(state.resultsByKey, nextFields, keyAliases, true)
 			if (!state.clearRetryAttemptsByKey || typeof state.clearRetryAttemptsByKey !== 'object') state.clearRetryAttemptsByKey = {}
-			for (const key of Object.keys(state.clearRetryAttemptsByKey || {})) {
-				if (!nextFields[key]) delete state.clearRetryAttemptsByKey[key]
-			}
+			state.clearRetryAttemptsByKey = remapSearchFieldKeyedObject(state.clearRetryAttemptsByKey, nextFields, keyAliases)
 			if (!state.clearFailureDetailsByKey || typeof state.clearFailureDetailsByKey !== 'object') state.clearFailureDetailsByKey = {}
-			for (const key of Object.keys(state.clearFailureDetailsByKey || {})) {
-				if (!nextFields[key]) delete state.clearFailureDetailsByKey[key]
-			}
+			state.clearFailureDetailsByKey = remapSearchFieldKeyedObject(state.clearFailureDetailsByKey, nextFields, keyAliases)
 			if (!state.evidenceRequestAttemptsByKey || typeof state.evidenceRequestAttemptsByKey !== 'object') state.evidenceRequestAttemptsByKey = {}
-			for (const key of Object.keys(state.evidenceRequestAttemptsByKey || {})) {
-				if (!nextFields[key]) delete state.evidenceRequestAttemptsByKey[key]
-			}
-			for (const key of Object.keys(state.failedLabelsByKey || {})) {
-				if (!nextFields[key]) delete state.failedLabelsByKey[key]
-			}
-			for (const key of Object.keys(state.dropdownOpenAttemptsByKey || {})) {
-				if (!nextFields[key]) delete state.dropdownOpenAttemptsByKey[key]
-			}
+			state.evidenceRequestAttemptsByKey = remapSearchFieldKeyedObject(state.evidenceRequestAttemptsByKey, nextFields, keyAliases)
+			state.failedLabelsByKey = remapSearchFieldKeyedObject(state.failedLabelsByKey || {}, nextFields, keyAliases)
+			state.dropdownOpenAttemptsByKey = remapSearchFieldKeyedObject(state.dropdownOpenAttemptsByKey || {}, nextFields, keyAliases)
 			if (!state.pendingDateRangeStartByKey || typeof state.pendingDateRangeStartByKey !== 'object') state.pendingDateRangeStartByKey = {}
-			for (const key of Object.keys(state.pendingDateRangeStartByKey || {})) {
-				if (!nextFields[key]) delete state.pendingDateRangeStartByKey[key]
+			state.pendingDateRangeStartByKey = remapSearchFieldKeyedObject(state.pendingDateRangeStartByKey, nextFields, keyAliases)
+		}
+
+		function preserveTemporarilyMissingSearchFields(state, previousFields, nextFields, nextOrder, keyAliases = {}) {
+			const previousOrder = Array.isArray(state?.fieldOrder) ? state.fieldOrder : Object.keys(previousFields || {})
+			for (const previousKey of previousOrder) {
+				const key = String(previousKey || '').trim()
+				if (!key || nextFields[key]) continue
+				if (keyAliases && keyAliases[key]) continue
+				const previous = previousFields?.[key]
+				if (!previous || typeof previous !== 'object') continue
+				if (!shouldPreserveTemporarilyMissingSearchField(state, key, previous)) continue
+				nextOrder.push(key)
+				nextFields[key] = {
+					...previous,
+					key,
+					temporarilyMissing: true,
+					missingObservationCount: Math.max(0, Number(previous.missingObservationCount) || 0) + 1,
+				}
 			}
+		}
+
+		function shouldPreserveTemporarilyMissingSearchField(state, key, field) {
+			if (!key || !field) return false
+			if (Array.isArray(state?.completedKeys) && state.completedKeys.includes(key)) return true
+			if (Array.isArray(state?.skippedKeys) && state.skippedKeys.includes(key)) return true
+			if (Array.isArray(state?.resetCompletedKeys) && state.resetCompletedKeys.includes(key)) return true
+			if (state?.resultsByKey && typeof state.resultsByKey === 'object' && state.resultsByKey[key]) return true
+			if (state?.clearFailureDetailsByKey && typeof state.clearFailureDetailsByKey === 'object' && state.clearFailureDetailsByKey[key]) return true
+			if (Number(state?.clearRetryAttemptsByKey?.[key]) > 0) return true
+			if (Number(state?.evidenceRequestAttemptsByKey?.[key]) > 0) return true
+			if (Number(state?.dropdownOpenAttemptsByKey?.[key]) > 0) return true
+			if (state?.failedLabelsByKey?.[key]) return true
+			if (state?.pendingDateRangeStartByKey?.[key]) return true
+			if (String(state?.pendingDropdownFieldKey || '') === key) return true
+			if (String(state?.terminalFieldKey || '') === key) return true
+			const phase = String(state?.phase || '')
+			const isActive = String(state?.activeFieldKey || '') === key || String(state?.lastSearchedFieldKey || '') === key
+			if (isActive && /^(awaiting_submit|awaiting_reset|awaiting_option)$/i.test(phase)) return true
+			if (String(field.lastTestValue || '').trim() || String(field.lastValueSource || '').trim()) return true
+			return false
+		}
+
+		function canKeepTemporarilyMissingActiveField(state, key) {
+			if (!key || !state?.fields?.[key]?.temporarilyMissing) return false
+			return /^(awaiting_submit|awaiting_reset|awaiting_option)$/i.test(String(state?.phase || ''))
+		}
+
+		function findPreviousFieldKeyForCurrentField(context) {
+			const { state, field, key, nextFields, previousIdentityCounts, currentIdentityCounts, usedPreviousKeys } = context || {}
+			if (state?.fields?.[key]) return key
+			const identity = buildSearchFieldIdentity(field)
+			if (!identity || Number(currentIdentityCounts?.[identity] || 0) !== 1 || Number(previousIdentityCounts?.[identity] || 0) !== 1) return ''
+			for (const [previousKey, previousField] of Object.entries(state?.fields || {})) {
+				if (usedPreviousKeys?.has(previousKey) || nextFields?.[previousKey]) continue
+				if (buildSearchFieldIdentity(previousField) === identity) return previousKey
+			}
+			return ''
+		}
+
+		function countSearchFieldIdentities(fields) {
+			const counts = {}
+			for (const field of Array.isArray(fields) ? fields : []) {
+				const identity = buildSearchFieldIdentity(field)
+				if (!identity) continue
+				counts[identity] = Number(counts[identity] || 0) + 1
+			}
+			return counts
+		}
+
+		function buildSearchFieldIdentity(field) {
+			const label = normalizeText(getFieldLabel(field) || field?.label || '')
+			if (!label) return ''
+			const fieldType = normalizeText(field?.fieldType || field?.type || field?.role || '')
+			return `${label}|${fieldType}`
+		}
+
+		function remapSearchFieldKey(key, aliases) {
+			const value = String(key || '')
+			return value && aliases && aliases[value] ? aliases[value] : value
+		}
+
+		function remapSearchFieldKeyList(list, nextFields, aliases) {
+			const out = []
+			for (const key of Array.isArray(list) ? list : []) {
+				const nextKey = remapSearchFieldKey(key, aliases)
+				if (!nextKey || !nextFields[nextKey] || out.includes(nextKey)) continue
+				out.push(nextKey)
+			}
+			return out
+		}
+
+		function remapSearchFieldKeyedObject(map, nextFields, aliases, rewriteResultKey = false) {
+			const out = {}
+			for (const [key, value] of Object.entries(map && typeof map === 'object' ? map : {})) {
+				const nextKey = remapSearchFieldKey(key, aliases)
+				if (!nextKey || !nextFields[nextKey]) continue
+				if (out[nextKey] === undefined) {
+					out[nextKey] = rewriteResultKey && value && typeof value === 'object'
+						? { ...value, key: nextKey }
+						: value
+				}
+			}
+			return out
 		}
 
 		function markSearchWorkflowFailed(state, reason) {

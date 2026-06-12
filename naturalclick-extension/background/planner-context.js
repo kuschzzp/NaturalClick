@@ -293,7 +293,7 @@
 			if (source === 'forms') {
 				return '不要重复请求相同表单上下文；更换 query/region，inspect_region content/dialog，或对已确认字段执行合适工具。'
 			}
-			return '不要重复请求相同页面上下文；更换 source、region、query、cursor，或输出真实页面动作/明确失败 done(false)。'
+			return '不要重复请求相同页面上下文；若在寻找导航目标，改为展开/滚动可见导航容器或执行已确认的导航动作；否则更换 source、region、query、cursor，或明确失败 done(false)。'
 		}
 		if (name === 'inspect_index') {
 			return '不要重复 inspect 同一 index；根据已返回的 index_detail 选择真实动作，或改用 inspect_region 查看附近/当前弹层区域。'
@@ -504,7 +504,9 @@
 		if (source === 'network') return '当前观察没有接口响应摘要；可先触发列表刷新/搜索提交，或改用 tables/raw_candidates 查看页面已有数据。'
 		if (source === 'forms') return '当前观察没有匹配的表单字段；可 inspect_region content 或放宽 query。'
 		if (source === 'actions') return '当前观察没有匹配的动作按钮；可 inspect_region content 或放宽 query。'
-		if (source === 'raw_candidates' || source === 'simplified_dom') return '当前观察没有匹配的原始候选；可 inspect_region content 或更换 query。'
+		if (source === 'raw_candidates' || source === 'simplified_dom' || source === 'dom_tree') {
+			return '当前观察没有匹配的原始候选；若目标是导航/菜单，应改为 inspect_region sidebar、展开未展开导航容器或滚动导航区域，不要反复同 query；否则可 inspect_region content 或更换 query。'
+		}
 		return '当前观察没有匹配上下文；可更换 source、region、query 或 inspect_region content。'
 	}
 

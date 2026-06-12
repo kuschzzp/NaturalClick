@@ -845,33 +845,95 @@
 		async function maybeCompleteDateRangeSelection({ field, inputMode, dateSelectionTexts, firstOption }) {
 			if (!Array.isArray(dateSelectionTexts) || dateSelectionTexts.length < 2) return ''
 			const secondText = dateSelectionTexts[1]
-			if (!secondText || secondText === dateSelectionTexts[0]) return ''
+			if (!secondText) return ''
+			const sameDateRange = secondText === dateSelectionTexts[0]
 			await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 100)
 			const scoped = field instanceof HTMLElement ? { field, openedByField: true } : {}
-			const secondOption = await waitForVisibleOption(secondText, {
-				...scoped,
-				selectableOnly: false,
-				timeoutMs: 1400,
-			}) || await findDropdownOptionByScrolling(secondText, {
-				...scoped,
-				selectableOnly: false,
-				timeoutMs: 2200,
-			})
-			if (!(secondOption instanceof HTMLElement) || secondOption === firstOption) return ''
+			const secondOption = sameDateRange && isStillConnectedElement(firstOption)
+				? firstOption
+				: await waitForVisibleOption(secondText, {
+					...scoped,
+					selectableOnly: false,
+					timeoutMs: 1400,
+				}) || await findDropdownOptionByScrolling(secondText, {
+					...scoped,
+					selectableOnly: false,
+					timeoutMs: 2200,
+				})
+			if (!(secondOption instanceof HTMLElement) || (!sameDateRange && secondOption === firstOption)) return ''
 			await humanLikeClick(secondOption, null, inputMode)
 			await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 100)
+			await finalizeDateRangeSelection(field || secondOption, inputMode)
 			return getVisibleOptionLabel(secondOption) || secondText
+		}
+
+		async function finalizeDateRangeSelection(anchor, inputMode) {
+			const confirmButton = findVisibleDatePickerConfirmButton()
+			if (confirmButton) {
+				await humanLikeClick(confirmButton, null, inputMode)
+				await sleep(inputMode === 'realistic' ? randomBetween(120, 220) : 100)
+				return 'confirmed'
+			}
+			await dismissSelectionPopup(anchor, inputMode)
+			return 'dismissed'
+		}
+
+		function findVisibleDatePickerConfirmButton() {
+			if (typeof document === 'undefined') return null
+			const panelSelector = [
+				'.el-picker-panel',
+				'.ant-picker-dropdown',
+				'.arco-picker-container',
+				'.n-date-panel',
+				'.layui-laydate',
+				'.ivu-date-picker',
+				'.vxe-date-picker--panel',
+				'[class*="date-picker"]',
+				'[class*="datepicker"]',
+				'[class*="calendar"]',
+			].join(',')
+			const panels = Array.from(document.querySelectorAll(panelSelector))
+				.filter((panel) => panel instanceof HTMLElement && isVisibleDatePickerElement(panel))
+			for (const panel of panels) {
+				const buttons = Array.from(panel.querySelectorAll('button,[role="button"],.el-button,.ant-btn,.arco-btn,.n-button,.layui-laydate-btns span,.ivu-btn'))
+				for (const button of buttons) {
+					if (!(button instanceof HTMLElement) || !isVisibleDatePickerElement(button)) continue
+					if (button.getAttribute('aria-disabled') === 'true' || button.hasAttribute('disabled')) continue
+					const text = normalizeDatePickerConfirmText(button)
+					if (/^(确定|确认|完成|应用|ok|apply|done)$/i.test(text)) return button
+				}
+			}
+			return null
+		}
+
+		function normalizeDatePickerConfirmText(element) {
+			return String(
+				element?.innerText ||
+				element?.textContent ||
+				element?.getAttribute?.('aria-label') ||
+				element?.getAttribute?.('title') ||
+				''
+			).replace(/\s+/g, ' ').trim().toLowerCase()
+		}
+
+		function isVisibleDatePickerElement(element) {
+			if (!(element instanceof HTMLElement)) return false
+			const style = window.getComputedStyle(element)
+			if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false
+			const rect = element.getBoundingClientRect()
+			return rect.width > 1 && rect.height > 1
+		}
+
+		function isStillConnectedElement(element) {
+			return element instanceof HTMLElement && (element.isConnected !== false)
 		}
 
 		function parseDateSelectionRequest(value) {
 			const text = String(value || '')
 			const matches = []
-			const seen = new Set()
 			const push = (year, month, day) => {
 				const normalized = normalizeDateSelectionParts(year, month, day)
 				if (!normalized) return
-				if (seen.has(normalized)) return
-				seen.add(normalized)
 				matches.push(normalized)
 			}
 			const pattern = /(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})/g

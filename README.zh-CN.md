@@ -26,7 +26,7 @@ NaturalClick Agent 是一个 Chrome 扩展，它把浏览器侧边栏变成一�
 
 这不是隐蔽自动化工具，也不是 CAPTCHA 绕过项目。目标是透明、可调试、用户可控的真实网页自动化。
 
-当前扩展版本：`0.6.60`。版本号以 `naturalclick-extension/manifest.json` 为准。
+当前扩展版本：`0.6.64`。版本号以 `naturalclick-extension/manifest.json` 为准。
 
 ## 安装
 
@@ -153,6 +153,8 @@ naturalclick-extension/
 └── assets/                          # 扩展图标
 
 docs/
+├── agent-generalization-roadmap.zh-CN.md          # 通用网页 Agent 增强路线图
+├── agent-generalization-roadmap.md                # English general web agent roadmap
 ├── runtime-configuration-and-diagnostics.zh-CN.md  # 中文运行配置和排障说明
 ├── runtime-configuration-and-diagnostics.md        # English runtime and troubleshooting guide
 └── superpowers/specs/                              # 设计说明和历史规格
@@ -270,7 +272,7 @@ NaturalClick 对删除、支付、购买、转账、发布等高风险意图做�
 ## 当前限制
 
 - CAPTCHA、短信验证、银行、支付和身份认证通常需要人工介入。
-- 复杂自定义组件可能仍需要站点级或框架级启发式规则。
+- 复杂自定义组件仍需要更广的通用组件语义和框架形态覆盖。
 - 视觉回退效果依赖截图质量和模型可靠性。
 - 模型流式输出依赖 OpenAI 兼容接口支持 SSE 流式响应；不支持流式的接口会回退到普通 JSON 响应。
 - 目前还没有打包发布流程。

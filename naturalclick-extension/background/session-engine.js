@@ -122,7 +122,7 @@
 			session.planItems = derivePlanItems(session)
 
 			if (decision.action.name === 'done') {
-				finalizeDoneDecision(session, sessions, decision)
+				finalizeDoneDecision(session, sessions, decision, observationData)
 				return
 			}
 
@@ -415,8 +415,8 @@
 		sessions.delete(session.id)
 	}
 
-	function finalizeDoneDecision(session, sessions, decision) {
-		const unsafeDone = getUnsafeDoneSuccessReason(session, decision)
+	function finalizeDoneDecision(session, sessions, decision, observation = null) {
+		const unsafeDone = getUnsafeDoneSuccessReason(session, decision, observation)
 		const doneSuccess = decision.action.input?.success !== false && !unsafeDone
 		session.status = doneSuccess ? 'completed' : 'error'
 		const doneText = decision.action.input?.text || '任务完成。'

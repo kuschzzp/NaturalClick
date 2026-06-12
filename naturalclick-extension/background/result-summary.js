@@ -34,6 +34,9 @@
 		type_constraints: '字段约束',
 		type_default: '类型默认值',
 		task_value: '任务文本',
+		visible_evidence: '可见证据',
+		recent_history: '历史任务变量',
+		previous_field_action: '历史字段动作',
 		table_sample: '列表样本',
 		visible_option: '真实候选',
 		option_candidate: '真实候选',
@@ -44,10 +47,10 @@
 	function buildResultSummary(session) {
 		const search = buildSearchResultSummary(session)
 		if (search) return enrichResultSummaryWithOperationalDiagnostics(search, session)
-		const information = buildInformationResultSummary(session)
-		if (information) return enrichResultSummaryWithOperationalDiagnostics(information, session)
 		const formTask = buildFormTaskResultSummary(session)
 		if (formTask) return enrichResultSummaryWithOperationalDiagnostics(formTask, session)
+		const information = buildInformationResultSummary(session)
+		if (information) return enrichResultSummaryWithOperationalDiagnostics(information, session)
 		const fieldActions = buildFieldActionResultSummary(session)
 		if (fieldActions) return enrichResultSummaryWithOperationalDiagnostics(fieldActions, session)
 		const login = buildLoginResultSummary(session)
@@ -1750,13 +1753,6 @@
 			const input = item?.input && typeof item.input === 'object' ? item.input : {}
 			const step = String(input.workflow_step || '').trim()
 			if (step === 'finish_create_after_submit_no_form') return item
-			if (
-				normalizeActionName(item?.action) === 'done' &&
-				item?.success === true &&
-				(String(input.workflow || '').trim() === 'form-fill' || String(input.workflow || '').trim() === 'create-task')
-			) {
-				return item
-			}
 		}
 		return null
 	}
@@ -2349,12 +2345,14 @@
 		const sourceAction = getFieldActionSourceAction(item, action)
 		const input = item?.input || {}
 		const label = getFieldActionLabel(item)
-			const rawValue = getFieldActionValue(item)
-			const value = formatFieldActionDisplayValue(rawValue, item)
-			const valueSource = getFieldActionValueSource(item, { rawValue, value, optionEvidence: options.optionEvidence })
-			const valueSourceLabel = valueSource ? (FIELD_VALUE_SOURCE_LABELS[valueSource] || valueSource) : ''
-			const basis = maskSensitiveValuesInText(getFieldActionValueBasis(item, { rawValue, value, optionEvidence: options.optionEvidence }), options.sensitiveValues)
-			const success = item?.success
+		const rawValue = getFieldActionValue(item)
+		const value = formatFieldActionDisplayValue(rawValue, item)
+		const valueSource = getFieldActionValueSource(item, { rawValue, value, optionEvidence: options.optionEvidence })
+		const valueSourceLabel = valueSource ? (FIELD_VALUE_SOURCE_LABELS[valueSource] || valueSource) : ''
+		const basis = maskSensitiveValuesInText(getFieldActionValueBasis(item, { rawValue, value, optionEvidence: options.optionEvidence }), options.sensitiveValues)
+		const mergedValueSourceLabel = mergeFieldActionEvidenceTrail(previous?.valueSourceLabel, valueSourceLabel, ' -> ', 120)
+		const mergedBasis = mergeFieldActionEvidenceTrail(previous?.basis, basis, ' -> ', 240)
+		const success = item?.success
 		const status = success === false ? 'failed' : (success === true ? 'passed' : 'unknown')
 		const attempts = Number(previous?.attempts || 0) + 1
 		const failedAttempts = Number(previous?.failedAttempts || 0) + (success === false ? 1 : 0)
@@ -2372,16 +2370,32 @@
 			statusLabel: status === 'passed' ? '通过' : status === 'failed' ? '失败' : '未确认',
 			recorded: true,
 			value,
-				source: sourceAction,
-				sourceLabel: FIELD_ACTION_LABELS[sourceAction] || sourceAction,
-				sourceTitle: '动作',
-				valueSource,
-				valueSourceLabel,
-				basis,
-				attempts,
-				failedAttempts,
-				summary,
+			source: sourceAction,
+			sourceLabel: FIELD_ACTION_LABELS[sourceAction] || sourceAction,
+			sourceTitle: '动作',
+			valueSource,
+			valueSourceLabel: mergedValueSourceLabel,
+			basis: mergedBasis,
+			attempts,
+			failedAttempts,
+			summary,
 		}
+	}
+
+	function mergeFieldActionEvidenceTrail(previous, current, separator = ' -> ', limit = 160) {
+		const parts = []
+		const add = (value) => {
+			for (const part of String(value || '').split(separator)) {
+				const text = String(part || '').trim()
+				if (!text) continue
+				if (parts[parts.length - 1] === text) continue
+				parts.push(text)
+			}
+		}
+		add(previous)
+		add(current)
+		const text = parts.join(separator)
+		return text.length > limit ? `${text.slice(0, Math.max(0, limit - 3))}...` : text
 	}
 
 	function getFieldActionSourceAction(item, action) {
@@ -2906,6 +2920,7 @@
 	function isInformationSeekingSummaryTask(session) {
 		const text = String(session?.latestTask || session?.task || '').trim()
 		if (!text || isFieldActionSummaryTask(session)) return false
+		if (isFormTaskSummaryTask(session)) return false
 		if (/(测试|验证|检查|每个|每一个|所有|全部|功能是否|是否正常|test|verify|check)/i.test(text)) return false
 		return /(搜索一下|搜一下|查一下|查询一下|谷歌搜索|百度搜索|必应搜索|网上搜索|搜索最新|最新|价格|行情|新闻|资讯|资料|总结|分析|是否|是不是|值得|买入|卖出|search\s+(?:for|the\s+web|google|bing)|look\s*up|research|latest|price|news|summari[sz]e|analy[sz]e|whether|worth)/i.test(text)
 	}

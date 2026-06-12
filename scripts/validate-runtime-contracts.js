@@ -56,6 +56,7 @@ async function main() {
 	assertInitialNavigationBehavior()
 	assertTaskIntentBehavior()
 	assertConversationMemoryBehavior()
+	assertSearchStateMigratesDynamicIndexes()
 	await assertPlannerUsesModelDecisionOnTarget()
 	await assertPlannerTaskIntentBeforeNavigation()
 	await assertPlannerUsesOperationOnlyHeuristicOnLocalSurface()
@@ -88,6 +89,14 @@ async function main() {
 	await assertPlannerDuplicateFormConflictSubmitsAfterReplacement()
 	await assertPlannerDuplicateFormConflictIgnoresLoopGuardAfterReplacement()
 	await assertPlannerValidationErrorCorrectsForbiddenCharacters()
+	await assertPlannerRequiredSelectionValidationOpensDropdown()
+	await assertPlannerRequiredSelectionValidationTreatsPlaceholderAsEmpty()
+	await assertPlannerRequiredCascaderValidationOpensDropdown()
+	await assertPlannerRequiredSelectionValidationChoosesUniqueNativeOption()
+	await assertPlannerRequiredSelectionValidationChoosesUniqueVisibleOption()
+	await assertPlannerRequiredSelectionValidationTrustsScopedSourceWithoutOwnerIndex()
+	await assertPlannerRequiredSelectionValidationRejectsDiagnosticSource()
+	await assertPlannerRequiredSelectionValidationAsksWhenVisibleOptionsAreAmbiguous()
 	await assertPlannerValidationCorrectionSubmits()
 	await assertPlannerHistoryOutcomeGuidesReplanning()
 	await assertPlannerRejectsRepeatedFailedDropdownRequest()
@@ -175,6 +184,7 @@ async function main() {
 	await assertVerificationFailureFeedsLoopGuard()
 	await assertSessionDoneFailureIsError()
 	await assertSessionDoneRecordsHistoryPlanAndWorkflowOutcome()
+	await assertSessionDoneSuccessWithVisibleFormValidationIsError()
 	await assertSessionDoneSuccessAfterFailureIsError()
 	await assertSessionDoneSuccessAfterFailureAndWaitIsError()
 	assertRedundantInputRewriteComparesText()
@@ -1598,6 +1608,22 @@ function assertTaskIntentBehavior() {
 	if (!punctuatedNavigationKeys.includes('设置') || punctuatedNavigationKeys.some((key) => /^[，。；;、,.!?！？:：]/.test(key))) {
 		throw new Error(`task-intent should trim leading punctuation from navigation aliases, got intent=${JSON.stringify(punctuatedNavigationCreate)} keys=${JSON.stringify(punctuatedNavigationKeys)}`)
 	}
+	const chainedCreateTask = '进入http://example.test/#/login这个网站，登录账号admin 密码123456，进入账户中心后创建一个新账号。用户名使用google搜索一下最新的黄金价格作为用户名。'
+	const chainedCreateIntent = taskIntent.deriveHeuristicTaskIntent(chainedCreateTask)
+	const chainedCreateSession = {
+		task: chainedCreateTask,
+		latestTask: chainedCreateTask,
+		workflowState: {},
+	}
+	taskIntent.storeTaskIntent(chainedCreateSession, chainedCreateIntent, { model: 'local-heuristic' })
+	const chainedCreateKeys = taskIntent.getNavigationTargetKeys(chainedCreateSession)
+	if (
+		chainedCreateIntent?.operation !== 'create' ||
+		!chainedCreateKeys.includes('账户中心') ||
+		chainedCreateKeys.some((key) => /账户中心后|创建|黄金价格|用户名/.test(key))
+	) {
+		throw new Error(`task-intent should strip sequence connectors from navigation targets in chained create/value-lookup tasks, got intent=${JSON.stringify(chainedCreateIntent)} keys=${JSON.stringify(chainedCreateKeys)}`)
+	}
 	const explicitCreateCredentialForm = taskIntent.normalizeTaskIntent({
 		auth: { username: 'admin', password: '123456' },
 		navigationTargets: [{ raw: '账号设置页面', canonical: '账号设置', aliases: ['账号设置'] }],
@@ -2063,9 +2089,119 @@ function assertConversationMemoryBehavior() {
 		!formatted.includes('alpha-001') ||
 		!formatted.includes('status=failed') ||
 		!formatted.includes('新建一条资料') ||
-		!formatted.includes('不是全局长期记忆')
+		!formatted.includes('不是全局长期记忆') ||
+		formatted.includes('type=record_fact')
 	) {
-		throw new Error(`conversation memory should preserve current-turn facts and failure state, got ${formatted}`)
+		throw new Error(`conversation memory should preserve current-turn facts and failure state without confirmed record facts, got ${formatted}`)
+	}
+	const confirmedMemory = memoryApi.createConversationMemorySnapshot({
+		task: '查询刚才创建的资料',
+		conversationId: 'c_test',
+		turnCount: 3,
+		traceItems: [
+			{ title: '用户输入 #1', kind: 'user', detail: '帮我新建一条资料' },
+			{
+				title: '步骤 1: input_text',
+				kind: 'step',
+				action: {
+					name: 'input_text',
+					input: { workflow: 'form-fill', workflow_step: 'fill_form_field_timeout_recovery', target_label: '记录编号', text: 'alpha-001' },
+					output: '已在索引 3 输入文本。 | 动作结果: value_changed progress=true',
+				},
+			},
+			{
+				title: '步骤 2: input_text',
+				kind: 'step',
+				action: {
+					name: 'input_text',
+					input: { workflow: 'form-fill', workflow_step: 'fill_form_field_timeout_recovery', target_label: '记录名称', text: '测试资料' },
+					output: '已在索引 4 输入文本。 | 动作结果: value_changed progress=true',
+				},
+			},
+		],
+		resultSummary: {
+			type: 'form_task',
+			title: '表单任务结果总结',
+			status: 'passed',
+			headline: '表单任务完成：字段 2/2 项，已提交 1 次，完成已确认。',
+		},
+	})
+	const confirmedFormatted = memoryApi.formatConversationMemoryForPrompt(confirmedMemory)
+	if (
+		!confirmedFormatted.includes('type=record_fact') ||
+		!confirmedFormatted.includes('label="最近确认记录"') ||
+		!confirmedFormatted.includes('记录编号=alpha-001') ||
+		!confirmedFormatted.includes('记录名称=测试资料') ||
+		!confirmedFormatted.includes('status=passed')
+	) {
+		throw new Error(`conversation memory should promote confirmed form fields into a reusable record fact, got ${confirmedFormatted}`)
+	}
+}
+
+function assertSearchStateMigratesDynamicIndexes() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/search-workflow-state.js')
+	const helpers = sandbox.NC_BG_SEARCH_WORKFLOW_STATE.createSearchStateHelpers({
+		getFieldKey: (field) => `index:${Number(field?.index)}`,
+		getFieldLabel: (field) => String(field?.label || ''),
+		isTerminalSearchPhase: () => false,
+		isFilled: () => false,
+		normalizeText: (value) => String(value || '').replace(/\s+/g, '').trim().toLowerCase(),
+	})
+	const session = {
+		workflowState: {
+			search: {
+				version: 6,
+				phase: 'select_field',
+				activeFieldKey: 'index:25',
+				lastSearchedFieldKey: 'index:25',
+				pendingDropdownFieldKey: 'index:25',
+				terminalFieldKey: 'index:25',
+				fieldOrder: ['index:25', 'index:26'],
+				fields: {
+					'index:25': { key: 'index:25', index: 25, label: '对象名称', fieldType: 'text', lastTestValue: '星火科技' },
+					'index:26': { key: 'index:26', index: 26, label: '状态', fieldType: 'select' },
+				},
+				completedKeys: ['index:25'],
+				skippedKeys: [],
+				resetCompletedKeys: ['index:25'],
+				resultsByKey: {
+					'index:25': { key: 'index:25', label: '对象名称', value: '星火科技', status: 'passed_match' },
+				},
+				clearRetryAttemptsByKey: { 'index:25': 1 },
+				clearFailureDetailsByKey: { 'index:25': { reason: '旧字段未清空' } },
+				evidenceRequestAttemptsByKey: { 'index:25': 2 },
+				failedLabelsByKey: { 'index:25': ['停用'] },
+				dropdownOpenAttemptsByKey: { 'index:25': 3 },
+				pendingDateRangeStartByKey: { 'index:25': { start: '2026-06-01' } },
+				baselineResetDone: true,
+				seededFromHistory: true,
+			},
+		},
+	}
+	helpers.syncSearchState(session, [
+		{ index: 41, label: '对象名称', fieldType: 'text' },
+		{ index: 42, label: '状态', fieldType: 'select' },
+	])
+	const state = session.workflowState.search
+	if (
+		state.activeFieldKey !== 'index:41' ||
+		state.lastSearchedFieldKey !== 'index:41' ||
+		state.pendingDropdownFieldKey !== 'index:41' ||
+		state.terminalFieldKey !== 'index:41' ||
+		state.fieldOrder.join('|') !== 'index:41|index:42' ||
+		!state.completedKeys.includes('index:41') ||
+		state.completedKeys.includes('index:25') ||
+		!state.resetCompletedKeys.includes('index:41') ||
+		state.resultsByKey?.['index:41']?.key !== 'index:41' ||
+		state.resultsByKey?.['index:41']?.value !== '星火科技' ||
+		state.clearRetryAttemptsByKey?.['index:41'] !== 1 ||
+		state.clearFailureDetailsByKey?.['index:41']?.reason !== '旧字段未清空' ||
+		state.evidenceRequestAttemptsByKey?.['index:41'] !== 2 ||
+		state.failedLabelsByKey?.['index:41']?.[0] !== '停用' ||
+		state.dropdownOpenAttemptsByKey?.['index:41'] !== 3 ||
+		state.pendingDateRangeStartByKey?.['index:41']?.start !== '2026-06-01'
+	) {
+		throw new Error(`search state should migrate completed/results metadata when field indexes change, got ${JSON.stringify(state)}`)
 	}
 }
 
@@ -4395,6 +4531,45 @@ async function assertPlannerTimeoutRecoveryOpensCreateEntry() {
 			throw new Error(`create finish workflow progress should expose ${expected}, got ${JSON.stringify(submitEvents)}`)
 		}
 	}
+	const submitErrorFeedbackDecision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			const error = new Error('abort')
+			error.name = 'AbortError'
+			throw error
+		},
+		observation: {
+			...observation,
+			content: '列表页\n错误: 请选择所属角色',
+			forms: [],
+			feedback: [{ kind: 'error', text: '请选择所属角色' }],
+		},
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: { taskIntent: intentState },
+			history: [
+				{
+					action: 'click_element_by_index',
+					input: {
+						index: 19,
+						target_label: '保存',
+						workflow: 'form-fill',
+						workflow_step: 'submit_form_timeout_recovery',
+					},
+					output: '已点击保存。',
+					success: true,
+				},
+			],
+		},
+	})
+	assertAction(submitErrorFeedbackDecision.result, 'done')
+	if (
+		submitErrorFeedbackDecision.result.action.input.success !== false ||
+		!String(submitErrorFeedbackDecision.result.action.input.text || '').includes('请选择所属角色') ||
+		submitErrorFeedbackDecision.result.action.input.workflow_step !== 'finish_create_after_submit_no_form'
+	) {
+		throw new Error(`create-entry recovery must not report success when post-submit feedback still shows validation errors, got ${JSON.stringify(submitErrorFeedbackDecision.result)}`)
+	}
 }
 
 async function assertPlannerTimeoutRecoverySelectsExplicitCascaderPath() {
@@ -5512,6 +5687,7 @@ async function assertPlannerPreModelInputFieldTestSkipsModelWhenDeterministic() 
 		task,
 		latestTask: task,
 		workflowState: {
+			initialNavigation: { targetUrl: 'http://example.test/#/login' },
 			taskIntent: {
 				version: 4,
 				status: 'ready',
@@ -6034,6 +6210,296 @@ async function assertPlannerValidationErrorCorrectsForbiddenCharacters() {
 	}
 }
 
+async function assertPlannerRequiredSelectionValidationOpensDropdown() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called when required selection needs candidates')
+		},
+		observation: buildRequiredSelectionValidationObservation(),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属角色'),
+			],
+		},
+	})
+	assertAction(decision.result, 'open_dropdown')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 8 ||
+		decision.result.action.input.target_label !== '所属角色' ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error' ||
+		decision.result.action.input.workflow_value_source !== 'page_validation' ||
+		!String(decision.result.action.input.workflow_validation_error || '').includes('请选择所属角色')
+	) {
+		throw new Error(`required empty selection should be opened for real candidates, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerRequiredSelectionValidationTreatsPlaceholderAsEmpty() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called when selected placeholder is still empty')
+		},
+		observation: buildRequiredSelectionValidationObservation({
+			valueState: 'selected:请选择所属角色',
+		}),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属角色'),
+			],
+		},
+	})
+	assertAction(decision.result, 'open_dropdown')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 8 ||
+		decision.result.action.input.target_label !== '所属角色' ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error'
+	) {
+		throw new Error(`selected placeholder should still be treated as empty required selection, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerRequiredCascaderValidationOpensDropdown() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called when required cascader needs candidates')
+		},
+		observation: buildRequiredSelectionValidationObservation({
+			index: 10,
+			fieldType: 'region',
+			kind: 'cascader',
+			label: '所属区域',
+			role: 'combobox',
+			selectionControl: 'cascader-parent',
+			valueState: 'selected:请选择所属区域',
+			validationMessage: '请选择所属区域',
+		}),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属区域'),
+			],
+		},
+	})
+	assertAction(decision.result, 'open_dropdown')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 10 ||
+		decision.result.action.input.target_label !== '所属区域' ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error' ||
+		decision.result.action.input.workflow_value_source !== 'page_validation'
+	) {
+		throw new Error(`required empty cascader should be opened for real candidates, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerRequiredSelectionValidationChoosesUniqueNativeOption() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called when a single native option exists')
+		},
+		observation: buildRequiredSelectionValidationObservation({
+			optionLabels: ['请选择所属角色', '操作员'],
+		}),
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属角色'),
+			],
+		},
+	})
+	assertAction(decision.result, 'choose_dropdown_option')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 8 ||
+		decision.result.action.input.text !== '操作员' ||
+		decision.result.action.input.target_label !== '所属角色' ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error' ||
+		decision.result.action.input.workflow_value_source !== 'page_validation' ||
+		!String(decision.result.action.input.workflow_value_basis || '').includes('唯一安全候选')
+	) {
+		throw new Error(`required empty selection should choose unique native option, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerRequiredSelectionValidationChoosesUniqueVisibleOption() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const observation = {
+		...buildRequiredSelectionValidationObservation({
+			expandedState: 'expanded',
+		}),
+		options: [
+			{ index: 31, region: 'popover', role: 'option', label: '操作员', ownerIndex: 8, ownerLabel: '所属角色' },
+		],
+	}
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called when a single scoped visible option exists')
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属角色'),
+				buildRequiredSelectionOpenHistory(),
+			],
+		},
+	})
+	assertAction(decision.result, 'choose_dropdown_option')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 8 ||
+		decision.result.action.input.text !== '操作员' ||
+		decision.result.action.input.target_label !== '所属角色' ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error'
+	) {
+		throw new Error(`required selection should choose a unique scoped visible option, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerRequiredSelectionValidationTrustsScopedSourceWithoutOwnerIndex() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const observation = {
+		...buildRequiredSelectionValidationObservation({
+			expandedState: 'expanded',
+		}),
+		options: [
+			{ index: 31, region: 'popover', role: 'option', label: '操作员', source: 'field_scoped_popup' },
+		],
+	}
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called for field-scoped source evidence')
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属角色'),
+				buildRequiredSelectionOpenHistory(),
+			],
+		},
+	})
+	assertAction(decision.result, 'choose_dropdown_option')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.index !== 8 ||
+		decision.result.action.input.text !== '操作员' ||
+		decision.result.action.input.target_label !== '所属角色'
+	) {
+		throw new Error(`required selection should trust field-scoped source evidence without ownerIndex, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerRequiredSelectionValidationRejectsDiagnosticSource() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const observation = {
+		...buildRequiredSelectionValidationObservation({
+			expandedState: 'expanded',
+		}),
+		options: [
+			{ index: 31, region: 'popover', role: 'option', label: '操作员', source: 'global_popup_diagnostic' },
+		],
+	}
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called for diagnostic-only required candidates')
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属角色'),
+				buildRequiredSelectionOpenHistory(),
+			],
+		},
+	})
+	assertAction(decision.result, 'ask_user')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.workflow_field_label !== '所属角色' ||
+		String(decision.result.action.input.workflow_visible_options || '').includes('操作员') ||
+		!String(decision.result.action.input.reason || '').includes('候选不可见')
+	) {
+		throw new Error(`diagnostic required selection candidate should be ignored and ask for user input, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+async function assertPlannerRequiredSelectionValidationAsksWhenVisibleOptionsAreAmbiguous() {
+	let requestCount = 0
+	const task = '新建一条主体档案，主体名称是张三。'
+	const observation = {
+		...buildRequiredSelectionValidationObservation({
+			expandedState: 'expanded',
+		}),
+		options: [
+			{ index: 31, region: 'popover', role: 'option', label: '操作员', ownerIndex: 8, ownerLabel: '所属角色' },
+			{ index: 32, region: 'popover', role: 'option', label: '审核员', ownerIndex: 8, ownerLabel: '所属角色' },
+		],
+	}
+	const decision = await runPlannerWithFakeModel({
+		fetchImpl: async () => {
+			requestCount += 1
+			throw new Error('model should not be called when required selection needs user choice')
+		},
+		observation,
+		sessionOverrides: {
+			task,
+			latestTask: task,
+			workflowState: buildCreateIntentState(),
+			history: [
+				buildSubmitFailureHistory('请选择所属角色'),
+				buildRequiredSelectionOpenHistory(),
+			],
+		},
+	})
+	assertAction(decision.result, 'ask_user')
+	if (
+		requestCount !== 0 ||
+		decision.result.action.input.workflow_step !== 'resolve_field_validation_error' ||
+		decision.result.action.input.workflow_field_label !== '所属角色' ||
+		!String(decision.result.action.input.reason || '').includes('多个可见候选') ||
+		!String(decision.result.action.input.workflow_visible_options || '').includes('操作员|审核员')
+	) {
+		throw new Error(`ambiguous required selection should ask the user instead of guessing, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
 async function assertPlannerValidationCorrectionSubmits() {
 	let requestCount = 0
 	const task = '新建一条主体档案，主体名称是张三。'
@@ -6072,6 +6538,59 @@ async function assertPlannerValidationCorrectionSubmits() {
 		decision.result.action.input.workflow_step !== 'submit_form_timeout_recovery'
 	) {
 		throw new Error(`validation correction should be followed by submitting the form, calls=${requestCount}, result=${JSON.stringify(decision.result)}`)
+	}
+}
+
+function buildRequiredSelectionValidationObservation(extraField = {}) {
+	return {
+		...buildTestObservation(),
+		title: '主体档案-示例系统',
+		forms: [
+			{
+				id: 'dialog',
+				name: '新增弹层',
+				fields: [
+					{ index: 2, region: 'dialog', fieldType: 'name', kind: 'text', label: '主体名称', valueState: 'filled:张三', role: 'textbox' },
+					{
+						index: 8,
+						region: 'dialog',
+						fieldType: 'role',
+						kind: 'dropdown',
+						label: '所属角色',
+						valueState: 'empty',
+						role: 'combobox',
+						selectionControl: 'dropdown',
+						required: true,
+						invalid: true,
+						validationMessage: '请选择所属角色',
+						...extraField,
+					},
+				],
+			},
+		],
+		actions: [
+			{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+		],
+		elements: [],
+		simplifiedDom: [],
+	}
+}
+
+function buildRequiredSelectionOpenHistory(extraInput = {}) {
+	return {
+		action: 'open_dropdown',
+		input: {
+			index: 8,
+			target_label: '所属角色',
+			workflow: 'form-fill',
+			workflow_step: 'resolve_field_validation_error',
+			workflow_field_label: '所属角色',
+			workflow_validation_error: '请选择所属角色',
+			workflow_value_source: 'page_validation',
+			...extraInput,
+		},
+		success: true,
+		output: '下拉框已展开并返回候选项。',
 	}
 }
 
@@ -12138,6 +12657,98 @@ async function assertSessionDoneRecordsHistoryPlanAndWorkflowOutcome() {
 	}
 }
 
+async function assertSessionDoneSuccessWithVisibleFormValidationIsError() {
+	const sandbox = loadBackgroundModule('naturalclick-extension/background/session-engine.js', {
+		NC_BG_CONSTANTS: {
+			MAX_CONSECUTIVE_FAILURES: 3,
+			MAX_TRACE_ITEMS: 80,
+			TYPES: { SESSION_UPDATE: 'NC_SESSION_UPDATE' },
+		},
+		NC_BG_UTILS: { generateId: (prefix) => `${prefix || 'id'}_test` },
+		NC_BG_EXECUTOR: {
+			requestObservation: async () => ({
+				ok: true,
+				data: {
+					url: 'http://example.test/users',
+					title: '账号页面',
+					content: '新增账号表单\nfield index=8 label="所属角色" invalid=true error="请选择所属角色"',
+					forms: [
+						{
+							id: 'create-user-dialog',
+							name: '新增',
+							fields: [
+								{ index: 3, region: 'dialog', label: '登录账号', valueState: 'filled:testuser001', role: 'textbox' },
+								{ index: 8, region: 'dialog', label: '所属角色', valueState: 'empty', role: 'combobox', required: true, invalid: true, validationMessage: '请选择所属角色' },
+							],
+						},
+					],
+					actions: [
+						{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+					],
+				},
+			}),
+		},
+		NC_BG_PLANNER: {
+			planAction: async () => ({
+				evaluation_previous_goal: '已经填写用户信息。',
+				memory: '错误地认为保存成功。',
+				thought: '实际页面仍有校验错误。',
+				next_goal: '结束任务',
+				action: { name: 'done', input: { text: '已成功创建用户。', success: true } },
+			}),
+		},
+		NC_BG_CONFIRMATION: {
+			detectDangerousAction: () => ({ isDangerous: false }),
+		},
+		NC_BG_VERIFIER: {
+			shouldVerifyAction: () => false,
+		},
+		NC_BG_VISION: {
+			canUseVisionFallback: () => false,
+		},
+		chrome: {
+			runtime: {
+				sendMessage: (_message, callback) => callback?.(),
+				lastError: null,
+			},
+		},
+	})
+	const session = {
+		id: 'session-done-visible-form-validation',
+		status: 'running',
+		aborted: false,
+		step: 0,
+		task: '新建一个账号',
+		latestTask: '新建一个账号',
+		currentTabId: 1,
+		windowId: 1,
+		config: { maxSteps: 3, textLLM: {} },
+		history: [
+			{ action: 'input_text', success: true, input: { workflow: 'form-fill', workflow_step: 'fill_form_field_timeout_recovery', workflow_field_label: '登录账号', index: 3, text: 'testuser001' } },
+		],
+		traceItems: [],
+		planItems: [],
+		consecutiveFailures: 0,
+	}
+	const sessions = new Map([[session.id, session]])
+
+	await sandbox.NC_BG_SESSION_ENGINE.runSession(session, sessions)
+
+	if (session.status !== 'error') {
+		throw new Error(`done success=true must be intercepted when a create/fill task still has visible validation errors, got ${session.status}`)
+	}
+	if (!String(session.activityText || '').includes('已拦截') || !String(session.activityText || '').includes('请选择所属角色')) {
+		throw new Error(`intercepted done should explain the visible form validation blocker, got ${session.activityText}`)
+	}
+	const doneHistory = session.history.find((item) => item.action === 'done')
+	if (!doneHistory || doneHistory.success !== false || doneHistory.outcome?.kind !== 'no_effect') {
+		throw new Error(`intercepted done should be recorded as failed no_effect history, got ${JSON.stringify(session.history)}`)
+	}
+	if (sessions.has(session.id)) {
+		throw new Error('intercepted visible-validation done session was not removed from active sessions')
+	}
+}
+
 async function assertSessionDoneSuccessAfterFailureIsError() {
 	const decisions = [
 		{
@@ -12717,6 +13328,14 @@ function assertSharedControlSemanticsBehavior() {
 	const structuralDropdown = { fieldType: 'platform', role: 'combobox', editable: true }
 	if (!semantics.isObservedSelectionLike(structuralDropdown, 'forms')) {
 		throw new Error('observed combobox structure should identify selection controls regardless of field name')
+	}
+	const editableSearchCombobox = { fieldType: 'select', role: 'combobox', tag: 'textarea', editable: true }
+	if (semantics.isObservedSelectionLike(editableSearchCombobox, 'forms') || !semantics.isObservedPlainEditableText(editableSearchCombobox, 'forms')) {
+		throw new Error('editable native combobox text entries should remain input-capable instead of being forced through dropdown selection')
+	}
+	const optionBackedEditableCombobox = { fieldType: 'search', role: 'combobox', tag: 'input', editable: true, optionLabels: ['Alpha'] }
+	if (!semantics.isObservedSelectionLike(optionBackedEditableCombobox, 'forms')) {
+		throw new Error('real option labels should still make editable comboboxes selection-capable when the page exposes scoped options')
 	}
 	const optionBackedField = { fieldType: 'status', role: 'textbox', editable: true, optionLabels: ['启用', '禁用'] }
 	if (!semantics.isObservedSelectionLike(optionBackedField, 'forms')) {
@@ -15677,6 +16296,48 @@ function assertResultSummaryBehavior() {
 		) {
 			throw new Error(`form task summaries should expose form-recovery value sources and avoid reporting completion before submit, got ${JSON.stringify(formRecoverySourceSummary)}`)
 		}
+		const plainDoneFormSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+			status: 'completed',
+			task: '新建一条记录，名称为张三。',
+			latestTask: '新建一条记录，名称为张三。',
+			history: [
+				{
+					action: 'input_text',
+					input: {
+						index: 21,
+						target_label: '名称',
+						text: '张三',
+						workflow: 'form-fill',
+						workflow_step: 'fill_form_field_timeout_recovery',
+						workflow_field_label: '名称',
+						workflow_value_source: 'task_value',
+						workflow_value_basis: '字段标签与任务文本匹配',
+					},
+					success: true,
+					output: '已输入 张三。 | 动作结果: input_verified',
+					outcome: { kind: 'input_verified', reason: '字段值已更新。' },
+				},
+				{
+					action: 'done',
+					input: {
+						success: true,
+						text: '表单填写完成。',
+						workflow: 'form-fill',
+					},
+					success: true,
+					output: '表单填写完成。',
+				},
+			],
+		})
+		if (
+			plainDoneFormSummary?.type !== 'form_task' ||
+			plainDoneFormSummary.status !== 'inconclusive' ||
+			plainDoneFormSummary.stats?.submitMissing !== 1 ||
+			plainDoneFormSummary.stats?.formCompleted !== 0 ||
+			!plainDoneFormSummary.diagnostics?.some((item) => item.kind === 'form_submit_missing')
+		) {
+			throw new Error(`form summaries must not treat a plain successful done as creation/submission evidence, got ${JSON.stringify(plainDoneFormSummary)}`)
+		}
 		const formSubmitCompletedSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 			status: 'completed',
 			task: '新建一条记录，名称为张三。',
@@ -16174,6 +16835,79 @@ function assertResultSummaryBehavior() {
 		!informationStoppedSummary.diagnostics?.some((item) => item.kind === 'missing_final_answer')
 	) {
 		throw new Error(`information-seeking tasks should not be summarized as field actions just because a toggle-like page action ran, got ${JSON.stringify(informationStoppedSummary)}`)
+	}
+	const externalLookupCreateSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'stopped',
+		activityText: '任务已中止。',
+		task: '进入目标页面创建一个新记录，名称使用网上搜索最新价格作为名称。',
+		latestTask: '进入目标页面创建一个新记录，名称使用网上搜索最新价格作为名称。',
+		workflowState: {
+			taskIntent: {
+				intent: { operation: 'create' },
+			},
+		},
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: { index: 5, target_label: '搜索' },
+				success: true,
+				output: '点击/切换控件已成功：已点击索引 5。 | 动作结果: state_changed progress=true',
+				outcome: { kind: 'state_changed', progress: true },
+			},
+		],
+	})
+	if (externalLookupCreateSummary?.type === 'information' || externalLookupCreateSummary?.title === '信息查询结果总结') {
+		throw new Error(`external value lookup inside create/fill tasks should not use information-query summaries, got ${JSON.stringify(externalLookupCreateSummary)}`)
+	}
+	const externalLookupValidationSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
+		status: 'running',
+		task: '进入目标页面创建一个新记录，名称使用网上搜索最新价格作为名称。',
+		latestTask: '进入目标页面创建一个新记录，名称使用网上搜索最新价格作为名称。',
+		workflowState: {
+			taskIntent: {
+				intent: { operation: 'create' },
+			},
+		},
+		history: [
+			{
+				action: 'input_text',
+				input: {
+					index: 3,
+					text: '4087.0',
+					target_label: '名称',
+					workflow: 'form-fill',
+					workflow_step: 'fill_form_field_task_value',
+					workflow_field_label: '名称',
+					workflow_value_source: 'recent_history',
+					workflow_value_basis: '外部查询得到当前任务变量：名称=4087.0。',
+				},
+				success: true,
+				output: '输入文本已成功。',
+			},
+			{
+				action: 'input_text',
+				input: {
+					index: 3,
+					text: '40870',
+					target_label: '名称',
+					workflow: 'form-fill',
+					workflow_step: 'resolve_field_validation_error',
+					workflow_field_label: '名称',
+					workflow_old_value: '4087.0',
+					workflow_value_source: 'page_validation',
+					workflow_value_basis: '名称格式错误，只能包含字母、数字、下划线。',
+				},
+				success: true,
+				output: '输入文本已成功。',
+			},
+		],
+	})
+	if (
+		externalLookupValidationSummary?.type !== 'form_task' ||
+		externalLookupValidationSummary.items?.[0]?.valueSourceLabel !== '历史任务变量 -> 页面校验' ||
+		!String(externalLookupValidationSummary.text || '').includes('依据=历史任务变量 -> 页面校验')
+	) {
+		throw new Error(`form summaries should preserve the evidence trail when external task values are corrected by page validation, got ${JSON.stringify(externalLookupValidationSummary)}`)
 	}
 	const toggleFieldActionSummary = sandbox.NC_BG_RESULT_SUMMARY.buildResultSummary({
 		status: 'completed',
@@ -17327,6 +18061,16 @@ function assertPlannerRejectsCoveredIndexTargets() {
 						hitState: 'hittable',
 						hitPoints: '5/5',
 					},
+					{
+						index: 40,
+						label: '搜索',
+						role: 'combobox',
+						tag: 'textarea',
+						fieldType: 'select',
+						editable: true,
+						hitState: 'hittable',
+						hitPoints: '5/5',
+					},
 				],
 			},
 		],
@@ -17365,6 +18109,22 @@ function assertPlannerRejectsCoveredIndexTargets() {
 	)
 	if (matchedInputPlaceholderError) {
 		throw new Error(`matching input placeholder aliases should remain executable, got ${matchedInputPlaceholderError}`)
+	}
+	const editableComboboxInputError = validation.validateExecutableAction(
+		{ name: 'input_text', input: { index: 40, text: 'latest market price', target_label: '搜索' } },
+		inputObservation,
+		[]
+	)
+	if (editableComboboxInputError) {
+		throw new Error(`editable native combobox search fields should allow input_text, got ${editableComboboxInputError}`)
+	}
+	const editableComboboxDropdownError = validation.validateExecutableAction(
+		{ name: 'open_dropdown', input: { index: 40, target_label: '搜索' } },
+		inputObservation,
+		[]
+	)
+	if (!String(editableComboboxDropdownError || '').includes('普通可编辑输入框') || !String(editableComboboxDropdownError || '').includes('input_text/type')) {
+		throw new Error(`editable native combobox search fields should steer dropdown opens back to input_text, got ${editableComboboxDropdownError}`)
 	}
 	const missingDropdownTargetLabelError = validation.validateExecutableAction(
 		{ name: 'open_dropdown', input: { index: 34 } },
@@ -17630,9 +18390,11 @@ function assertPlannerPromptExtractedFromPlanner() {
 	if (
 		!prompt.includes('search_data_requirement status="missing_table_samples"') ||
 		!prompt.includes('information_query') ||
+		!prompt.includes('information_value_lookup') ||
 		!prompt.includes('information_evidence') ||
 		!prompt.includes('information_source status="unreadable"') ||
 		!prompt.includes('信息查询/网页问答任务') ||
+		!prompt.includes('给创建/编辑/填表等主任务取外部字段值') ||
 		!prompt.includes('done(success=true)') ||
 		!prompt.includes('request_context source=tables/source=network') ||
 		!prompt.includes('request_context source=raw_candidates region=content') ||
@@ -18744,7 +19506,7 @@ function assertTaskNavigationWorkflowBehavior() {
 		workflowState: {
 			taskIntent: {
 				status: 'ready',
-				version: 15,
+				version: 16,
 				taskText: '打开数据单据新增页面，帮我新增一条数据',
 				intent: {
 					navigationTargets: [
@@ -18776,6 +19538,213 @@ function assertTaskNavigationWorkflowBehavior() {
 		!intentCreateHint.includes('create_candidates')
 	) {
 		throw new Error(`task-intent create hints should separate module navigation from create action, got ${intentCreateHint}`)
+	}
+	const valueLookupTask = '进入http://example.test/#/login这个网站，登录账号admin 密码123456，进入账户中心后创建一个新账号。用户名使用google搜索一下最新的黄金价格作为用户名。'
+	const valueLookupSession = {
+		task: valueLookupTask,
+		latestTask: valueLookupTask,
+		history: [
+			{
+				stepIndex: 9,
+				action: 'switch_to_tab',
+				input: { target_label: '主任务页面' },
+				success: true,
+				memory: '外部查询已得到当前任务变量：用户名=4087.0。',
+				thought: '黄金价格页面给出的可用数值是 4087.0，回到主任务表单继续创建。',
+				output: '已切回主任务标签页。',
+			},
+		],
+		workflowState: {
+			initialNavigation: { targetUrl: 'http://example.test/#/login' },
+			taskIntent: {
+				status: 'ready',
+				version: 16,
+				taskText: valueLookupTask,
+				intent: {
+					navigationTargets: [
+						{ raw: '账户中心', canonical: '账户中心', aliases: ['账户中心'], entity: '账户中心' },
+					],
+					operation: 'create',
+					createEntryLabels: ['新增', '新建', '添加'],
+					detailEntryLabels: ['详情', '查看'],
+					forbiddenNavigationTargets: ['账户中心新增', '新增页面'],
+				},
+			},
+		},
+	}
+	const valueLookupObservation = {
+		url: 'http://example.test/#/module/account',
+		title: '账户中心-新增',
+		forms: [
+			{
+				id: 'drawer-form',
+				name: '新增用户',
+				fields: [
+					{ index: 3, label: '登录账号', fieldType: 'text', valueState: 'empty', role: 'textbox', type: 'text', region: 'dialog', rect: { left: 300, top: 120, width: 260, height: 32 } },
+					{ index: 4, label: '密码', fieldType: 'password', valueState: 'empty', role: 'textbox', type: 'password', region: 'dialog', rect: { left: 600, top: 120, width: 260, height: 32 } },
+				],
+			},
+		],
+		actions: [
+			{ index: 11, region: 'sidebar', role: 'menuitem', label: '账户中心', valueState: 'selected' },
+			{ index: 20, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' },
+		],
+		popups: [],
+		elements: [],
+	}
+	const pendingValueLookupSession = {
+		...valueLookupSession,
+		history: [],
+	}
+	const openLookupSourceDecision = workflow.derivePreModelWorkflowDecision(
+		pendingValueLookupSession,
+		valueLookupObservation,
+		{ tabsSummary: [{ id: 1, url: valueLookupObservation.url, current: true }] }
+	)
+	assertAction(openLookupSourceDecision, 'open_new_tab')
+	if (
+		openLookupSourceDecision.action.input.workflow !== 'form-fill' ||
+		openLookupSourceDecision.action.input.workflow_step !== 'open_external_value_lookup_source' ||
+		openLookupSourceDecision.action.input.target_url !== `https://www.google.com/search?q=${encodeURIComponent('最新的黄金价格')}` ||
+		!String(openLookupSourceDecision.action.input.reason || '').includes('保留主任务表单') ||
+		openLookupSourceDecision.action.input.workflow_task_value_label !== '用户名'
+	) {
+		throw new Error(`pending external form values should open the explicit search source in a new tab, got ${JSON.stringify(openLookupSourceDecision)}`)
+	}
+	const noisyValueLookupReturnDecision = workflow.derivePreModelWorkflowDecision(pendingValueLookupSession, {
+		url: 'https://www.google.com/search?q=gold+price',
+		title: 'Google 搜索 - 黄金价格 更新于 2026-06-11',
+		forms: [],
+		actions: [],
+		elements: [
+			{ index: 3, region: 'content', role: 'text', label: '更新时间 2026-06-11 09:30' },
+			{ index: 4, region: 'content', role: 'text', label: 'Gold price 4,087.0 USD per oz' },
+		],
+		popups: [],
+	}, {
+		tabsSummary: [
+			{ id: 1, url: 'https://www.google.com/search?q=gold+price', title: 'Google 搜索 - gold price', current: true },
+			{ id: 2, url: 'http://example.test/#/module/account', title: '账户中心-新增', current: false },
+		],
+	})
+	assertAction(noisyValueLookupReturnDecision, 'switch_to_tab')
+	if (
+		!String(noisyValueLookupReturnDecision.memory || '').includes('用户名=4087.0') ||
+		String(noisyValueLookupReturnDecision.memory || '').includes('用户名=2026') ||
+		String(noisyValueLookupReturnDecision.memory || '').includes('进入=') ||
+		noisyValueLookupReturnDecision.action.input.workflow_task_value_labels !== '用户名'
+	) {
+		throw new Error(`price-like task values should prefer currency/price numbers over date fragments, got ${JSON.stringify(noisyValueLookupReturnDecision)}`)
+	}
+	const externalValueLookupHint = workflow.buildWorkflowContextText(pendingValueLookupSession, {
+		url: 'https://www.google.com/search?q=gold+price',
+		title: 'Google 搜索 - 黄金价格 更新于 2026-06-11',
+		forms: [],
+		actions: [],
+		elements: [
+			{ index: 3, region: 'content', role: 'text', label: '更新时间 2026-06-11 09:30' },
+			{ index: 4, region: 'content', role: 'text', label: 'Gold price 4,087.0 USD per oz' },
+		],
+		popups: [],
+	})
+	if (
+		!externalValueLookupHint.includes('task_value status="available"') ||
+		!externalValueLookupHint.includes('field="用户名"') ||
+		externalValueLookupHint.includes('field="进入"')
+	) {
+		throw new Error(`external value source pages should expose task values without treating navigation text as a value field, got ${externalValueLookupHint}`)
+	}
+	const valueLookupHint = workflow.buildWorkflowContextText(valueLookupSession, valueLookupObservation)
+	if (
+		!valueLookupHint.includes('task_value status="available"') ||
+		!valueLookupHint.includes('field="用户名"') ||
+		!valueLookupHint.includes('value="4087.0"')
+	) {
+		throw new Error(`value lookup hints should expose current-task field values, got ${valueLookupHint}`)
+	}
+	const valueLookupDecision = workflow.derivePreModelWorkflowDecision(
+		valueLookupSession,
+		valueLookupObservation,
+		{ tabsSummary: [{ id: 1, url: valueLookupObservation.url, current: true }] }
+	)
+	assertAction(valueLookupDecision, 'input_text')
+	if (
+		valueLookupDecision.action.input.index !== 3 ||
+		valueLookupDecision.action.input.text !== '4087.0' ||
+		valueLookupDecision.action.input.workflow_step !== 'fill_form_field_task_value'
+	) {
+		throw new Error(`value lookup task should fill the matched form field from current-task value, got ${JSON.stringify(valueLookupDecision)}`)
+	}
+	const invalidExternalValueCorrection = workflow.derivePreModelWorkflowDecision(
+		{
+			...valueLookupSession,
+			history: [
+				...valueLookupSession.history,
+				{
+					action: 'input_text',
+					success: true,
+					input: {
+						index: 3,
+						text: '4087.0',
+						target_label: '登录账号',
+						workflow_step: 'fill_form_field_task_value',
+						workflow_value_source: 'recent_history',
+					},
+					output: '输入文本已成功。',
+				},
+			],
+		},
+		{
+			...valueLookupObservation,
+			forms: [
+				{
+					id: 'drawer-form',
+					name: '新增用户',
+					fields: [
+						{ index: 3, label: '登录账号', fieldType: 'text', valueState: 'filled: 4087.0', role: 'textbox', type: 'text', region: 'dialog', invalid: true, errorText: '账号格式错误，只能包含字母、数字、下划线。', rect: { left: 300, top: 120, width: 260, height: 32 } },
+						{ index: 4, label: '密码', fieldType: 'password', valueState: 'empty', role: 'textbox', type: 'password', region: 'dialog', rect: { left: 600, top: 120, width: 260, height: 32 } },
+					],
+				},
+			],
+		},
+		{ tabsSummary: [{ id: 1, url: valueLookupObservation.url, current: true }] }
+	)
+	assertAction(invalidExternalValueCorrection, 'input_text')
+	if (
+		invalidExternalValueCorrection.action.input.workflow_step !== 'resolve_field_validation_error' ||
+		invalidExternalValueCorrection.action.input.workflow_value_source !== 'page_validation' ||
+		invalidExternalValueCorrection.action.input.text !== '40870'
+	) {
+		throw new Error(`external task values that violate visible field validation should be corrected through validation recovery, got ${JSON.stringify(invalidExternalValueCorrection)}`)
+	}
+	const valueLookupSourceObservation = {
+		url: 'https://www.google.com/search?q=gold+price',
+		title: 'Google 搜索 - gold price',
+		forms: [],
+		actions: [],
+		elements: [
+			{ index: 3, region: 'content', role: 'text', label: 'Gold price 4087.0 USD' },
+		],
+		popups: [],
+	}
+	const valueLookupReturnDecision = workflow.derivePreModelWorkflowDecision(
+		valueLookupSession,
+		valueLookupSourceObservation,
+		{
+			tabsSummary: [
+				{ id: 1, url: 'https://www.google.com/search?q=gold+price', title: 'Google 搜索 - gold price', current: true },
+				{ id: 2, url: 'http://example.test/#/module/account', title: '账户中心-新增', current: false },
+			],
+		}
+	)
+	assertAction(valueLookupReturnDecision, 'switch_to_tab')
+	if (
+		valueLookupReturnDecision.action.input.tab_id !== 2 ||
+		valueLookupReturnDecision.action.input.target_url !== 'http://example.test/#/module/account' ||
+		valueLookupReturnDecision.action.input.workflow !== 'form-fill' ||
+		valueLookupReturnDecision.action.input.workflow_step !== 'return_to_main_task_with_task_value'
+	) {
+		throw new Error(`available task values should return to the main task tab before form fill, got ${JSON.stringify(valueLookupReturnDecision)}`)
 	}
 	const recordToolbarCreateDecision = workflow.derivePreModelWorkflowDecision(
 		{
@@ -19101,6 +20070,72 @@ function assertSearchWorkflowBehavior() {
 	const historyHelpers = sandbox.NC_BG_SEARCH_WORKFLOW_HISTORY_TESTS?.createSearchWorkflowHistoryHelpers?.()
 	if (!historyHelpers) {
 		throw new Error('search workflow history helper tests should be available')
+	}
+	const stateSandbox = loadBackgroundModule('naturalclick-extension/background/search-workflow-state.js', {})
+	const stateHelpers = stateSandbox.NC_BG_SEARCH_WORKFLOW_STATE_TESTS.createSearchStateHelpers({
+		getFieldKey: (field) => String(field?.key || (Number.isFinite(Number(field?.index)) ? `index:${Number(field.index)}` : '')).trim(),
+		getFieldLabel: (field) => String(field?.label || '').trim(),
+		isTerminalSearchPhase: (phase) => /^(completed|stopped|done)$/i.test(String(phase || '')),
+		isFilled: (field) => /filled|selected|checked/i.test(String(field?.valueState || '')) || !!String(field?.value || '').trim(),
+		normalizeText: (value) => String(value || '').replace(/\s+/g, '').trim(),
+	})
+	const preservedSearchSession = { workflowState: { search: stateHelpers.createSearchState() } }
+	let preservedState = stateHelpers.syncSearchState(
+		preservedSearchSession,
+		[
+			{ index: 25, label: '名称', fieldType: 'text', valueState: 'empty' },
+			{ index: 26, label: '等级', fieldType: 'select', valueState: 'empty' },
+		]
+	)
+	stateHelpers.markSearchFieldCompleted(preservedState, 'index:25', { requiresClear: true })
+	preservedState.resultsByKey['index:25'] = {
+		key: 'index:25',
+		label: '名称',
+		value: '样本名称',
+		source: 'table_sample',
+		status: 'passed_match',
+		summary: '已验证名称。',
+	}
+	preservedState = stateHelpers.syncSearchState(
+		preservedSearchSession,
+		[
+			{ index: 26, label: '等级', fieldType: 'select', valueState: 'empty' },
+		]
+	)
+	if (
+		!preservedState.fieldOrder.includes('index:25') ||
+		!preservedState.completedKeys.includes('index:25') ||
+		preservedState.resultsByKey['index:25']?.status !== 'passed_match' ||
+		preservedState.fields['index:25']?.temporarilyMissing !== true ||
+		stateHelpers.getNextPendingField(preservedState, [{ index: 26, label: '等级', fieldType: 'select' }])?.index !== 26
+	) {
+		throw new Error(`search state should preserve covered fields that are temporarily missing from the current observation, got ${JSON.stringify(preservedState)}`)
+	}
+	const activeMissingSession = { workflowState: { search: stateHelpers.createSearchState() } }
+	const activeState = stateHelpers.syncSearchState(
+		activeMissingSession,
+		[
+			{ index: 30, label: '创建时间', fieldType: 'daterange', valueState: 'empty' },
+			{ index: 31, label: '来源', fieldType: 'select', valueState: 'empty' },
+		]
+	)
+	activeState.phase = 'awaiting_submit'
+	activeState.activeFieldKey = 'index:30'
+	activeState.fields['index:30'].lastTestValue = '2026-06-01 / 2026-06-02'
+	activeState.fields['index:30'].lastValueSource = 'task_value'
+	stateHelpers.syncSearchState(
+		activeMissingSession,
+		[
+			{ index: 31, label: '来源', fieldType: 'select', valueState: 'empty' },
+		]
+	)
+	if (
+		activeState.activeFieldKey !== 'index:30' ||
+		activeState.phase !== 'awaiting_submit' ||
+		activeState.fields['index:30']?.temporarilyMissing !== true ||
+		activeState.fields['index:30']?.lastTestValue !== '2026-06-01 / 2026-06-02'
+	) {
+		throw new Error(`search state should keep an in-flight field when it is temporarily missing before submit/reset, got ${JSON.stringify(activeState)}`)
 	}
 	if (!historyHelpers.isSearchSubmitHistory({
 		action: 'click_element_by_index',
@@ -26469,8 +27504,49 @@ function assertPlannerWorkflowRegistryBehavior() {
 	if (!registry.includes('PRE_MODEL_WORKFLOWS') || !registry.includes('TIMEOUT_RECOVERY_WORKFLOWS')) {
 		throw new Error('workflow registry should make pre-model and timeout recovery ordering explicit')
 	}
-	if (!/const\s+PRE_INTENT_WORKFLOWS\s*=\s*\[[\s\S]*PRE_MODEL_WORKFLOWS\[4\]/.test(registry)) {
-		throw new Error('workflow registry should allow safe search-field decisions before task-intent model planning')
+	const navigationContextMissRecovery = plannerTests.derivePostContextWorkflowDecision(
+		{
+			task: '打开 http://example.test/ 找到账户中心部分。',
+			latestTask: '打开 http://example.test/ 找到账户中心部分。',
+			history: [],
+			workflowState: {},
+		},
+		'',
+		[
+			{
+				name: 'request_context',
+				input: { source: 'dom_tree', region: 'sidebar', query: '账户中心', cursor: 12, limit: 40 },
+				text: '<context_response seq="1" request="request_context"><context_chunk><empty_context reason="query_no_match" guidance="当前观察没有匹配的原始候选；若目标是导航/菜单，应改为 inspect_region sidebar、展开未展开导航容器或滚动导航区域，不要反复同 query。"></empty_context></context_chunk></context_response>',
+			},
+		],
+		{
+			observation: {
+				title: '首页',
+				url: 'http://example.test/#/wel/index',
+				forms: [],
+				actions: [
+					{ index: 12, region: 'sidebar', role: 'menuitem', label: '工具箱', expandedState: 'expanded', stateHints: 'classState=is-opened' },
+					{ index: 18, region: 'sidebar', role: 'menuitem', label: '基础设置', expandedState: 'collapsed', stateHints: 'has-children', rect: { left: 0, top: 260, width: 180, height: 44 } },
+				],
+				popups: [],
+				elements: [],
+			},
+			tabsSummary: [{ id: 1, current: true, url: 'http://example.test/#/wel/index' }],
+		}
+	)
+	assertAction(navigationContextMissRecovery, 'click_element_by_index')
+	if (
+		navigationContextMissRecovery.action.input.index !== 18 ||
+		navigationContextMissRecovery.action.input.workflow !== 'task-navigation' ||
+		navigationContextMissRecovery.action.input.workflow_step !== 'reveal_navigation_options'
+	) {
+		throw new Error(`post-context navigation recovery should reveal a safe visible navigation container after query_no_match, got ${JSON.stringify(navigationContextMissRecovery)}`)
+	}
+	if (
+		!/const\s+PRE_INTENT_WORKFLOWS\s*=\s*\[[\s\S]*search-fields/.test(registry) ||
+		!/getPreModelWorkflowByName\(['"]search-fields['"]\)/.test(registry)
+	) {
+		throw new Error('workflow registry should allow safe search-field decisions before task-intent model planning without relying on brittle workflow indexes')
 	}
 	for (const forbidden of [
 		'deriveActiveSearchWorkflowDecision',
@@ -26713,6 +27789,110 @@ function assertPlannerWorkflowRegistryBehavior() {
 	) {
 		throw new Error(`workflow registry should pass observation context into search post-context recovery, got ${JSON.stringify(registrySearchContextRecovery)}`)
 	}
+	if (!planner.includes('buildInitialFormRequiredSelectionPlanningAction') || !planner.includes('form_required_selection_requirement')) {
+		throw new Error('planner should prefetch options for opened required form selections when workflow hints request field-owned candidates')
+	}
+	const requiredSelectionSession = {
+		task: '新建一条资料，名称是张三。',
+		latestTask: '新建一条资料，名称是张三。',
+		history: [
+			{
+				action: 'click_element_by_index',
+				input: {
+					index: 18,
+					workflow: 'form-fill',
+					workflow_step: 'submit_form_timeout_recovery',
+					workflow_submit_label: '保存',
+				},
+				success: false,
+				output: '动作校验失败: form_submit_failed: 表单提交后观察到错误/校验提示: 请选择级别',
+			},
+			{
+				action: 'open_dropdown',
+				input: {
+					index: 8,
+					target_label: '级别',
+					workflow: 'form-fill',
+					workflow_step: 'resolve_field_validation_error',
+					workflow_field_label: '级别',
+					workflow_validation_error: '请选择级别',
+				},
+				success: true,
+				output: '下拉框已展开但没有稳定候选。',
+			},
+		],
+		workflowState: {},
+	}
+	const requiredSelectionObservation = {
+		title: '资料新增',
+		url: 'http://example.test/app#/records/new',
+		forms: [
+			{
+				id: 'dialog',
+				name: '新增弹层',
+				fields: [
+					{ index: 2, region: 'dialog', fieldType: 'name', kind: 'text', label: '名称', valueState: 'filled:张三', role: 'textbox' },
+					{
+						index: 8,
+						region: 'dialog',
+						fieldType: 'select',
+						kind: 'dropdown',
+						label: '级别',
+						valueState: 'empty',
+						role: 'combobox',
+						selectionControl: 'dropdown',
+						required: true,
+						invalid: true,
+						validationMessage: '请选择级别',
+						expandedState: 'expanded',
+					},
+				],
+			},
+		],
+		actions: [{ index: 18, region: 'dialog', role: 'button', label: '保存', actionIntent: 'submit' }],
+		options: [],
+		popups: [],
+		elements: [],
+	}
+	const requiredSelectionHint = plannerTests.buildWorkflowContextText(requiredSelectionSession, requiredSelectionObservation)
+	if (
+		!requiredSelectionHint.includes('form_required_selection_requirement') ||
+		!requiredSelectionHint.includes('status="candidates_unobserved"') ||
+		!requiredSelectionHint.includes('activeIndex="8"')
+	) {
+		throw new Error(`workflow hints should request field-owned context for opened required selections without candidates, got ${requiredSelectionHint}`)
+	}
+	const requiredSelectionRecovery = plannerTests.derivePostContextWorkflowDecision(
+		requiredSelectionSession,
+		requiredSelectionHint,
+		[
+			{
+				name: 'request_options_for',
+				input: { index: 8, label: '级别', limit: 20 },
+				text: [
+					'<options_for index="8">',
+					'<target_matches>',
+					'source=forms:0 field index=8 region=dialog fieldType=select label="级别" options="标准" value=empty role=combobox control=dropdown',
+					'</target_matches>',
+					'<native_options>',
+					'option 1: 标准',
+					'</native_options>',
+					'</options_for>',
+				].join('\n'),
+			},
+		],
+		{ observation: requiredSelectionObservation, tabsSummary: [] }
+	)
+	assertAction(requiredSelectionRecovery, 'choose_dropdown_option')
+	if (
+		requiredSelectionRecovery.action.input.workflow !== 'form-fill' ||
+		requiredSelectionRecovery.action.input.index !== 8 ||
+		requiredSelectionRecovery.action.input.text !== '标准' ||
+		requiredSelectionRecovery.action.input.workflow_value_source !== 'context_options' ||
+		requiredSelectionRecovery.action.input.workflow_context_recovered !== true
+	) {
+		throw new Error(`required selection post-context recovery should choose the unique field-owned option, got ${JSON.stringify(requiredSelectionRecovery)}`)
+	}
 	const searchHintOnly = plannerTests.buildWorkflowContextText(
 		{ task: '测试搜索区域每一个搜索项', history: [], workflowState: {} },
 		{
@@ -26771,6 +27951,25 @@ function assertPlannerWorkflowRegistryBehavior() {
 	if (searchTestHint.includes('information_query')) {
 		throw new Error(`search/filter testing tasks should not be treated as information query tasks, got ${searchTestHint}`)
 	}
+	const valueLookupTask = '进入目标页面创建一个新记录，名称使用网上搜索最新价格作为名称。'
+	const valueLookupSession = {
+		task: valueLookupTask,
+		latestTask: valueLookupTask,
+		workflowState: {
+			taskIntent: {
+				intent: { operation: 'create' },
+			},
+		},
+		history: [],
+	}
+	const valueLookupHint = plannerTests.buildWorkflowContextText(valueLookupSession, sparseInformationObservation)
+	if (
+		!valueLookupHint.includes('information_value_lookup') ||
+		valueLookupHint.includes('information_answer_rule') ||
+		valueLookupHint.includes('information_source status="unreadable"')
+	) {
+		throw new Error(`external value lookups for page operations should not be treated as final-answer information queries, got ${valueLookupHint}`)
+	}
 	const informationRecovery = plannerTests.derivePostContextWorkflowDecision(
 		informationSession,
 		informationHint,
@@ -26792,6 +27991,24 @@ function assertPlannerWorkflowRegistryBehavior() {
 		informationRecovery.action.input.workflow_step !== 'information_query_alternate_source'
 	) {
 		throw new Error(`post-context information recovery should switch to a related open source, got ${JSON.stringify(informationRecovery)}`)
+	}
+	const valueLookupRecovery = plannerTests.derivePostContextWorkflowDecision(
+		valueLookupSession,
+		valueLookupHint,
+		[
+			{ name: 'inspect_region', input: { region: 'content' }, text: '<context_response seq="1" request="inspect_region"><region_detail region="content">(empty)</region_detail></context_response>' },
+			{ name: 'request_context', input: { source: 'actions', region: 'content' }, text: '<context_response seq="2" request="request_context">(empty)</context_response>' },
+		],
+		{
+			observation: sparseInformationObservation,
+			tabsSummary: [
+				{ id: 1, current: true, title: '来源文章', url: 'https://source.example/articles/unreadable' },
+				{ id: 2, current: false, title: '市场价格趋势分析与新闻摘要', url: 'https://news.example/market-price-analysis' },
+			],
+		}
+	)
+	if (valueLookupRecovery) {
+		throw new Error(`external value lookups should not be ended by information-query recovery, got ${JSON.stringify(valueLookupRecovery)}`)
 	}
 	const navigationBeforeSearchDecision = plannerTests.derivePreModelWorkflowDecision(
 		{ task: '找到账户中心部分，找出搜索区域，测试每一个搜索项功能是否正常', history: [] },
@@ -26845,7 +28062,7 @@ function assertPlannerWorkflowRegistryBehavior() {
 		workflowState: {
 			taskIntent: {
 				status: 'ready',
-				version: 15,
+				version: 16,
 				taskText: chainedSearchTask,
 				intent: {
 					operation: 'view_first_record_detail',
@@ -28164,6 +29381,7 @@ function assertActionOptionsSupportDatePickerCells() {
 	const explicitAssociationFn = extractFunctionSource(actionOptions, 'getExplicitOptionFieldAssociation')
 	const staleControlledFn = extractFunctionSource(actionOptions, 'shouldIgnoreStaleControlledPopupIds')
 	const selectFn = extractFunctionSource(actionSelect, 'selectDropdownOptionAction')
+	const dateRangeCompletionFn = extractFunctionSource(actionSelect, 'maybeCompleteDateRangeSelection')
 	const dateSelectionRequestFn = extractFunctionSource(actionSelect, 'parseDateSelectionRequest')
 	for (const expected of [
 		'.el-date-table td.available',
@@ -28265,14 +29483,35 @@ function assertActionOptionsSupportDatePickerCells() {
 	) {
 		throw new Error('dropdown/date selection should temporarily associate the unique freshly opened popup with the target field while ignoring only stale invisible controlled-popup ids')
 	}
+		if (
+			!selectFn.includes('date_range_first_option_selected') ||
+			!selectFn.includes('pendingText: dateSelectionTexts[1]') ||
+			!selectFn.includes('date_range_second_option_selected') ||
+			!dateRangeCompletionFn.includes('sameDateRange') ||
+			!dateRangeCompletionFn.includes('isStillConnectedElement(firstOption)') ||
+			!dateRangeCompletionFn.includes('finalizeDateRangeSelection(field || secondOption, inputMode)') ||
+			!dateSelectionRequestFn.includes('matches.push(normalized)') ||
+			!/completedRange\s*&&\s*!selection\.outcome\?\.progress/.test(selectFn) ||
+			!selectFn.includes('OUTCOME_KIND.STATE_CHANGED')
+		) {
+		throw new Error('date-range selection should report structured progress for both first and second real date options, including same-day ranges')
+	}
+	for (const fnName of ['finalizeDateRangeSelection', 'findVisibleDatePickerConfirmButton', 'isVisibleDatePickerElement']) {
+		if (!actionSelect.includes(`function ${fnName}`)) {
+			throw new Error(`date-range selection should keep generic picker finalization helper ${fnName}`)
+		}
+	}
+	const finalizeRangeFn = extractFunctionSource(actionSelect, 'finalizeDateRangeSelection')
+	const confirmButtonFn = extractFunctionSource(actionSelect, 'findVisibleDatePickerConfirmButton')
 	if (
-		!selectFn.includes('date_range_first_option_selected') ||
-		!selectFn.includes('pendingText: dateSelectionTexts[1]') ||
-		!selectFn.includes('date_range_second_option_selected') ||
-		!/completedRange\s*&&\s*!selection\.outcome\?\.progress/.test(selectFn) ||
-		!selectFn.includes('OUTCOME_KIND.STATE_CHANGED')
+		!finalizeRangeFn.includes('findVisibleDatePickerConfirmButton()') ||
+		!finalizeRangeFn.includes('dismissSelectionPopup(anchor, inputMode)') ||
+		!confirmButtonFn.includes('.el-picker-panel') ||
+		!confirmButtonFn.includes('.ant-picker-dropdown') ||
+		!confirmButtonFn.includes('.layui-laydate') ||
+		!confirmButtonFn.includes('确定|确认|完成|应用|ok|apply|done')
 	) {
-		throw new Error('date-range selection should report structured progress for both first and second real date options')
+		throw new Error('date-range selection should confirm visible date-picker panels or dismiss them after the second date')
 	}
 	if (!shared.includes('date-option') || !shared.includes('OPTION_CONTROLS')) {
 		throw new Error('shared control semantics should classify date-option as an option-like selection')
@@ -28732,12 +29971,16 @@ async function assertSelectionFailuresUseStructuredOutcomes() {
 			filename: 'naturalclick-extension/content/action-select.js',
 		})
 		const field = new FakeElement('层级字段')
+		const optionByText = new Map()
+		const clickLog = []
 		const selectActions = sandbox.NC_CONTENT_ACTION_SELECT.createSelectActions({
 			observer: {
 				getElementByIndex: () => field,
 				shortText: (value) => String(value || ''),
 			},
-			humanLikeClick: async () => {},
+			humanLikeClick: async (node) => {
+				clickLog.push(String(node?.label || ''))
+			},
 			hoverElement: async () => {},
 			isDisabledElement: () => false,
 			setNativeValue: () => {},
@@ -28747,8 +29990,8 @@ async function assertSelectionFailuresUseStructuredOutcomes() {
 			createOutcome: (kind, extra = {}) => ({ kind, progress: false, ...extra }),
 			getElementInteractionState: () => ({ text: '' }),
 			inferInteractionOutcome: () => ({ kind: 'none', progress: false }),
-			OUTCOME_KIND: { FAILED: 'failed', NONE: 'none' },
-			waitForVisibleOption: async () => null,
+			OUTCOME_KIND: { FAILED: 'failed', NONE: 'none', STATE_CHANGED: 'state_changed', VALUE_CHANGED: 'value_changed' },
+			waitForVisibleOption: async (text) => optionByText.get(String(text || '')) || null,
 			findDropdownOptionByScrolling: async () => null,
 			listVisibleOptionLabels: () => [],
 			getVisibleOptionLabel: (node) => String(node?.label || ''),
@@ -28766,6 +30009,22 @@ async function assertSelectionFailuresUseStructuredOutcomes() {
 			waitForCascaderMenuLevel: async () => true,
 			summarizeCascaderLevel: () => ' 当前第 1 级可见项: 甲级、乙级。',
 		})
+		const sameDayOption = new FakeElement('2026-06-02')
+		sameDayOption.isConnected = true
+		optionByText.set('2026-06-02', sameDayOption)
+		const sameDayResult = await selectActions.selectDropdownOptionAction({
+			index: 8,
+			text: '2026-06-02..2026-06-02',
+		}, 'direct')
+		if (
+			sameDayResult?.success !== true ||
+			clickLog.join('|') !== '2026-06-02|2026-06-02' ||
+			sameDayResult?.meta?.outcome?.reason !== 'date_range_second_option_selected'
+		) {
+			throw new Error(`same-day date ranges should click the real date option twice and finish the range, got ${JSON.stringify({ sameDayResult, clickLog })}`)
+		}
+		optionByText.clear()
+		clickLog.length = 0
 		const result = await selectActions.selectCascaderPathAction({
 			index: 8,
 			path: ['丙级'],

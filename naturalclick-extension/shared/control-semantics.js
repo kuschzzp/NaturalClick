@@ -58,18 +58,31 @@
 		const editable = item?.editable === true ? true : item?.editable === false ? false : null
 		const hasOptions = Array.isArray(item?.optionLabels) && item.optionLabels.length > 0
 		const sourceSelection = SELECTION_SOURCES.has(sourceName)
+		const editableComboboxTextEntry = isEditableComboboxTextEntry({
+			role,
+			tag,
+			control,
+			fieldType,
+			editable,
+			hasOptions,
+			sourceSelection,
+		})
 		const fieldTypeSuggestsDropdown =
-			ALWAYS_SELECTION_FIELD_TYPES.has(fieldType) ||
-			ALWAYS_SELECTION_FIELD_TYPES.has(compactFieldType) ||
-			((DROPDOWN_FIELD_TYPES.has(fieldType) || DROPDOWN_FIELD_TYPES.has(compactFieldType)) &&
-			!(editable === true && role === 'textbox' && !control && !hasOptions)
+			!editableComboboxTextEntry && (
+				ALWAYS_SELECTION_FIELD_TYPES.has(fieldType) ||
+				ALWAYS_SELECTION_FIELD_TYPES.has(compactFieldType) ||
+				((DROPDOWN_FIELD_TYPES.has(fieldType) || DROPDOWN_FIELD_TYPES.has(compactFieldType)) &&
+				!(editable === true && role === 'textbox' && !control && !hasOptions)
+				)
 			)
 		const dropdownLike =
-			DROPDOWN_CONTROLS.has(control) ||
-			DROPDOWN_ROLES.has(role) ||
-			tag === 'select' ||
-			hasOptions ||
-			fieldTypeSuggestsDropdown
+			!editableComboboxTextEntry && (
+				DROPDOWN_CONTROLS.has(control) ||
+				DROPDOWN_ROLES.has(role) ||
+				tag === 'select' ||
+				hasOptions ||
+				fieldTypeSuggestsDropdown
+			)
 		const selectableLike =
 			SELECTABLE_CONTROLS.has(control) ||
 			SELECTABLE_ROLES.has(role)
@@ -87,6 +100,7 @@
 			source: sourceName,
 			editable,
 			hasOptions,
+			editableComboboxTextEntry,
 			dropdownLike,
 			selectableLike,
 			optionLike,
@@ -103,6 +117,15 @@
 				optionLike,
 			}),
 		}
+	}
+
+	function isEditableComboboxTextEntry(info) {
+		if (!info || info.editable !== true) return false
+		if (info.sourceSelection || info.hasOptions || info.control) return false
+		if (!['input', 'textarea', 'contenteditable'].includes(info.tag)) return false
+		const role = info.role || ''
+		if (role && !['combobox', 'searchbox', 'textbox'].includes(role)) return false
+		return role === 'combobox' || role === 'searchbox' || !info.fieldType || !DROPDOWN_FIELD_TYPES.has(compactTypeToken(info.fieldType))
 	}
 
 	function inferObservedControlKind(info) {

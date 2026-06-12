@@ -1490,6 +1490,11 @@
 			const action = buildInitialOptionPlanningAction(line, context)
 			if (action) actions.push(action)
 		}
+		const requiredSelectionLines = context.match(/^- form_required_selection_requirement\b[^\n]*status="candidates_unobserved"[^\n]*/gm) || []
+		for (const line of requiredSelectionLines) {
+			const action = buildInitialFormRequiredSelectionPlanningAction(line)
+			if (action) actions.push(action)
+		}
 		const submitRequirementLines = context.match(/^- search_submit_requirement\b[^\n]*status="submit_action_missing"[^\n]*/gm) || []
 		for (const line of submitRequirementLines) {
 			const action = buildInitialSearchActionPlanningAction(line, 'submit')
@@ -1501,6 +1506,21 @@
 			if (action) actions.push(action)
 		}
 		return actions
+	}
+
+	function buildInitialFormRequiredSelectionPlanningAction(requirementLine) {
+		const label = cleanSearchProgressFragment(extractAttr(requirementLine, 'field'))
+		const index = Number(extractAttr(requirementLine, 'activeIndex'))
+		if (!Number.isFinite(index)) return null
+		return {
+			name: 'request_options_for',
+			input: {
+				index,
+				...(label ? { label } : {}),
+				limit: 20,
+			},
+			reason: `必填选择字段 ${label || `index:${index}`} 已展开但没有稳定候选，本地先补该字段候选上下文。`,
+		}
 	}
 
 	function buildInitialSearchActionPlanningAction(requirementLine, kind) {

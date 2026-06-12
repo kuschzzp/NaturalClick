@@ -1,6 +1,6 @@
 # Runtime Configuration And Diagnostics
 
-This guide documents NaturalClick Agent 0.6.60 runtime settings, observation compaction, model streaming traces, and common troubleshooting workflows.
+This guide documents NaturalClick Agent 0.6.64 runtime settings, observation compaction, model streaming traces, and common troubleshooting workflows.
 
 ## Where Settings Live
 
@@ -77,6 +77,14 @@ The observer collects generic field-level validation and page feedback, includin
 
 After form submission, the verifier prioritizes this feedback. If a dialog stays open and there is no success feedback, page change, dialog close, or clear error, NaturalClick will not treat the submit as successful.
 
+For create, edit, and form-fill tasks, a model `done(success=true)` message is only a narrative result. NaturalClick still needs submit evidence, a dialog closing, success feedback, or an equivalent page change before the result summary reports the form task as completed.
+
+When submission exposes required select, dropdown, or cascader validation, NaturalClick first opens the field and reads real candidates. It auto-selects only a single safe candidate; ambiguous or unreadable candidates require user input instead of guessing or marking the task successful.
+
+When a form task needs an external lookup value, such as a price, email code, generated identifier, or information from another page, NaturalClick should keep the main form tab open and use a separate tab for the explicit external source. Numeric lookup values are scored by nearby price, currency, unit, and market context so dates or timestamps are less likely to be reused as field values.
+
+Within the same side-panel conversation, a form task that is confirmed complete by the result summary is promoted into a current-conversation `record_fact` built from successfully filled fields. Failed, unconfirmed, or validation-error forms are not promoted as created-record facts.
+
 For duplicate, already-exists, and unique-constraint feedback:
 
 - If the conflicting field is identifiable, the agent may correct that field.
@@ -92,6 +100,7 @@ For duplicate, already-exists, and unique-constraint feedback:
 | Planning appears stuck while waiting for the model | Slow model response, slow first token, or very large context | Increase round timeout and check whether the streaming card receives content |
 | A form saved successfully but verification failed | The page did not expose clear success feedback or observable dialog/list changes | Export logs and inspect post-submit `feedback`, field `error`, and DOM summaries |
 | A record was created but the agent tries to create again | Success evidence was insufficient or the history did not identify completion | Inspect verifier evidence and consider adding more observable success feedback to logs |
+| Search testing repeats the same field | The page re-rendered and changed DOM indexes before old field state was migrated | Check whether field label/type stayed stable and whether `completedKeys` and `resultsByKey` moved to the new index |
 | First error is duplicate, second error is a format validation error | The latest feedback must drive a fresh plan | Inspect the newest `feedback` and confirm the agent read the changed error |
 
 ## Useful Log Contents

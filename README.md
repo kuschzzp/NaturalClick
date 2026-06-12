@@ -26,7 +26,7 @@ It observes the active page through structured DOM extraction, sends the current
 
 This is **not** a stealth automation toolkit or a CAPTCHA bypass project. The goal is transparent, debuggable, user-controlled browser automation for real web workflows.
 
-Current extension version: `0.6.60`. The source of truth is `naturalclick-extension/manifest.json`.
+Current extension version: `0.6.64`. The source of truth is `naturalclick-extension/manifest.json`.
 
 ## Install
 
@@ -153,6 +153,8 @@ naturalclick-extension/
 └── assets/                          # Extension icons
 
 docs/
+├── agent-generalization-roadmap.md                # General web agent roadmap
+├── agent-generalization-roadmap.zh-CN.md          # Chinese general web agent roadmap
 ├── runtime-configuration-and-diagnostics.md        # Runtime and troubleshooting guide
 ├── runtime-configuration-and-diagnostics.zh-CN.md  # Chinese runtime and troubleshooting guide
 └── superpowers/specs/                              # Design notes and historical specs
@@ -270,7 +272,7 @@ NaturalClick includes heuristic confirmation for risky actions such as delete, p
 ## Current Limitations
 
 - CAPTCHA, SMS verification, banking, payment, and identity verification usually require manual intervention.
-- Complex custom components may still need site-specific or framework-specific heuristics.
+- Complex custom components may still need broader generic component semantics and framework-pattern coverage.
 - Vision fallback depends on screenshot quality and model reliability.
 - Streaming model traces require an OpenAI-compatible endpoint that supports SSE streaming; unsupported providers fall back to normal JSON responses.
 - There is no packaged release workflow yet.

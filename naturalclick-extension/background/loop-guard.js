@@ -228,8 +228,10 @@
 			/(form|field|dropdown|cascader|duplicate|resolve)/i.test(`${workflow} ${step}`)
 	}
 
-	function getUnsafeDoneSuccessReason(session, decision) {
+	function getUnsafeDoneSuccessReason(session, decision, observation = null) {
 		if (decision?.action?.input?.success === false) return ''
+		const visibleFormBlocker = getVisibleFormCompletionBlocker(session, decision, observation)
+		if (visibleFormBlocker) return visibleFormBlocker
 		const recent = Array.isArray(session?.history) ? session.history.slice(-6) : []
 		for (let index = recent.length - 1; index >= 0; index -= 1) {
 			const item = recent[index]
@@ -244,6 +246,123 @@
 			}
 		}
 		return ''
+	}
+
+	function getVisibleFormCompletionBlocker(session, decision, observation) {
+		if (!observation || typeof observation !== 'object') return ''
+		if (!isFormCompletionSensitiveTask(session, decision)) return ''
+		const fieldIssue = findVisibleFormValidationIssue(observation)
+		if (fieldIssue) return fieldIssue
+		const feedbackIssue = findVisibleFormErrorFeedback(observation)
+		if (feedbackIssue) return feedbackIssue
+		return ''
+	}
+
+	function isFormCompletionSensitiveTask(session, decision) {
+		const input = decision?.action?.input || {}
+		const workflowStep = String(input.workflow_step || '').trim()
+		if (/^(finish_create_after_submit_no_form|submit_form_timeout_recovery|resolve_field_validation_error)$/i.test(workflowStep)) return true
+		const taskText = String(session?.latestTask || session?.task || '')
+		if (/(创建|新增|新建|添加|编辑|修改|更新|填写|填入|填表|录入|设置|保存|提交|注册|create|add|new|edit|update|change|fill|save|submit|register|signup|sign\s*up)/i.test(taskText)) return true
+		return (Array.isArray(session?.history) ? session.history.slice(-8) : []).some((item) => {
+			const action = normalizeHistoryActionName(item?.action, item?.input)
+			const itemInput = item?.input || {}
+			const step = String(itemInput.workflow_step || '')
+			const workflow = String(itemInput.workflow || '')
+			return workflow === 'form-fill' ||
+				/^(fill_form_field_timeout_recovery|fill_form_field_task_value|open_form_dropdown_timeout_recovery|choose_form_dropdown_timeout_recovery|select_cascader_path_timeout_recovery|select_visible_cascader_option_timeout_recovery|resolve_duplicate_field_conflict|resolve_field_validation_error|submit_form_timeout_recovery)$/i.test(step) ||
+				(action === 'click_element_by_index' && step === 'open_create_form_timeout_recovery')
+		})
+	}
+
+	function findVisibleFormValidationIssue(observation) {
+		for (const form of (Array.isArray(observation?.forms) ? observation.forms : [])) {
+			const formName = String(form?.name || form?.id || '').trim()
+			if (/(搜索|查询|筛选|过滤|filter|search)/i.test(formName)) continue
+			for (const field of (Array.isArray(form?.fields) ? form.fields : [])) {
+				const region = String(field?.region || form?.region || '').trim().toLowerCase()
+				if (region && !['content', 'dialog', 'popover'].includes(region)) continue
+				const label = normalizeVisibleFormLabel(getObservedFormItemText(field)) || '未命名字段'
+				const validation = getVisibleFormValidationText(field)
+				const invalid = field?.invalid === true || String(field?.invalid || '').toLowerCase() === 'true'
+				const requiredEmpty = isRequiredEmptyVisibleFormField(field)
+				if (!invalid && !validation && !requiredEmpty) continue
+				const detail = validation || (requiredEmpty ? '必填字段仍为空' : '字段仍处于无效状态')
+				return `当前页面仍有表单校验未解决：${label}: ${detail}`
+			}
+		}
+		return ''
+	}
+
+	function findVisibleFormErrorFeedback(observation) {
+		const candidates = []
+		for (const item of (Array.isArray(observation?.feedback) ? observation.feedback : [])) {
+			candidates.push(item?.text, item?.message, item?.label)
+		}
+		const content = String(observation?.content || '')
+		for (const line of content.split(/\n+/).slice(-80)) {
+			if (/(错误|失败|校验|验证|请选择|请输入|必填|不能为空|required|invalid|error|failed)/i.test(line)) {
+				candidates.push(line)
+			}
+		}
+		for (const candidate of candidates) {
+			const text = sanitizeFormIssueText(candidate)
+			if (!text || !isVisibleFormValidationText(text)) continue
+			return `当前页面仍有错误反馈：${text}`
+		}
+		return ''
+	}
+
+	function getVisibleFormValidationText(field) {
+		const values = [
+			field?.validationMessage,
+			field?.validationError,
+			field?.errorText,
+			field?.error,
+			field?.message,
+			field?.help,
+			field?.stateText,
+		]
+		for (const value of values) {
+			const text = sanitizeFormIssueText(value)
+			if (text && isVisibleFormValidationText(text)) return text
+		}
+		return ''
+	}
+
+	function isRequiredEmptyVisibleFormField(field) {
+		const required = field?.required === true || String(field?.required || '').toLowerCase() === 'true'
+		if (!required) return false
+		const valueText = String(field?.value || field?.text || field?.childValue || '').trim()
+		const valueState = String(field?.valueState || '').toLowerCase()
+		return !valueText || /empty|blank|未填|未选|请选择|请输入/.test(valueState)
+	}
+
+	function isVisibleFormValidationText(value) {
+		return /(不能为空|必填|请选择|请输入|请填写|请录入|未选择|校验失败|验证失败|格式错误|重复|已存在|已经存在|不能重复|唯一|保存失败|提交失败|操作失败|请求失败|提交异常|保存异常|required\s+field|is\s+required|please\s+(?:select|enter|input)|must\s+select|invalid\s+(?:value|input|format)|duplicate|already\s+exists|\bunique\b|\berror\b|\bfailed\b)/i.test(String(value || ''))
+	}
+
+	function normalizeVisibleFormLabel(value) {
+		return String(value || '')
+			.replace(/[*＊]/g, '')
+			.replace(/\s+/g, ' ')
+			.replace(/[：:]\s*$/, '')
+			.trim()
+	}
+
+	function getObservedFormItemText(item) {
+		return [
+			item?.label,
+			item?.name,
+			item?.placeholder,
+			item?.ariaLabel,
+			item?.title,
+			item?.text,
+		].filter(Boolean).join(' ')
+	}
+
+	function sanitizeFormIssueText(value) {
+		return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 180)
 	}
 
 	function detectRedundantInputRewrite(session, action) {
