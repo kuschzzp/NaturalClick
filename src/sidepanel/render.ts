@@ -1,11 +1,10 @@
-import { badge, button, el, textInput } from "./components";
+import { button, el, textInput } from "./components";
 import {
-  deriveActiveNodeId,
-  deriveRuntimeFlow,
   needsModelGuidance,
   RUNTIME_FLOW,
   withDerivedMode,
   type OverlayMode,
+  type SessionSummary,
   type SidepanelSafetyMode,
   type SidepanelState,
   type TimelineItem
@@ -20,6 +19,11 @@ export interface SidepanelHandlers {
   onSafetyModeChange?: (mode: string) => void;
   onStopTask?: () => void;
   onHighlightTarget?: (semanticId: string) => void;
+  onCopyLog?: () => void;
+  onDownloadLog?: () => void;
+  onNewSession?: () => void;
+  onOpenHistory?: () => void;
+  onBackToChat?: () => void;
 }
 
 function formatSafetyMode(mode: SidepanelSafetyMode): string {
@@ -48,215 +52,201 @@ function formatTaskStatus(status?: string): string {
     running: "执行中",
     planning: "规划中",
     observing: "观察中",
-    executing: "执行动作",
+    executing: "执行中",
     verifying: "校验中",
-    awaiting_confirmation: "等待确认",
+    awaiting_confirmation: "待确认",
     completed: "已完成",
-    failed: "失败",
+    failed: "错误",
     stopped: "已停止",
     blocked: "已阻塞"
   };
-  return status ? (labels[status] ?? status) : "待命";
+  return status ? (labels[status] ?? status) : "空闲";
+}
+
+function statusTone(status?: string): string {
+  if (!status) return "idle";
+  if (status === "completed") return "completed";
+  if (status === "failed" || status === "blocked") return "error";
+  if (status === "stopped") return "stopped";
+  return "running";
+}
+
+function iconMarkup(name: "copy" | "download" | "plus" | "history" | "settings" | "back" | "send" | "stop"): string {
+  const icons: Record<typeof name, string> = {
+    copy:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>',
+    download:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>',
+    plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>',
+    history:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h16"></path><path d="M4 18h16"></path></svg>',
+    settings:
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 0 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7A2 2 0 0 1 7.1 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 0 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"></path></svg>',
+    back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>',
+    send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="m13 6 6 6-6 6"></path></svg>',
+    stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1"></rect></svg>'
+  };
+  return icons[name];
+}
+
+function iconButton(className: string, icon: Parameters<typeof iconMarkup>[0], label: string): HTMLButtonElement {
+  const node = button(className, "", label);
+  node.innerHTML = iconMarkup(icon);
+  node.title = label;
+  return node;
 }
 
 function renderTopBar(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
-  const topbar = el("header", "nc-topbar");
-  const identity = el("div", "nc-product");
-  identity.append(el("strong", "nc-product__name", "NaturalClick"));
-  identity.append(el("span", "nc-product__sub", state.activeTask ? formatTaskStatus(state.activeTask.status) : "Chrome 操作 Agent"));
+  const topbar = el("header", "nc-app-header");
 
-  const controls = el("div", "nc-topbar__controls");
-  controls.append(badge(formatSafetyMode(state.safetyMode), state.safetyMode === "experimental_full_auto" ? "warning" : "neutral"));
-  controls.append(badge(formatOverlayMode(state.overlayMode), state.overlayMode === "Vision" ? "vision" : "neutral"));
+  const brand = el("div", "nc-brand");
+  const logo = el("img", "nc-brand__logo") as HTMLImageElement;
+  logo.src = "icons/icon-48.png";
+  logo.alt = "";
+  brand.append(logo, el("h1", "nc-brand__title", "NaturalClick Agent"));
 
-  if (state.mode === "workbench") {
-    const stop = button("nc-button nc-button--danger nc-button--compact", "停止");
-    stop.addEventListener("click", () => handlers.onStopTask?.());
-    controls.append(stop);
-  }
+  const status = el("div", "nc-status");
+  status.append(el("span", `nc-status__dot nc-status__dot--${statusTone(state.activeTask?.status)}`));
+  status.append(el("span", "nc-status__text", formatTaskStatus(state.activeTask?.status)));
 
-  const settings = button("nc-icon-button", "设置");
+  const actions = el("div", "nc-toolbar");
+  const copy = iconButton("nc-tool-button", "copy", "复制执行日志");
+  copy.addEventListener("click", () => handlers.onCopyLog?.());
+  const download = iconButton("nc-tool-button", "download", "下载执行日志");
+  download.addEventListener("click", () => handlers.onDownloadLog?.());
+  const fresh = iconButton("nc-tool-button", "plus", "新建会话");
+  fresh.addEventListener("click", () => handlers.onNewSession?.());
+  const history = iconButton("nc-tool-button", "history", "历史会话");
+  history.addEventListener("click", () => handlers.onOpenHistory?.());
+  const settings = iconButton("nc-tool-button", "settings", "设置");
   settings.addEventListener("click", () => handlers.onOpenSettings?.());
-  controls.append(settings);
+  actions.append(copy, download, fresh, history, settings);
 
-  topbar.append(identity, controls);
+  topbar.append(brand, status, actions);
   return topbar;
 }
 
-function renderBuilderEntry(): HTMLElement {
-  const card = el("section", "nc-builder-entry");
-  const copy = el("div", "nc-builder-entry__copy");
-  copy.append(el("span", "nc-kicker", "B 方向"));
-  copy.append(el("strong", undefined, "Chatflow 编排"));
-  copy.append(el("p", undefined, "高级配置会进入 Dify 风格节点画布；侧边栏只展示当前流程路径、节点状态和运行证据。"));
-  const badgeNode = el("span", "nc-builder-entry__badge", "高级配置");
-  card.append(copy, badgeNode);
-  return card;
-}
-
 function renderGuidance(handlers: SidepanelHandlers): HTMLElement {
-  const card = el("article", "nc-panel nc-guidance");
-  card.append(el("h1", undefined, "需要先配置模型"));
-  card.append(el("p", undefined, "Planner 模型负责理解任务和决定下一步动作，配置完成后才能开始执行。"));
-  const open = button("nc-button nc-button--primary", "打开模型设置");
+  const card = el("article", "nc-inline-alert nc-inline-alert--warning");
+  const copy = el("div", "nc-inline-alert__copy");
+  copy.append(el("strong", undefined, "需要先配置模型"));
+  copy.append(el("p", undefined, "配置 Planner 模型后，就可以让 Agent 操作当前 Chrome 页面。"));
+  const open = button("nc-quiet-button", "去设置");
   open.addEventListener("click", () => handlers.onOpenSettings?.());
-  card.append(open);
+  card.append(copy, open);
   return card;
 }
 
-function renderFlowMap(state: SidepanelState): HTMLElement {
-  const flow = deriveRuntimeFlow(state);
-  const map = el("section", "nc-flow-map");
-  const header = el("header", "nc-section-head");
-  header.append(el("div", undefined, "当前对话流"));
-  header.append(el("span", undefined, state.activeTask ? `第 ${Math.max(1, flow.findIndex((node) => node.status === "active" || node.status === "blocked") + 1)} / ${flow.length} 节点` : "未开始"));
-  map.append(header);
-
-  const list = el("div", "nc-flow-list");
-  flow.forEach((node) => {
-    const item = el("article", `nc-flow-node nc-flow-node--${node.status}`);
-    item.append(el("span", "nc-flow-node__icon", node.shortLabel));
-    const copy = el("span", "nc-flow-node__copy");
-    copy.append(el("strong", undefined, node.label));
-    copy.append(el("span", undefined, node.description));
-    item.append(copy);
-    item.append(el("span", "nc-flow-node__state", node.status === "done" ? "完成" : node.status === "active" ? "当前" : node.status === "blocked" ? "阻塞" : "等待"));
-    list.append(item);
-  });
-  map.append(list);
-  return map;
+function renderEmptyState(): HTMLElement {
+  const empty = el("section", "nc-empty-state");
+  const mark = el("div", "nc-empty-state__mark");
+  mark.append(el("span", undefined, "⌁"));
+  empty.append(mark);
+  empty.append(el("h2", undefined, "开始你的自动化任务"));
+  empty.append(el("p", undefined, "输入目标后按 Enter 发送，Agent 会在这里持续输出执行过程。"));
+  return empty;
 }
 
-function renderCurrentAction(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
-  const task = state.activeTask;
-  const activeNodeId = deriveActiveNodeId(state);
-  const activeNode = RUNTIME_FLOW.find((node) => node.id === activeNodeId);
-  const card = el("section", "nc-action-card");
-
-  const header = el("header", "nc-section-head");
-  header.append(el("div", undefined, "当前动作"));
-  header.append(badge(task?.riskLevel === "medium" ? "需确认" : task?.riskLevel === "blocked" ? "已阻塞" : "低风险", task?.riskLevel === "medium" ? "warning" : task?.riskLevel === "blocked" ? "danger" : "neutral"));
-  card.append(header);
-
-  const nodeLine = el("div", "nc-action-card__node");
-  nodeLine.append(el("span", "nc-action-card__node-icon", activeNode?.shortLabel ?? "计"));
-  nodeLine.append(el("strong", undefined, activeNode?.label ?? "计划动作"));
-  nodeLine.append(el("span", undefined, activeNode?.description ?? "等待 Agent 决定下一步"));
-  card.append(nodeLine);
-
-  card.append(el("p", "nc-action-card__main", task?.currentAction ?? "等待下一次模型决策"));
-
-  const facts = el("dl", "nc-action-facts");
-  const target = task?.targetLabel ?? "尚未绑定页面目标";
-  const outcome = task?.expectedOutcome ?? "执行后会重新观察并校验页面状态";
-  facts.append(el("dt", undefined, "目标"), el("dd", undefined, target), el("dt", undefined, "预期结果"), el("dd", undefined, outcome));
-  if (task?.bindingSource) {
-    facts.append(el("dt", undefined, "证据"), el("dd", undefined, task.bindingSource));
-  }
-  card.append(facts);
-
-  const actions = el("div", "nc-action-row");
-  const highlight = button("nc-button", "标记目标");
-  highlight.disabled = !task?.semanticTargetId;
-  highlight.addEventListener("click", () => {
-    if (task?.semanticTargetId) handlers.onHighlightTarget?.(task.semanticTargetId);
-  });
-  actions.append(highlight);
-  const stop = button("nc-button nc-button--danger", "停止任务");
-  stop.addEventListener("click", () => handlers.onStopTask?.());
-  actions.append(stop);
-  card.append(actions);
-  return card;
+function visibleTimelineItems(timeline?: TimelineItem[]): TimelineItem[] {
+  return (timeline ?? []).filter((item) => item.id !== "welcome");
 }
 
 function renderTimelineItem(item: TimelineItem): HTMLElement {
-  const row = el("article", `nc-timeline-item nc-timeline-item--${item.tone ?? "info"}`);
-  row.append(el("strong", undefined, item.title));
-  if (item.detail) row.append(el("p", undefined, item.detail));
+  const row = el("article", `nc-message nc-message--${item.tone ?? "info"}`);
+  const marker = el("span", "nc-message__marker");
+  const body = el("div", "nc-message__body");
+  body.append(el("strong", undefined, item.title));
+  if (item.detail) body.append(el("p", undefined, item.detail));
+  row.append(marker, body);
   return row;
 }
 
-function renderTimeline(state: SidepanelState): HTMLElement {
-  const timeline = el("section", "nc-timeline");
-  timeline.setAttribute("aria-live", "polite");
-  const header = el("header", "nc-section-head");
-  header.append(el("div", undefined, "对话与进展"));
-  header.append(el("span", undefined, state.timeline?.length ? `${state.timeline.length} 条事件` : "等待输入"));
-  timeline.append(header);
+function renderTaskSummary(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement | undefined {
+  const task = state.activeTask;
+  if (!task) return undefined;
 
-  const items =
-    state.timeline && state.timeline.length > 0
-      ? state.timeline
-      : [{ id: "empty", title: "准备就绪", detail: "描述你希望 Agent 在当前页面完成什么。", tone: "info" as const }];
-  items.forEach((item) => timeline.append(renderTimelineItem(item)));
-  return timeline;
+  const card = el("article", "nc-task-summary");
+  const top = el("div", "nc-task-summary__top");
+  top.append(el("span", "nc-task-summary__label", "当前任务"));
+  if (task.semanticTargetId) {
+    const highlight = button("nc-quiet-button", "标记目标");
+    highlight.addEventListener("click", () => handlers.onHighlightTarget?.(task.semanticTargetId!));
+    top.append(highlight);
+  }
+  card.append(top);
+  card.append(el("p", "nc-task-summary__text", task.currentAction ?? "等待 Agent 决定下一步"));
+  if (task.targetLabel || task.expectedOutcome) {
+    const meta = el("dl", "nc-task-summary__meta");
+    if (task.targetLabel) meta.append(el("dt", undefined, "目标"), el("dd", undefined, task.targetLabel));
+    if (task.expectedOutcome) meta.append(el("dt", undefined, "预期"), el("dd", undefined, task.expectedOutcome));
+    card.append(meta);
+  }
+  return card;
 }
 
-function renderInspector(state: SidepanelState): HTMLElement {
-  const inspector = el("aside", "nc-inspector");
-  const header = el("header", "nc-section-head");
-  header.append(el("div", undefined, "运行检查器"));
-  header.append(el("span", undefined, "按需展开细节"));
-  inspector.append(header);
+function renderChatView(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+  const view = el("main", "nc-chat-view");
+  if (needsModelGuidance(state)) view.append(renderGuidance(handlers));
 
-  const tabs = el("div", "nc-tabs");
-  ["Decision", "Evidence", "Trace"].forEach((label, index) => {
-    const tab = button(`nc-tab${index === 0 ? " nc-tab--active" : ""}`, label);
-    tab.setAttribute("aria-selected", String(index === 0));
-    tabs.append(tab);
-  });
+  const taskSummary = renderTaskSummary(state, handlers);
+  if (taskSummary) view.append(taskSummary);
 
-  const body = el("div", "nc-inspector__body");
-  body.append(el("h2", undefined, "Decision"));
-  body.append(el("p", undefined, state.decisionSummary ?? "还没有产生模型决策。运行后这里会展示下一步为什么这么做。"));
+  const stream = el("section", "nc-chat-stream");
+  stream.setAttribute("aria-live", "polite");
+  const items = visibleTimelineItems(state.timeline);
+  if (items.length === 0) {
+    stream.append(renderEmptyState());
+  } else {
+    items.forEach((item) => stream.append(renderTimelineItem(item)));
+  }
 
-  const evidence = el("section", "nc-evidence-list");
-  evidence.append(el("h2", undefined, "Evidence"));
-  (state.evidenceSummary ?? ["页面观察后会在这里展示 DOM、视觉和验证证据。"]).forEach((item) => {
-    evidence.append(el("p", "nc-evidence-line", item));
-  });
-
-  const trace = el("section", "nc-trace-list");
-  trace.append(el("h2", undefined, "Trace"));
-  (state.traceSummary ?? ["任务开始后，内部事件会按步骤折叠展示。"]).forEach((item) => {
-    trace.append(el("p", "nc-trace-line", item));
-  });
-
-  inspector.append(tabs, body, evidence, trace);
-  return inspector;
+  const activity = el("section", "nc-activity-bar");
+  activity.append(el("strong", undefined, state.activityText ?? state.activeTask?.currentAction ?? "等待任务..."));
+  stream.append(activity);
+  view.append(stream);
+  return view;
 }
 
-function renderComposer(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
-  const form = el("form", "nc-composer");
-  const label = el("label", "nc-composer__field");
-  label.append(el("span", "nc-field__label", state.activeTask ? "补充指令" : "任务"));
-  const textarea = el("textarea", "nc-textarea") as HTMLTextAreaElement;
-  textarea.rows = 3;
-  textarea.placeholder = state.activeTask ? "补充约束、提供信息，或输入“停止”..." : "让 Agent 操作当前页面...";
-  label.append(textarea);
+function renderHistoryView(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+  const view = el("main", "nc-page-view");
+  view.append(renderPageHeader("历史会话", handlers));
 
-  const actions = el("div", "nc-composer__actions");
-  const submit = el("button", "nc-button nc-button--primary", state.activeTask ? "追加" : "开始") as HTMLButtonElement;
-  submit.type = "submit";
-  actions.append(submit);
+  const list = el("section", "nc-session-list");
+  const sessions = state.sessions ?? [];
+  if (sessions.length === 0) {
+    const empty = el("article", "nc-page-empty");
+    empty.append(el("h2", undefined, "暂无历史会话"));
+    empty.append(el("p", undefined, "开始一次任务后，这里会保留本次侧边栏可见的会话摘要。"));
+    list.append(empty);
+  } else {
+    sessions.forEach((session) => list.append(renderSessionSummary(session)));
+  }
+  view.append(list);
+  return view;
+}
 
-  form.append(label, actions);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const text = textarea.value.trim();
-    if (!text) return;
-    handlers.onSubmitTask?.(text);
-    textarea.value = "";
-  });
-  return form;
+function renderSessionSummary(session: SessionSummary): HTMLElement {
+  const row = el("article", "nc-session-card");
+  const head = el("div", "nc-session-card__head");
+  head.append(el("strong", undefined, session.title));
+  head.append(el("span", undefined, formatTaskStatus(session.status)));
+  row.append(head);
+  row.append(el("p", undefined, `${session.eventCount} 条事件 · ${session.updatedAt}`));
+  return row;
+}
+
+function renderPageHeader(title: string, handlers: SidepanelHandlers): HTMLElement {
+  const header = el("header", "nc-page-header");
+  const back = iconButton("nc-back-button", "back", "返回对话");
+  back.addEventListener("click", () => handlers.onBackToChat?.());
+  header.append(back, el("h2", undefined, title));
+  return header;
 }
 
 function renderOverlayControls(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
-  const controls = el("section", "nc-overlay-controls");
-  const header = el("header", "nc-section-head");
-  header.append(el("div", undefined, "页面标记"));
-  header.append(el("span", undefined, "只控制可视化"));
-  controls.append(header);
+  const controls = el("section", "nc-settings-group");
+  controls.append(el("h3", undefined, "页面标记"));
+  controls.append(el("p", undefined, "标记模式只影响页面上的可视化提示，不关闭观察、绑定或执行能力。"));
 
   const options = el("div", "nc-segmented");
   (["Off", "Focus", "All Targets", "Evidence", "Vision"] as OverlayMode[]).forEach((mode) => {
@@ -266,20 +256,29 @@ function renderOverlayControls(state: SidepanelState, handlers: SidepanelHandler
     options.append(option);
   });
   controls.append(options);
-  controls.append(el("p", "nc-help-text", "关闭标记不会关闭观察、绑定或执行能力。"));
   return controls;
 }
 
-function renderSettingsDrawer(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
-  const drawer = el("section", `nc-settings${state.settingsOpen ? " nc-settings--open" : ""}`);
-  drawer.setAttribute("aria-hidden", String(!state.settingsOpen));
-  const header = el("header", "nc-settings__header");
-  header.append(el("h2", undefined, "模型设置"));
-  const close = button("nc-icon-button", "关闭");
-  close.addEventListener("click", () => handlers.onCloseSettings?.());
-  header.append(close);
+function renderSafetyControls(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+  const controls = el("section", "nc-settings-group");
+  controls.append(el("h3", undefined, "执行权限"));
+  controls.append(el("p", undefined, "权限配置会影响 Agent 是否需要在中高风险动作前询问你。"));
 
-  const form = el("form", "nc-settings__form");
+  const options = el("div", "nc-segmented nc-segmented--safety");
+  (["conservative", "balanced", "autonomous", "experimental_full_auto"] as SidepanelSafetyMode[]).forEach((mode) => {
+    const option = button(`nc-segment${state.safetyMode === mode ? " nc-segment--active" : ""}`, formatSafetyMode(mode));
+    option.setAttribute("aria-pressed", String(state.safetyMode === mode));
+    option.addEventListener("click", () => handlers.onSafetyModeChange?.(mode));
+    options.append(option);
+  });
+  controls.append(options);
+  return controls;
+}
+
+function renderModelSettings(): HTMLElement {
+  const group = el("section", "nc-settings-group");
+  group.append(el("h3", undefined, "大模型 API"));
+  const form = el("form", "nc-settings-form");
   const settings = defaultModelSettings();
   form.append(
     textInput("Base URL", settings.providerBaseUrl),
@@ -287,30 +286,81 @@ function renderSettingsDrawer(state: SidepanelState, handlers: SidepanelHandlers
     textInput("Vision 模型", settings.visionModel ?? "", "可选"),
     textInput("API Key 引用", settings.apiKeyRef)
   );
-  form.append(el("p", "nc-settings__note", "第一版使用一个全局 OpenAI-compatible Provider。API Key 不会写入 Trace。"));
-  drawer.append(header, form);
-  return drawer;
+  form.append(el("p", "nc-settings-note", "第一版使用一个全局 OpenAI-compatible Provider。API Key 不会写入 Trace。"));
+  group.append(form);
+  return group;
+}
+
+function renderRuntimeSummary(state: SidepanelState): HTMLElement {
+  const group = el("section", "nc-settings-group");
+  group.append(el("h3", undefined, "运行链路"));
+  const flow = el("div", "nc-runtime-strip");
+  RUNTIME_FLOW.forEach((node) => {
+    const item = el("span", "nc-runtime-chip", node.label);
+    flow.append(item);
+  });
+  group.append(flow);
+  return group;
+}
+
+function renderSettingsView(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+  const view = el("main", "nc-page-view");
+  view.append(renderPageHeader("设置", handlers));
+  view.append(renderModelSettings(), renderOverlayControls(state, handlers), renderSafetyControls(state, handlers), renderRuntimeSummary(state));
+  return view;
+}
+
+function renderComposer(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+  const form = el("form", "nc-composer");
+  const label = el("label", "nc-composer__field");
+  label.append(el("span", "nc-sr-only", "任务描述"));
+  const textarea = el("textarea", "nc-textarea") as HTMLTextAreaElement;
+  textarea.rows = 3;
+  textarea.placeholder = "描述你的任务...（Enter 发送，Shift+Enter 换行）";
+  label.append(textarea);
+
+  const submit = iconButton(
+    `nc-send-button${state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status) ? " nc-send-button--stop" : ""}`,
+    state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status) ? "stop" : "send",
+    state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status) ? "停止任务" : "发送任务"
+  );
+  submit.type = "submit";
+  form.append(label, submit);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status)) {
+      handlers.onStopTask?.();
+      return;
+    }
+    const text = textarea.value.trim();
+    if (!text) return;
+    handlers.onSubmitTask?.(text);
+    textarea.value = "";
+  });
+
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  return form;
 }
 
 export function renderSidepanel(root: HTMLElement, input: SidepanelState, handlers: SidepanelHandlers = {}): void {
   const state = withDerivedMode(input);
-  const shell = el("section", `nc-shell nc-shell--${state.mode}`);
+  const viewName = state.view ?? "chat";
+  const shell = el("section", `nc-shell nc-shell--${state.mode} nc-shell--view-${viewName}`);
   shell.append(renderTopBar(state, handlers));
 
-  const main = el("div", "nc-main");
-  if (needsModelGuidance(state)) {
-    main.append(renderGuidance(handlers));
+  if (viewName === "history") {
+    shell.append(renderHistoryView(state, handlers));
+  } else if (viewName === "settings") {
+    shell.append(renderSettingsView(state, handlers));
+  } else {
+    shell.append(renderChatView(state, handlers), renderComposer(state, handlers));
   }
-  main.append(renderBuilderEntry());
-  if (state.mode === "workbench") {
-    main.append(renderFlowMap(state));
-    main.append(renderCurrentAction(state, handlers));
-    main.append(renderOverlayControls(state, handlers));
-  }
-  main.append(renderTimeline(state));
-  if (state.mode === "workbench") {
-    main.append(renderInspector(state));
-  }
-  shell.append(main, renderComposer(state, handlers), renderSettingsDrawer(state, handlers));
+
   root.replaceChildren(shell);
 }

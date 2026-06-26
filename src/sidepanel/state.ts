@@ -1,6 +1,7 @@
 import type { AgentEvent, AgentEventType } from "../core/events/events";
 
 export type SidepanelMode = "conversation" | "workbench";
+export type SidepanelView = "chat" | "history" | "settings";
 export type OverlayMode = "Off" | "Focus" | "All Targets" | "Evidence" | "Vision";
 export type SidepanelSafetyMode = "conservative" | "balanced" | "autonomous" | "experimental_full_auto";
 export type FlowNodeId = "start" | "intent" | "observe" | "route" | "plan" | "act" | "verify" | "reply";
@@ -33,8 +34,17 @@ export interface TimelineItem {
   tone?: "info" | "success" | "warning" | "error";
 }
 
+export interface SessionSummary {
+  id: string;
+  title: string;
+  status: string;
+  updatedAt: string;
+  eventCount: number;
+}
+
 export interface SidepanelState {
   mode: SidepanelMode;
+  view?: SidepanelView;
   overlayMode: OverlayMode;
   safetyMode: SidepanelSafetyMode;
   modelConfigured: boolean;
@@ -42,6 +52,8 @@ export interface SidepanelState {
   traceOpen: boolean;
   settingsOpen?: boolean;
   timeline?: TimelineItem[];
+  sessions?: SessionSummary[];
+  activityText?: string;
   decisionSummary?: string;
   evidenceSummary?: string[];
   traceSummary?: string[];
