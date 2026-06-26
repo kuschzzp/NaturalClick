@@ -6,7 +6,7 @@
 
 NaturalClick turns the Chrome side panel into an inspectable browser-agent workspace. It observes the active page, builds evidence, plans semantic commands, executes local Chrome actions, verifies the result, and keeps a traceable session record.
 
-[License](./LICENSE) · [Installable Extension](./naturalclick-extension) · [Architecture Spec](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [Side Panel Spec](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md)
+[简体中文](./README.zh-CN.md) · [License](./LICENSE) · [Installable Extension](./naturalclick-extension) · [Architecture Spec](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [Side Panel Spec](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md)
 
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
 [![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
