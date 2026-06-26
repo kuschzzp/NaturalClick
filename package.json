@@ -9,6 +9,7 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:e2e": "playwright test tests/e2e",
+    "test:all": "npm run typecheck && npm run test:unit && npm run build && npm run test:e2e",
     "lint": "tsc --noEmit"
   },
   "devDependencies": {

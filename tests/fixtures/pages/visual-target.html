@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Visual Target Fixture</title>
+    <style>
+      #gear {
+        width: 44px;
+        height: 44px;
+        border: 1px solid #8a94a6;
+        background: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Icon-only toolbar</h1>
+      <button id="gear" title="Settings">⚙</button>
+      <p id="state">Panel closed</p>
+    </main>
+    <script>
+      document.querySelector("#gear").addEventListener("click", () => {
+        document.querySelector("#state").textContent = "Settings panel opened";
+      });
+    </script>
+  </body>
+</html>

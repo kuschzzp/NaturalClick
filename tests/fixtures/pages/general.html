@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>General Fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Account dashboard</h1>
+      <button id="settings" aria-label="Settings">Settings</button>
+      <section id="settings-panel" hidden>
+        <h2>Settings</h2>
+        <p>Settings panel opened.</p>
+      </section>
+    </main>
+    <script>
+      document.querySelector("#settings").addEventListener("click", () => {
+        document.querySelector("#settings-panel").hidden = false;
+      });
+    </script>
+  </body>
+</html>

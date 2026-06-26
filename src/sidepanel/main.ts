@@ -18,6 +18,10 @@ let state: SidepanelState = {
   timeline: [{ id: "welcome", title: "Ready", detail: "Configure a planner model, then ask the Agent to operate the current page." }]
 };
 
+function hasChromeRuntime(): boolean {
+  return Boolean(globalThis.chrome?.runtime?.sendMessage);
+}
+
 function applySession(session: SessionStateResponse): void {
   const latest = session.events.at(-1);
   state = withDerivedMode({
@@ -54,6 +58,7 @@ function paint(): void {
 }
 
 async function refreshSession(): Promise<void> {
+  if (!hasChromeRuntime()) return;
   const response = await sendRuntimeMessage<SessionStateResponse>({ type: "GET_SESSION_STATE" });
   if (response.ok) {
     applySession(response.data);
@@ -62,6 +67,15 @@ async function refreshSession(): Promise<void> {
 }
 
 async function submitText(text: string): Promise<void> {
+  if (!hasChromeRuntime()) {
+    state = {
+      ...state,
+      timeline: [{ id: "runtime-unavailable", title: "Background runtime unavailable", detail: text, tone: "warning" }]
+    };
+    paint();
+    return;
+  }
+
   const response = await sendRuntimeMessage<SessionStateResponse>(
     state.activeTask ? { type: "APPEND_INSTRUCTION", text } : { type: "START_TASK", taskText: text }
   );
