@@ -24,3 +24,10 @@ export async function captureVisibleTab(windowId?: number): Promise<string> {
   }
   return chrome.tabs.captureVisibleTab(windowId, { format: "png" });
 }
+
+export async function captureVisibleTabScreenshot(windowId?: number): Promise<{ dataUrl: string; capturedAt: number }> {
+  return {
+    dataUrl: await captureVisibleTab(windowId),
+    capturedAt: Date.now()
+  };
+}
