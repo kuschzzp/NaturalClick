@@ -1,11 +1,7 @@
-import type { BrowserPrimitive } from "../../core/commands/commands";
+import type { BrowserPrimitive, PrimitiveResult } from "../../core/commands/commands";
 import type { ControlCandidate, LocatorHint, PageModel } from "../../core/observation/page-model";
 
-export interface PrimitiveResult {
-  status: "success" | "failed";
-  reason?: string;
-  details: Record<string, unknown>;
-}
+export type { PrimitiveResult } from "../../core/commands/commands";
 
 function cssUnescapeIdentifier(value: string): string {
   const idMatch = value.match(/^\[id="(.+)"\]$/);

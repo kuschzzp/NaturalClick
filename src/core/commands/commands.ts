@@ -40,3 +40,9 @@ export interface BoundCommand {
   bindingEvidenceRefs: string[];
   expiresOn: "navigation" | "reload" | "step_end";
 }
+
+export interface PrimitiveResult {
+  status: "success" | "failed";
+  reason?: string;
+  details: Record<string, unknown>;
+}

@@ -1,5 +1,4 @@
-import type { PrimitiveResult } from "../../adapters/content/primitive-executor";
-import type { SemanticCommand } from "../commands/commands";
+import type { PrimitiveResult, SemanticCommand } from "../commands/commands";
 import type { ControlCandidate, PageModel } from "../observation/page-model";
 
 export interface VerifyOutcomeInput {
