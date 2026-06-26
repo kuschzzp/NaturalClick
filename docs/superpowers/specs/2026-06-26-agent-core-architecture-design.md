@@ -31,8 +31,9 @@ The first version must prove a general browser-operation loop:
 9. Maintain session memory.
 10. Produce clean user output and detailed developer trace.
 
-The first version should also include one lightweight form scenario to prove
-that field filling, task-scoped submit authorization, and evidence-driven
+The first version should also include one lightweight form scenario and a
+first-stage visual recognition capability to prove that field filling,
+task-scoped submit authorization, visual grounding, and evidence-driven
 verification are not merely theoretical.
 
 ## 2. Non-goals
@@ -76,6 +77,10 @@ Relevant Chrome constraints, verified against official Chrome documentation on
 - The Side Panel API is a browser UI surface for extension pages; it is useful
   as a companion UI but should not be the only runtime state holder:
   <https://developer.chrome.com/docs/extensions/reference/api/sidePanel>
+- `chrome.tabs.captureVisibleTab()` can capture the visible area of the active
+  tab when the extension has appropriate permission, but Chrome documents it as
+  expensive and rate-limited:
+  <https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab>
 
 These constraints are not incidental implementation details. They shape the
 Agent Core:
@@ -138,6 +143,9 @@ ReadSessionMemoryPort
 WriteSessionMemoryPort
 AskUserPort
 CaptureScreenshotPort
+AnalyzeVisualContextPort
+GroundVisualTargetPort
+VerifyVisualStatePort
 ```
 
 Chrome adapters:
@@ -151,9 +159,9 @@ Chrome adapters:
 - Storage adapter: event log, derived snapshots, session memory, redaction.
 - LLM adapter: OpenAI-compatible requests, streaming, timeout handling,
   contract validation.
-- Screenshot/vision adapter: screenshot capture and optional visual target
-  candidates, used as a fallback for binding/execution rather than as the main
-  decision model.
+- Screenshot/vision adapter: screenshot capture, first-stage visual recognition,
+  visual target grounding, and visual verification. It enhances observation,
+  binding, and verification, but does not become the main planning model.
 
 Guiding rule:
 
@@ -258,7 +266,9 @@ Each Agent step executes at most one semantic command.
    Restore TaskRuntimeState from latest snapshot plus following events.
 
 2. Observe
-   Generate an observation request appropriate for the active subgoal.
+   Generate an observation request appropriate for the active subgoal. Start
+   with DOM/PageModel observation; request visual observation only when the
+   current task, page, or failure state needs it.
 
 3. Update evidence
    Extract task-relevant evidence from the observation.
@@ -269,6 +279,8 @@ Each Agent step executes at most one semantic command.
 
 5. Bind
    Map the semantic command to current page targets and browser primitives.
+   Use DOM/PageModel binding first; call visual grounding when binding is
+   missing, ambiguous, obstructed, or low confidence.
 
 6. Check policy
    Decide allow, ask_user, block, or hard_block.
@@ -280,7 +292,9 @@ Each Agent step executes at most one semantic command.
    Observe the relevant region or page after the action.
 
 9. Verify
-   Decide success, partial success, failure, or inconclusive.
+   Decide success, partial success, failure, or inconclusive. Use deterministic
+   DOM verification first; call visual verification when the expected result is
+   primarily visual or DOM evidence is inconclusive.
 
 10. Reduce and continue
     Persist events, derive state, continue or summarize.
@@ -344,6 +358,10 @@ ModelCallFailed
 RuntimeSuspended
 RuntimeResumed
 ModelContractViolation
+ScreenshotCaptured
+VisionRequested
+VisionCompleted
+VisualEvidenceAdded
 ```
 
 Event visibility:
@@ -525,7 +543,215 @@ Summarizer speaks from Evidence.
 Developer trace can drill into RawObservation.
 ```
 
-## 9. Layered action model
+## 9. Visual recognition and grounding
+
+Visual recognition is a first-version capability. It is not a future-only
+enhancement, and it is not a second planning brain.
+
+Its role:
+
+```text
+Vision is the Agent's second sense.
+It enhances observation, target grounding, and verification.
+It does not own planning or bypass semantic commands.
+```
+
+The first version includes four visual capabilities only:
+
+1. Capture the visible tab.
+2. Summarize obvious visual structure.
+3. Ground a requested semantic target to visual candidates.
+4. Verify visual state changes after an action.
+
+It does not include:
+
+- A vision model that autonomously plans the next browser action.
+- Screenshot capture on every step.
+- Direct model-to-coordinate clicking.
+- Full-page screenshot stitching.
+- General OCR over long documents.
+- CAPTCHA or anti-bot solving.
+- Visual-only task completion without semantic verification.
+
+### Position in the runtime loop
+
+Vision can be called in three places.
+
+Observation enhancement:
+
+```text
+DOM/PageModel observation
+  -> if insufficient, capture screenshot
+  -> visual page summary
+  -> VisualEvidence
+  -> EvidenceStore
+```
+
+Binding enhancement:
+
+```text
+Planner emits SemanticCommand
+  -> DOM/PageModel binder ranks candidates
+  -> if missing, ambiguous, obstructed, or low confidence:
+       capture/crop screenshot
+       ground semantic target visually
+       fuse DOM and visual candidates
+  -> BoundCommand
+```
+
+Verification enhancement:
+
+```text
+Primitive executes
+  -> DOM verification
+  -> if inconclusive or visual state matters:
+       capture/crop screenshot
+       verify expected visual change
+  -> VerificationResult
+```
+
+### Trigger conditions
+
+Vision should be requested only when it is useful enough to justify latency,
+cost, privacy exposure, and Chrome screenshot limits.
+
+Observation triggers:
+
+- DOM observation is sparse, misleading, or lacks accessible names.
+- The page uses canvas, SVG-heavy UI, image controls, or custom-rendered
+  components.
+- The user task asks about visual content.
+- The page contains obvious overlays, dialogs, spinners, or visual feedback that
+  DOM extraction did not explain.
+
+Binding triggers:
+
+- The semantic command has no reliable DOM candidate.
+- Multiple DOM candidates are semantically similar.
+- The target is an icon-only button or visually labeled control.
+- A DOM candidate appears hidden, covered, disabled, or not clickable.
+- A prior click used a high-confidence DOM target but had no effect.
+
+Verification triggers:
+
+- The expected outcome is visual, such as a modal closing, toast appearing,
+  active tab changing, selected state changing, loading ending, or button state
+  changing.
+- DOM verification returns `inconclusive`.
+- The page changed visually but the PageModel delta is weak.
+- A failure recovery step needs to know whether the screen is blocked by an
+  overlay, permission prompt, cookie banner, or validation message.
+
+### Visual requests and outputs
+
+```text
+VisualObservationRequest
+  taskId
+  stepId
+  reason
+  screenshotScope: visible_tab | region
+  focusHints
+  redactionHints
+  relatedEvidenceRefs
+```
+
+```text
+GroundVisualTargetRequest
+  semanticCommandId
+  targetGoal
+  expectedRole
+  nearbyTextHints
+  regionHints
+  domCandidateRefs
+  screenshotRef
+```
+
+```text
+VisualStateVerificationRequest
+  semanticCommandId
+  expectedOutcome
+  beforeScreenshotRef
+  afterScreenshotRef
+  focusRegion
+  successCriteria
+```
+
+Visual output is evidence, not a final action:
+
+```text
+VisualEvidence
+  id
+  kind
+  claim
+  screenshotRef
+  boundingBox
+  label
+  roleGuess
+  nearbyText
+  confidence
+  sourceRequestId
+  relatedCommandId
+  expiresAt
+```
+
+Target grounding output:
+
+```text
+VisualTargetCandidate
+  label
+  roleGuess
+  boundingBox
+  nearbyText
+  confidence
+  screenshotRef
+  reasoningSummary
+```
+
+The Binder fuses visual candidates with DOM candidates:
+
+```text
+DOM candidate
+  + VisualTargetCandidate
+  + related Evidence
+  + policy context
+  -> BoundCommand
+```
+
+Only after this fusion may the executor use a coordinate primitive, and only as
+the last-mile primitive for a semantic command that passed policy.
+
+### Privacy and policy
+
+Screenshots can contain sensitive data. Vision is subject to `PolicyEngine`.
+
+Rules:
+
+- Remote visual model calls must be allowed by the current safety mode and site
+  scope.
+- Prefer cropped region screenshots when the target or verification area is
+  known.
+- Redact or avoid sensitive regions when possible.
+- Store screenshot references and derived evidence; do not expose raw images in
+  normal user output.
+- Record `VisionRequested`, `VisionCompleted`, and `VisualEvidenceAdded` events.
+- Respect Chrome screenshot rate limits and avoid repeated full-page captures.
+- Disable or ask for confirmation on pages classified as highly sensitive unless
+  the user explicitly enables visual analysis in that scope.
+
+### First-version acceptance
+
+The first implementation of `VisionCapability` is successful when:
+
+- It can summarize obvious visual regions from the visible tab.
+- It can locate an icon-only or weakly labeled target when DOM binding is
+  ambiguous.
+- It can help Binder produce a higher-confidence `BoundCommand`.
+- It can verify at least one visual state change, such as modal closed, toast
+  appeared, selected state changed, or loading ended.
+- It writes traceable visual evidence instead of directly deciding browser
+  actions.
+
+## 10. Layered action model
 
 The Agent uses three action layers:
 
@@ -646,7 +872,7 @@ coordinate_input
 Coordinates and DOM indexes are allowed only as primitive-level execution
 details. They must not become the Planner's main action language.
 
-## 10. Lightweight roles
+## 11. Lightweight roles
 
 The first version uses lightweight logical roles, not a heavyweight multi-agent
 platform.
@@ -773,7 +999,7 @@ All LLM role outputs must pass validation:
 Contract failures write `ModelContractViolation` events and trigger repair or
 stop policies.
 
-## 11. Capability packs and scenario profiles
+## 12. Capability packs and scenario profiles
 
 The extension mechanism is:
 
@@ -826,6 +1052,7 @@ PageReadingCapability
 FormBasicCapability
 FeedbackCapability
 RecoveryBasicCapability
+VisionCapability
 ```
 
 Future capability packs:
@@ -834,7 +1061,6 @@ Future capability packs:
 NavigationCapability
 TableCapability
 ResearchCapability
-VisionCapability
 BackofficePatternsCapability
 ```
 
@@ -883,7 +1109,7 @@ Add scenarios through Capability and Profile first.
 Modify Agent Core only when the core vocabulary cannot express the need.
 ```
 
-## 12. Safety policy and configuration
+## 13. Safety policy and configuration
 
 Safety uses:
 
@@ -1006,7 +1232,7 @@ PolicyDecision
   requiredUserPrompt
 ```
 
-## 13. Session memory
+## 14. Session memory
 
 The first version supports session-level memory, not long-term memory.
 
@@ -1052,7 +1278,7 @@ Must not enter memory:
 - Failed creation results.
 - Plaintext sensitive data without explicit scoped permission.
 
-## 14. Output layers
+## 15. Output layers
 
 Output is derived from events and evidence, not ad hoc strings from modules.
 
@@ -1100,7 +1326,7 @@ exported logs
 Normal users should not see prompts, raw model fragments, raw DOM indexes,
 coordinates, or internal debug labels unless they open the developer trace.
 
-## 15. First-version acceptance scenarios
+## 16. First-version acceptance scenarios
 
 ### Primary: general browser operation
 
@@ -1119,6 +1345,8 @@ Must demonstrate:
 - Policy allows low-risk actions.
 - Executor performs click, scroll, navigation, tab, or wait primitives.
 - Verifier detects page changes or semantic progress.
+- VisionCapability can be triggered when DOM binding or verification is
+  insufficient, and its output appears as visual evidence.
 - Event log reconstructs the full task.
 - User output stays clean while developer trace remains available.
 
@@ -1138,10 +1366,31 @@ Must demonstrate:
 - Binder binds fields and submit control semantically.
 - PolicyEngine does not ask for every submit when scoped consent exists.
 - Verifier checks field values, validation feedback, and submission outcome.
+- VisionCapability can help locate weakly labeled controls or verify visual
+  feedback such as a modal closing or toast appearing.
 - Successful result can enter SessionMemory.
 - Missing required fields trigger evidence-driven recovery or `AskUser`.
 
-## 16. Future enhancement direction
+### Tertiary: vision-assisted grounding
+
+Example task:
+
+```text
+Click the settings icon in this page and tell me whether the settings panel
+opened.
+```
+
+Must demonstrate:
+
+- DOM observation alone is insufficient or ambiguous.
+- VisionCapability captures the visible tab or a relevant region.
+- Visual target candidates are written as `VisualEvidence`.
+- Binder fuses DOM and visual candidates before execution.
+- PolicyEngine evaluates the resulting semantic command.
+- Verifier uses visual evidence to confirm whether the settings panel opened.
+- No visual model output directly becomes an unreviewed coordinate click.
+
+## 17. Future enhancement direction
 
 Backoffice enhancement:
 
@@ -1160,17 +1409,18 @@ Research enhancement:
 - quoted/cited content facts
 - multi-tab search and reading
 
-Vision enhancement:
+Later vision expansion:
 
-- `VisionCapability`
-- screenshot-based target candidates
-- coordinate fallback after semantic binding uncertainty
-- post-action semantic verification
+- full-page or region-stitch screenshot strategies
+- stronger visual OCR for reading-heavy pages
+- local or on-device visual model adapters when available
+- visual comparison across before/after screenshots
+- richer image and canvas understanding
 
-Vision must remain a fallback or evidence contributor. It must not replace the
-semantic command model.
+Vision must remain an evidence contributor for observation, binding, and
+verification. It must not replace the semantic command model.
 
-## 17. Design invariants
+## 18. Design invariants
 
 These rules should stay true even as the implementation grows:
 
@@ -1186,4 +1436,6 @@ These rules should stay true even as the implementation grows:
 10. Safety decisions are centralized and traceable.
 11. User output is separated from developer trace.
 12. Chrome MV3 suspension is a normal condition, not an exceptional edge case.
-
+13. Vision enhances observation, binding, and verification; it does not plan.
+14. Coordinate primitives are last-mile execution details after semantic
+    binding and policy.
