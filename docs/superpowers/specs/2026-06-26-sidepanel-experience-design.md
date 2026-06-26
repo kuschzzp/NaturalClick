@@ -1,6 +1,6 @@
 # Sidepanel Experience Design
 
-Status: proposed for the clean rewrite branch.
+Status: selected direction for the clean rewrite branch.
 
 Date: 2026-06-26
 
@@ -13,7 +13,19 @@ The side panel is the user's control surface for a Chrome browser operation
 Agent. It should feel conversational when idle and operational when the Agent is
 working.
 
-The design direction is an adaptive conversational workbench:
+The selected design direction is **B: Chatflow Builder + Side Panel Runtime**.
+This keeps the Chrome extension practical while still giving NaturalClick a
+Dify-like conversation-flow mental model:
+
+```text
+Advanced Chatflow Builder
+  node canvas, node configuration, run preview, versioned workflow debugging
+
+Chrome Side Panel Runtime
+  conversational entry, compact flow progress, current node, evidence, controls
+```
+
+The side panel itself remains an adaptive conversational workbench:
 
 ```text
 Idle / Conversation Mode
@@ -47,6 +59,10 @@ Turning overlay off must not disable observation, binding, or execution.
    logs, prompts, DOM indexes, or JSON.
 8. The interface should be dense and calm, closer to an operational console than
    a marketing page.
+9. Full flow editing belongs in an advanced builder surface; the side panel
+   shows the current flow path, active node, and runtime evidence.
+10. Builder view and side panel view must read from the same Agent event model,
+    not from two separate UI-only workflow abstractions.
 
 ## 3. Layout archetype
 
@@ -79,6 +95,68 @@ Settings Drawer
 Bottom Composer
 Page Overlay
 ```
+
+### Selected product direction: B
+
+NaturalClick should use two connected product surfaces:
+
+```text
+1. Advanced Chatflow Builder
+   Location: extension options page or dedicated extension workspace
+   Audience: power users, developers, workflow authors, debugging sessions
+   Job: design, inspect, version, and test reusable Agent flows
+
+2. Chrome Side Panel Runtime
+   Location: Chrome Side Panel
+   Audience: normal daily users
+   Job: start tasks, monitor execution, intervene, inspect evidence, confirm risk
+```
+
+The advanced builder is allowed to look close to Dify Chatflow:
+
+```text
+Left tool rail
+Top workflow toolbar
+Dotted node canvas
+Node graph: Start -> Intent -> Observe -> Route -> Plan -> Act -> Verify -> Reply
+Right node configuration panel
+Run preview / trace panel
+Version and test controls
+```
+
+The side panel should not try to squeeze the full node canvas into a narrow
+Chrome panel. It should present a runtime projection of the same flow:
+
+```text
+Compact current-flow map
+Active node / current action
+Conversation messages
+Evidence cards
+Trace drawer
+Safety confirmation card
+Bottom composer
+```
+
+First-version implementation rule:
+
+```text
+Ship the side panel runtime as the primary user experience.
+Expose the Chatflow Builder as an extensible product surface, but do not block
+the first runtime version on full drag-and-drop flow editing.
+```
+
+Enhancement rule:
+
+```text
+The builder can later become editable without changing the Agent Core, because
+nodes are projections of runtime steps, policies, model roles, commands,
+evidence, and trace events.
+```
+
+The selected B direction rejects two extremes:
+
+- Not A: the full Dify-like builder is not the only daily entry point.
+- Not C: the Chrome side panel does not become a cramped full canvas editor.
 
 Density:
 
@@ -881,4 +959,3 @@ Given no configured planner model:
 10. Current-session memory is available; long-term history is out of scope.
 11. Developer mode increases visibility, not permission.
 12. The UI avoids marketing-page structure and stays operational.
-
