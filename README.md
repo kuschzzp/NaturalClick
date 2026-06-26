@@ -1,48 +1,372 @@
 # NaturalClick Agent
 
-NaturalClick Agent is a clean-rewrite Chrome MV3 browser operation Agent.
+<div align="center">
 
-## Status
+**A clean-rewrite Chrome MV3 browser operation Agent with a DOM-first, vision-assisted Agent Core.**
 
-This branch contains the first-version implementation line. It focuses on a DOM-first, vision-assisted Agent Core, adaptive side panel, page overlay, scoped safety, current-session memory, and traceable execution.
+NaturalClick turns the Chrome side panel into an inspectable browser-agent workspace. It observes the active page, builds evidence, plans semantic commands, executes local Chrome actions, verifies the result, and keeps a traceable session record.
+
+[License](./LICENSE) · [Installable Extension](./naturalclick-extension) · [Architecture Spec](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [Side Panel Spec](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md)
+
+[![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
+[![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
+[![Side Panel](https://img.shields.io/badge/UI-Side%20Panel-10B981)](./public/sidepanel.html)
+[![DOM First](https://img.shields.io/badge/Observation-DOM--first-111827)](./src/adapters/content/dom-observer.ts)
+[![Vision Assisted](https://img.shields.io/badge/Vision-Assisted-7C3AED)](./src/core/vision/vision.ts)
+[![License: MIT](https://img.shields.io/badge/license-MIT-10B981)](./LICENSE)
+
+</div>
+
+---
+
+## Project Status
+
+This repository is the first clean-rewrite implementation line for NaturalClick Agent.
+
+The previous implementation proved useful product ideas, especially the conversational side panel, page element boxes, numbered targets, execution logs, and local Chrome extension packaging. The new line keeps those product lessons, but rebuilds the system around a clearer Agent Core:
+
+- Event-driven runtime state.
+- Hexagonal core with Chrome, model, storage, side panel, DOM, overlay, and vision adapters.
+- Semantic commands instead of DOM-index-first planning.
+- Evidence-based observation, binding, execution, and verification.
+- Scoped safety policy instead of repeated confirmation prompts.
+- Current-session memory and traceable execution.
+
+This is not a stealth automation toolkit, CAPTCHA solver, payment bot, or anti-bot bypass project. The goal is transparent, user-controlled browser operation inside Chrome.
+
+## Architecture Overview
+
+![NaturalClick Agent architecture overview](./docs/assets/readme/architecture-overview.png)
+
+NaturalClick is designed as an event-driven hexagonal Agent Core. Chrome extension surfaces are adapters around the core, not the place where the Agent's thinking lives.
+
+```mermaid
+flowchart LR
+  User[User] --> Sidepanel[Side Panel Adapter]
+  Sidepanel --> Runtime[Agent Runtime]
+
+  Runtime --> Interpreter[Task Interpreter]
+  Runtime --> Observation[Observation Manager]
+  Runtime --> Evidence[Evidence Manager]
+  Runtime --> Planner[Planner Role]
+  Runtime --> Binder[Command Binder]
+  Runtime --> Policy[Policy Engine]
+  Runtime --> Verifier[Verifier Role]
+  Runtime --> Memory[Session Memory]
+
+  Observation --> DOM[DOM Observer Adapter]
+  Binder --> Executor[Primitive Executor Adapter]
+  Planner --> Model[OpenAI-compatible Model Adapter]
+  Verifier --> Vision[Vision Adapter]
+  Runtime --> Events[Event Store]
+  Runtime --> Overlay[Page Overlay Adapter]
+
+  DOM --> Page[Active Chrome Page]
+  Executor --> Page
+  Overlay --> Page
+```
+
+Core rule:
+
+```text
+Agent Core owns thinking and state.
+Capabilities own domain-specific extension points.
+Adapters own Chrome reality.
+The event log owns recovery and explanation.
+```
+
+## Runtime Loop
+
+![NaturalClick Agent runtime loop](./docs/assets/readme/runtime-loop.png)
+
+Each Agent step executes at most one semantic command.
+
+```text
+User goal
+  -> Interpret task
+  -> Observe current page
+  -> Build task-relevant evidence
+  -> Plan one semantic command
+  -> Bind the command to current page targets
+  -> Apply safety policy
+  -> Execute one browser primitive
+  -> Re-observe
+  -> Verify result
+  -> Persist events and update session memory
+  -> Continue, ask the user, or summarize
+```
+
+Important constraints:
+
+- Short plans guide the next few steps but are not batch-executed blindly.
+- Every command declares an expected outcome.
+- DOM indexes, coordinates, and tab IDs are adapter-level bindings, not the primary planning language.
+- Verification failure is new evidence, not a reason to retry the same action without change.
+- Vision can enhance observation, target grounding, and verification, but it does not become a second planner.
+
+## What Is Included
+
+```text
+naturalclick-extension/
+  manifest.json                 # Built Chrome MV3 manifest
+  background.js                 # Built service worker entry
+  content.js                    # Built content script
+  sidepanel.html                # Built side panel page
+  sidepanel.js                  # Built side panel runtime
+  sidepanel.css                 # Built side panel styles
+  icons/                        # Extension icons
+
+src/
+  core/                         # Framework-free Agent domain logic
+    capabilities/
+    commands/
+    context/
+    evidence/
+    events/
+    memory/
+    model/
+    observation/
+    policy/
+    runtime/
+    verification/
+    vision/
+  adapters/                     # Chrome, content-script, and model adapters
+  background/                   # MV3 service worker source
+  content/                      # Content-script source
+  sidepanel/                    # Conversational side panel source
+  shared/                       # Shared protocol, ids, and result helpers
+
+public/
+  manifest.json                 # Source manifest copied into build output
+  sidepanel.html
+  sidepanel.css
+  icons/
+
+tests/
+  fixtures/pages/               # Browser-like fixture pages
+  unit/                         # Fast deterministic unit tests
+
+docs/
+  assets/readme/                # README images
+  superpowers/specs/            # Architecture and product design specs
+  superpowers/plans/            # Implementation plans
+```
+
+## First-Version Scope
+
+The first version focuses on the smallest complete browser-Agent slice:
+
+| Area | First-version direction |
+|---|---|
+| Browser target | Chrome Manifest V3 extension |
+| Runtime | Event-driven Agent loop with recoverable state |
+| Observation | DOM-first page model with task-focused evidence |
+| Planning | Planner emits semantic commands, not raw DOM indexes |
+| Execution | Local Chrome/content-script primitives |
+| Verification | Deterministic checks first, vision-assisted when useful |
+| Vision | First-stage visual structure, target grounding, and visual verification |
+| Side panel | Conversational runtime with settings, history, logs, and language switch |
+| Overlay | User-facing target visualization, independent from Agent sensing |
+| Safety | `balanced` by default, scoped consent for risky operations |
+| Memory | Current-session memory, not cross-session long-term memory |
+
+Out of scope for the first version:
+
+- CAPTCHA solving or anti-bot evasion.
+- Payment, banking, identity-verification, or high-impact unattended actions.
+- Backend Agent service, native messaging host, or local daemon.
+- Full visual-only browsing without semantic verification.
+- Full drag-and-drop Chatflow Builder editing.
+- Cross-session long-term memory.
+
+## Side Panel Experience
+
+The side panel is the user's daily control surface. It is conversation-first when idle and operational when a task is running.
+
+Current side panel capabilities include:
+
+- Main conversation page.
+- Top toolbar for copying logs, downloading logs, starting a new session, opening history, and opening settings.
+- Current-session history page.
+- Settings page with model configuration, page marker mode, safety mode, and plugin language.
+- English and Chinese UI, defaulting to English.
+- Page marker modes: `Off`, `Focus`, `All Targets`, `Evidence`, and `Vision`.
+- Safety modes: `conservative`, `balanced`, `autonomous`, and `experimental_full_auto`.
+
+The old extension's page boxes and numbered markers remain a product requirement, but they are treated as visualization only:
+
+```text
+Observation is Agent sensing.
+Overlay is user visualization.
+Turning overlay off must not disable observation, binding, or execution.
+```
+
+## Model Configuration
+
+The first version uses one global OpenAI-compatible provider.
+
+Configure it from the side panel settings page:
+
+1. Fill `API`.
+2. Fill `API Key`.
+3. Click `Detect models`.
+4. Let the first detected model fill `Planner model`, or choose another model from the list.
+5. Optionally choose a `Vision model`.
+6. Click `Save settings`.
+
+Rules:
+
+- `Planner model` is required before tasks can run.
+- `Vision model` is optional. If it is empty, vision capability remains disabled.
+- API keys are used for model detection and later model calls.
+- API keys must not be written into trace logs.
+- Model detection results are a convenience cache, not a source of truth.
 
 ## Install
+
+Clone the repository:
+
+```bash
+git clone https://github.com/kuschzzp/NaturalClick.git
+cd NaturalClick
+```
+
+Install development dependencies:
 
 ```bash
 npm install
 ```
 
-## Test
+The installable Chrome extension output is committed in `naturalclick-extension/`.
+
+Load it in Chrome:
+
+1. Open `chrome://extensions/`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select the `naturalclick-extension` directory.
+5. Open the NaturalClick side panel from the extension icon.
+
+After changing source files, rebuild the installable folder:
+
+```bash
+npm run build
+```
+
+Then reload the extension from `chrome://extensions/`.
+
+## Development
+
+Useful commands:
 
 ```bash
 npm run typecheck
 npm run test:unit
 npm run build
+npm run test:all
 ```
 
-## Build
+Command meaning:
+
+| Command | Purpose |
+|---|---|
+| `npm run typecheck` | Run TypeScript checks without emitting files |
+| `npm run test:unit` | Run deterministic unit tests |
+| `npm run build` | Build `naturalclick-extension/` with Vite |
+| `npm run test:all` | Run typecheck, unit tests, and production build |
+
+Development rules:
+
+- Keep `src/core/**` framework-free.
+- Keep Chrome APIs inside adapters or extension entries.
+- Prefer semantic commands and evidence over page-specific hard-coded workflows.
+- Do not store raw model payloads, screenshot images, or sensitive values by default.
+- Keep build output in `naturalclick-extension/` updated when source changes affect the installable extension.
+
+## Testing
+
+The current test suite covers:
+
+- Manifest shape.
+- Event store behavior.
+- Agent runtime state transitions.
+- Command binding.
+- Context assembly and compression.
+- Observation and evidence handling.
+- Policy and consent behavior.
+- Vision result normalization.
+- Verification and memory updates.
+- Side panel state and rendering.
+- Overlay controller behavior.
+
+Run the full verification command before committing:
 
 ```bash
-npm run build
+npm run test:all
 ```
 
-Load the committed `naturalclick-extension` folder in `chrome://extensions` using "Load unpacked".
-Developers only need to run `npm run build` after changing source files to refresh that installable folder.
+## Safety And Privacy
 
-## First-Version Scope
+NaturalClick runs inside the user's Chrome profile, but configured model endpoints may receive page summaries and, when vision is enabled and triggered, screenshots or cropped visual context.
 
-- General browser operation.
-- Lightweight form fill and submit with scoped consent.
-- DOM-first observation and semantic command binding.
-- First-stage vision grounding and visual verification.
-- Adaptive conversational side panel.
-- Overlay modes: Off, Focus, All Targets, Evidence, Vision.
-- Current-session history and trace export.
+Data that may be sent to model endpoints:
 
-## Safety And Privacy Defaults
+- User task text.
+- Current URL and page title.
+- Focused DOM/page summaries.
+- Recent execution and verification history.
+- Screenshot-derived visual context when vision is required.
 
-- Safety mode defaults to `balanced`.
+Default privacy posture:
+
 - Raw model requests and responses are not stored by default.
 - Screenshot images are not stored by default.
-- Sensitive values are redacted by default.
-- Overlay Off does not disable Agent observation.
+- Sensitive values should be redacted before trace output.
+- The side panel should show clean progress by default and keep detailed trace available on demand.
+- High-risk actions are controlled by policy and scoped consent.
+
+Hard-blocked or manual-first areas include CAPTCHA, SMS verification, payments, banking, identity verification, destructive account changes, and actions that bypass a site's normal safety controls.
+
+## Current Limitations
+
+- The project is still in the first clean-rewrite implementation line.
+- The advanced Chatflow Builder is a future surface; the first product surface is the Chrome side panel runtime.
+- Vision is triggered only as an enhancement to observation, binding, or verification.
+- Model provider support is OpenAI-compatible, but provider-specific quirks may still need adapters.
+- Service-worker suspension, tab navigation, and content-script context loss require careful recovery and re-observation.
+- Some complex custom controls will need additional capability modules.
+
+## Roadmap
+
+| Area | Planned work |
+|---|---|
+| Agent Core | Broader semantic command set, better reducer coverage, richer snapshots |
+| Observation | Stronger framework-independent page model and control semantics |
+| Vision | Cropped visual grounding, visual evidence fusion, visual verification tests |
+| Side panel | Evidence inspector, trace drawer, scoped confirmation cards |
+| Builder | Advanced Chatflow Builder as a separate product surface |
+| Model layer | Capability diagnostics, streaming checks, provider compatibility profiles |
+| Safety | Domain allowlist, clearer sensitive-data handling, stronger hard blocks |
+| Packaging | Release workflow for installable Chrome extension builds |
+
+## Contributing
+
+Useful contributions include:
+
+- Reproducible automation failures with exported logs.
+- DOM recognition improvements for specific component libraries.
+- Safer policy and verification behavior.
+- Side panel usability improvements.
+- Documentation improvements that clarify architecture, privacy, or operating limits.
+
+Before submitting changes, run:
+
+```bash
+npm run test:all
+```
+
+Keep unrelated refactors separate from feature or documentation changes.
+
+## License
+
+NaturalClick Agent is released under the [MIT License](./LICENSE).
