@@ -2,7 +2,16 @@ import type { BrowserPrimitive } from "../core/commands/commands";
 import type { AgentEvent } from "../core/events/events";
 import type { PageModel } from "../core/observation/page-model";
 
-export type OverlayMode = "off" | "minimal" | "numbered" | "debug";
+export type OverlayMode = "Off" | "Focus" | "All Targets" | "Evidence" | "Vision";
+
+export interface OverlayTargetPayload {
+  id: string;
+  label: string;
+  kind: "dom" | "evidence" | "vision";
+  rect: { x: number; y: number; width: number; height: number };
+  confidence?: number;
+  state?: "candidate" | "current" | "failed" | "expired";
+}
 
 export type StartTaskRequest = {
   type: "START_TASK";
@@ -38,6 +47,7 @@ export type ExecutePrimitiveRequest = {
 export type SetOverlayModeRequest = {
   type: "SET_OVERLAY_MODE";
   mode: OverlayMode;
+  targets?: OverlayTargetPayload[];
 };
 
 export type HighlightTargetRequest = {

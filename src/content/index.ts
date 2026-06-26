@@ -1,5 +1,6 @@
 import { executePrimitive } from "../adapters/content/primitive-executor";
 import { observePage } from "../adapters/content/dom-observer";
+import { highlightTarget, setOverlayMode } from "../adapters/content/overlay-controller";
 import type { NaturalClickRequest, NaturalClickResponse } from "../shared/protocol";
 
 function okResponse<T>(data: T): NaturalClickResponse<T> {
@@ -33,14 +34,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (request.type === "SET_OVERLAY_MODE") {
-    document.documentElement.dataset.naturalclickOverlayMode = request.mode;
-    sendResponse(okResponse({ mode: request.mode }));
+    const overlayRequest = request as Extract<NaturalClickRequest, { type: "SET_OVERLAY_MODE" }>;
+    setOverlayMode(overlayRequest.mode, overlayRequest.targets ?? []);
+    sendResponse(okResponse({ mode: overlayRequest.mode }));
     return true;
   }
 
   if (request.type === "HIGHLIGHT_TARGET") {
-    document.documentElement.dataset.naturalclickHighlight = request.semanticId;
-    sendResponse(okResponse({ semanticId: request.semanticId }));
+    const highlightRequest = request as Extract<NaturalClickRequest, { type: "HIGHLIGHT_TARGET" }>;
+    highlightTarget(highlightRequest.semanticId);
+    sendResponse(okResponse({ semanticId: highlightRequest.semanticId }));
     return true;
   }
 
