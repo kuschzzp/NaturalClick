@@ -713,6 +713,10 @@ button {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.nc-segmented--language {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .nc-segment {
   min-width: 0;
   min-height: 30px;
@@ -812,6 +816,7 @@ button {
   }
 
   .nc-segmented,
+  .nc-segmented--language,
   .nc-segmented--safety {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

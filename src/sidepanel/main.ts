@@ -1,5 +1,6 @@
 import { sendRuntimeMessage } from "../adapters/chrome/messaging";
 import type { SessionStateResponse } from "../shared/protocol";
+import { createTranslator, DEFAULT_LOCALE, normalizeLocale, type SidepanelLocale } from "./i18n";
 import { renderSidepanel } from "./render";
 import { defaultModelSettings, type ModelSettingsState } from "./settings";
 import {
@@ -19,22 +20,27 @@ if (!root) {
 const appRoot = root;
 const STORAGE_KEY_SESSION_SUMMARIES = "naturalclick.sidepanel.sessionSummaries.v1";
 const STORAGE_KEY_MODEL_SETTINGS = "naturalclick.sidepanel.modelSettings.v1";
+const STORAGE_KEY_LOCALE = "naturalclick.sidepanel.locale.v1";
+
+const initialLocale = loadStoredLocale();
+const initialT = createTranslator(initialLocale);
 
 let state: SidepanelState = {
   mode: "conversation",
+  locale: initialLocale,
   view: "chat",
   overlayMode: "Off",
   safetyMode: "balanced",
   modelConfigured: false,
   traceOpen: false,
-  activityText: "等待任务...",
+  activityText: initialT("activity.waiting"),
   sessions: loadStoredSessions(),
   modelSettings: loadStoredModelSettings(),
   modelSettingsDirty: false,
   modelSaveStatus: "idle",
   detectedModels: loadStoredDetectedModels(),
   modelDetectionStatus: "idle",
-  timeline: [{ id: "welcome", title: "准备就绪", detail: "配置 Planner 模型后，就可以让 Agent 操作当前页面。" }]
+  timeline: [welcomeTimelineItem(initialLocale)]
 };
 
 state = { ...state, modelConfigured: isModelConfigured(state.modelSettings) };
@@ -43,8 +49,35 @@ function hasChromeRuntime(): boolean {
   return Boolean(globalThis.chrome?.runtime?.sendMessage);
 }
 
+function currentT(): ReturnType<typeof createTranslator> {
+  return createTranslator(state.locale);
+}
+
+function welcomeTimelineItem(locale: SidepanelLocale): TimelineItem {
+  const t = createTranslator(locale);
+  return { id: "welcome", title: t("timeline.ready"), detail: t("timeline.readyDetail") };
+}
+
 function formatNow(): string {
-  return new Date().toLocaleString("zh-CN", { hour12: false });
+  const locale = normalizeLocale(state.locale) === "zh-CN" ? "zh-CN" : "en-US";
+  return new Date().toLocaleString(locale, { hour12: false });
+}
+
+function loadStoredLocale(): SidepanelLocale {
+  try {
+    return normalizeLocale(localStorage.getItem(STORAGE_KEY_LOCALE));
+  } catch {
+    return DEFAULT_LOCALE;
+  }
+}
+
+function saveStoredLocale(locale: SidepanelLocale): boolean {
+  try {
+    localStorage.setItem(STORAGE_KEY_LOCALE, locale);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function loadStoredSessions(): SessionSummary[] {
@@ -132,7 +165,7 @@ function isModelConfigured(settings?: ModelSettingsState): boolean {
 
 function buildSessionTitle(timeline: TimelineItem[]): string {
   const firstTask = timeline.find((item) => item.detail)?.detail;
-  if (!firstTask) return "未命名会话";
+  if (!firstTask) return currentT()("session.untitled");
   return firstTask.length > 28 ? `${firstTask.slice(0, 28)}...` : firstTask;
 }
 
@@ -156,31 +189,32 @@ function upsertSessionSummary(
 }
 
 function buildLogText(): string {
+  const t = currentT();
   const lines = [
-    "NaturalClick Agent 执行日志",
-    `导出时间: ${formatNow()}`,
-    `当前状态: ${state.activeTask?.status ?? "idle"}`,
+    t("log.title"),
+    `${t("log.exportedAt")}: ${formatNow()}`,
+    `${t("log.currentStatus")}: ${state.activeTask?.status ?? "idle"}`,
     "",
-    "Timeline:"
+    t("log.timeline")
   ];
   const timeline = state.timeline ?? [];
   if (timeline.length === 0) {
-    lines.push("- 暂无事件");
+    lines.push(t("log.emptyTimeline"));
   } else {
     timeline.forEach((item, index) => {
       lines.push(`${index + 1}. ${item.title}${item.detail ? ` - ${item.detail}` : ""}`);
     });
   }
   if (state.traceSummary?.length) {
-    lines.push("", "Trace:");
+    lines.push("", t("log.trace"));
     state.traceSummary.forEach((item) => lines.push(`- ${item}`));
   }
   return `${lines.join("\n")}\n`;
 }
 
 function applySession(session: SessionStateResponse): void {
-  const timeline = session.events.map(mapEventToTimelineItem);
-  const activeTask = deriveActiveTaskFromEvents(session.events);
+  const timeline = session.events.map((event) => mapEventToTimelineItem(event, state.locale));
+  const activeTask = deriveActiveTaskFromEvents(session.events, state.locale);
   const latestItem = timeline.at(-1);
   const sessions = upsertSessionSummary(session, timeline, activeTask);
   saveStoredSessions(sessions);
@@ -189,12 +223,15 @@ function applySession(session: SessionStateResponse): void {
     activeTask,
     timeline,
     sessions,
-    activityText: latestItem?.detail ?? latestItem?.title ?? "等待任务...",
+    activityText: latestItem?.detail ?? latestItem?.title ?? currentT()("activity.waiting"),
     decisionSummary: latestItem?.title ?? state.decisionSummary,
     evidenceSummary: session.events
       .filter((event) => ["ObservationReceived", "EvidenceAdded", "VisualEvidenceAdded", "VisionCompleted"].includes(event.type))
       .slice(-4)
-      .map((event) => mapEventToTimelineItem(event).detail ?? mapEventToTimelineItem(event).title),
+      .map((event) => {
+        const item = mapEventToTimelineItem(event, state.locale);
+        return item.detail ?? item.title;
+      }),
     traceSummary: session.events.slice(-6).map((event) => `${event.type} · ${event.stepId}`)
   });
 }
@@ -238,6 +275,7 @@ function paint(): void {
       paint();
     },
     onNewSession: () => {
+      const t = currentT();
       state = withDerivedMode({
         ...state,
         view: "chat",
@@ -246,7 +284,7 @@ function paint(): void {
         decisionSummary: undefined,
         evidenceSummary: [],
         traceSummary: [],
-        activityText: "已新建会话，等待任务..."
+        activityText: t("activity.newSession")
       });
       paint();
     },
@@ -268,8 +306,29 @@ function paint(): void {
     },
     onSaveModelSettings: () => {
       saveModelSettings();
+    },
+    onLocaleChange: (locale) => {
+      setLocale(locale);
     }
   });
+}
+
+function setLocale(locale: SidepanelLocale): void {
+  const nextLocale = normalizeLocale(locale);
+  saveStoredLocale(nextLocale);
+  const t = createTranslator(nextLocale);
+  const timeline = state.timeline ?? [];
+  const shouldLocalizeIdleState = !state.activeTask && timeline.every((item) => item.id === "welcome");
+
+  state = {
+    ...state,
+    locale: nextLocale,
+    activityText: shouldLocalizeIdleState ? t("activity.waiting") : state.activityText,
+    timeline: shouldLocalizeIdleState ? [welcomeTimelineItem(nextLocale)] : state.timeline,
+    modelSaveMessage: undefined,
+    modelDetectionMessage: undefined
+  };
+  paint();
 }
 
 async function refreshSession(): Promise<void> {
@@ -282,12 +341,13 @@ async function refreshSession(): Promise<void> {
 }
 
 async function submitText(text: string): Promise<void> {
+  const t = currentT();
   if (!hasChromeRuntime()) {
     state = {
       ...state,
       view: "chat",
-      activityText: "后台运行时不可用",
-      timeline: [{ id: "runtime-unavailable", title: "后台运行时不可用", detail: text, tone: "warning" }]
+      activityText: t("runtime.unavailable.title"),
+      timeline: [{ id: "runtime-unavailable", title: t("runtime.unavailable.title"), detail: text, tone: "warning" }]
     };
     paint();
     return;
@@ -301,19 +361,20 @@ async function submitText(text: string): Promise<void> {
   } else {
     state = {
       ...state,
-      activityText: "无法联系后台运行时",
-      timeline: [{ id: "send-error", title: "无法联系后台运行时", detail: response.error, tone: "error" }]
+      activityText: t("runtime.sendFailed"),
+      timeline: [{ id: "send-error", title: t("runtime.sendFailed"), detail: response.error, tone: "error" }]
     };
   }
   paint();
 }
 
 async function stopTask(): Promise<void> {
+  const t = currentT();
   if (!hasChromeRuntime()) {
     appendLocalTimeline({
       id: "stop-runtime-unavailable",
-      title: "后台运行时不可用",
-      detail: "当前只能在预览状态下停止展示，无法通知 Chrome 扩展后台。",
+      title: t("runtime.unavailable.title"),
+      detail: t("runtime.unavailable.detail"),
       tone: "warning"
     });
     state = withDerivedMode({ ...state, activeTask: state.activeTask ? { ...state.activeTask, status: "stopped" } : undefined });
@@ -325,7 +386,7 @@ async function stopTask(): Promise<void> {
   if (response.ok) {
     applySession(response.data);
   } else {
-    appendLocalTimeline({ id: "stop-error", title: "停止任务失败", detail: response.error, tone: "error" });
+    appendLocalTimeline({ id: "stop-error", title: t("runtime.stopFailed"), detail: response.error, tone: "error" });
   }
   paint();
 }
@@ -337,26 +398,28 @@ async function setOverlayMode(mode: OverlayMode): Promise<void> {
   if (!hasChromeRuntime()) return;
   const response = await sendRuntimeMessage({ type: "SET_OVERLAY_MODE", mode });
   if (!response.ok) {
-    appendLocalTimeline({ id: `overlay-${Date.now()}`, title: "页面标记未同步", detail: response.error, tone: "warning" });
+    appendLocalTimeline({ id: `overlay-${Date.now()}`, title: currentT()("runtime.overlaySyncFailed"), detail: response.error, tone: "warning" });
     paint();
   }
 }
 
 async function highlightTarget(semanticId: string): Promise<void> {
+  const t = currentT();
   if (!hasChromeRuntime()) {
-    appendLocalTimeline({ id: "highlight-runtime-unavailable", title: "无法标记页面目标", detail: semanticId, tone: "warning" });
+    appendLocalTimeline({ id: "highlight-runtime-unavailable", title: t("runtime.highlightUnavailable"), detail: semanticId, tone: "warning" });
     paint();
     return;
   }
 
   const response = await sendRuntimeMessage({ type: "HIGHLIGHT_TARGET", semanticId });
   if (!response.ok) {
-    appendLocalTimeline({ id: `highlight-${Date.now()}`, title: "目标高亮失败", detail: response.error, tone: "warning" });
+    appendLocalTimeline({ id: `highlight-${Date.now()}`, title: t("runtime.highlightFailed"), detail: response.error, tone: "warning" });
     paint();
   }
 }
 
 function updateModelSetting(field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel", value: string): void {
+  const t = currentT();
   const settings = { ...(state.modelSettings ?? defaultModelSettings()), [field]: value };
   const resetDetection = field === "providerBaseUrl" || field === "apiKey";
   state = {
@@ -365,7 +428,7 @@ function updateModelSetting(field: "providerBaseUrl" | "apiKey" | "plannerModel"
     modelConfigured: false,
     modelSettingsDirty: true,
     modelSaveStatus: "idle",
-    modelSaveMessage: "有未保存修改",
+    modelSaveMessage: t("model.unsaved"),
     modelDetectionStatus: resetDetection ? "idle" : state.modelDetectionStatus,
     modelDetectionMessage: resetDetection ? undefined : state.modelDetectionMessage,
     detectedModels: resetDetection ? [] : state.detectedModels
@@ -374,13 +437,14 @@ function updateModelSetting(field: "providerBaseUrl" | "apiKey" | "plannerModel"
 }
 
 function saveModelSettings(): void {
+  const t = currentT();
   const settings = state.modelSettings ?? defaultModelSettings();
   if (!isModelConfigured(settings)) {
     state = {
       ...state,
       modelConfigured: false,
       modelSaveStatus: "error",
-      modelSaveMessage: "请先填写 API、API Key，并选择 Planner 模型。"
+      modelSaveMessage: t("model.fillRequired")
     };
     paint();
     return;
@@ -392,7 +456,7 @@ function saveModelSettings(): void {
     state = {
       ...state,
       modelSaveStatus: "error",
-      modelSaveMessage: "保存失败，当前浏览器存储不可用。"
+      modelSaveMessage: t("model.storageUnavailable")
     };
     paint();
     return;
@@ -403,7 +467,7 @@ function saveModelSettings(): void {
     modelConfigured: true,
     modelSettingsDirty: false,
     modelSaveStatus: "saved",
-    modelSaveMessage: "设置已保存，可开始任务。"
+    modelSaveMessage: t("model.saved")
   };
   paint();
 }
@@ -427,6 +491,7 @@ function extractModelIds(payload: unknown): string[] {
 }
 
 async function detectModels(): Promise<void> {
+  const t = currentT();
   const settings = state.modelSettings ?? defaultModelSettings();
   const providerBaseUrl = settings.providerBaseUrl.trim();
   const apiKey = settings.apiKey.trim();
@@ -434,13 +499,13 @@ async function detectModels(): Promise<void> {
     state = {
       ...state,
       modelDetectionStatus: "error",
-      modelDetectionMessage: "请先填写 API 和 API Key。"
+      modelDetectionMessage: t("model.detect.fillRequired")
     };
     paint();
     return;
   }
 
-  state = { ...state, modelDetectionStatus: "checking", modelDetectionMessage: "正在检测模型..." };
+  state = { ...state, modelDetectionStatus: "checking", modelDetectionMessage: t("model.detect.checking") };
   paint();
 
   try {
@@ -448,11 +513,11 @@ async function detectModels(): Promise<void> {
       headers: { Authorization: `Bearer ${apiKey}` }
     });
     if (!response.ok) {
-      throw new Error(`模型检测失败：HTTP ${response.status}`);
+      throw new Error(t("model.detect.httpError", { status: response.status }));
     }
     const models = extractModelIds(await response.json());
     if (models.length === 0) {
-      throw new Error("没有检测到可用模型。");
+      throw new Error(t("model.detect.empty"));
     }
     const nextSettings: ModelSettingsState = {
       ...settings,
@@ -466,37 +531,39 @@ async function detectModels(): Promise<void> {
       modelSettingsDirty: true,
       detectedModels: models,
       modelDetectionStatus: "success",
-      modelDetectionMessage: `检测到 ${models.length} 个模型，已选择 ${models[0]}，请保存设置。`,
+      modelDetectionMessage: t("model.detect.success", { count: models.length, model: models[0] }),
       modelSaveStatus: "idle",
-      modelSaveMessage: "有未保存修改"
+      modelSaveMessage: t("model.unsaved")
     };
   } catch (error) {
     state = {
       ...state,
       modelDetectionStatus: "error",
-      modelDetectionMessage: error instanceof Error ? error.message : "模型检测失败。"
+      modelDetectionMessage: error instanceof Error ? error.message : t("model.detect.failure")
     };
   }
   paint();
 }
 
 async function copyLog(): Promise<void> {
+  const t = currentT();
   const text = buildLogText();
   if (!navigator.clipboard?.writeText) {
-    appendLocalTimeline({ id: `copy-${Date.now()}`, title: "无法复制日志", detail: "当前环境没有剪贴板权限。", tone: "warning" });
+    appendLocalTimeline({ id: `copy-${Date.now()}`, title: t("copy.unavailable.title"), detail: t("copy.unavailable.detail"), tone: "warning" });
     paint();
     return;
   }
   try {
     await navigator.clipboard.writeText(text);
-    appendLocalTimeline({ id: `copy-${Date.now()}`, title: "执行日志已复制", detail: "可粘贴到任意文本位置。", tone: "success" });
+    appendLocalTimeline({ id: `copy-${Date.now()}`, title: t("copy.success.title"), detail: t("copy.success.detail"), tone: "success" });
   } catch (error) {
-    appendLocalTimeline({ id: `copy-${Date.now()}`, title: "复制日志失败", detail: String(error), tone: "warning" });
+    appendLocalTimeline({ id: `copy-${Date.now()}`, title: t("copy.failure.title"), detail: String(error), tone: "warning" });
   }
   paint();
 }
 
 function downloadLog(): void {
+  const t = currentT();
   const blob = new Blob([buildLogText()], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -506,7 +573,7 @@ function downloadLog(): void {
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
-  appendLocalTimeline({ id: `download-${Date.now()}`, title: "执行日志已下载", detail: anchor.download, tone: "success" });
+  appendLocalTimeline({ id: `download-${Date.now()}`, title: t("download.success.title"), detail: anchor.download, tone: "success" });
   paint();
 }
 

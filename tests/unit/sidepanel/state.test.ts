@@ -60,12 +60,19 @@ describe("sidepanel state", () => {
     expect(flow.find((node) => node.id === "act")?.status).toBe("waiting");
   });
 
-  it("maps agent events to Chinese timeline items", () => {
+  it("maps agent events to English timeline items by default", () => {
     const item = mapEventToTimelineItem(makeEvent("ObservationReceived", { summary: "发现 3 个候选按钮" }));
+
+    expect(item.title).toBe("Page observation completed");
+    expect(item.detail).toBe("发现 3 个候选按钮");
+    expect(item.tone).toBe("info");
+  });
+
+  it("maps agent events to Chinese timeline items when requested", () => {
+    const item = mapEventToTimelineItem(makeEvent("ObservationReceived", { summary: "发现 3 个候选按钮" }), "zh-CN");
 
     expect(item.title).toBe("页面观察完成");
     expect(item.detail).toBe("发现 3 个候选按钮");
-    expect(item.tone).toBe("info");
   });
 
   it("derives active task projection from events", () => {

@@ -1,4 +1,5 @@
 import { button, el } from "./components";
+import { createTranslator, normalizeLocale, type SidepanelLocale, type TranslationKey } from "./i18n";
 import {
   needsModelGuidance,
   withDerivedMode,
@@ -26,43 +27,48 @@ export interface SidepanelHandlers {
   onModelSettingChange?: (field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel", value: string) => void;
   onDetectModels?: () => void;
   onSaveModelSettings?: () => void;
+  onLocaleChange?: (locale: SidepanelLocale) => void;
 }
 
-function formatSafetyMode(mode: SidepanelSafetyMode): string {
-  const labels: Record<SidepanelSafetyMode, string> = {
-    conservative: "保守",
-    balanced: "平衡",
-    autonomous: "自主",
-    experimental_full_auto: "完全放开"
+type Translator = ReturnType<typeof createTranslator>;
+
+function formatSafetyMode(mode: SidepanelSafetyMode, t: Translator): string {
+  const labels: Record<SidepanelSafetyMode, TranslationKey> = {
+    conservative: "safety.conservative",
+    balanced: "safety.balanced",
+    autonomous: "safety.autonomous",
+    experimental_full_auto: "safety.fullAuto"
   };
-  return labels[mode];
+  return t(labels[mode]);
 }
 
-function formatOverlayMode(mode: OverlayMode): string {
-  const labels: Record<OverlayMode, string> = {
-    Off: "关闭",
-    Focus: "聚焦",
-    "All Targets": "全部目标",
-    Evidence: "证据",
-    Vision: "视觉"
+function formatOverlayMode(mode: OverlayMode, t: Translator): string {
+  const labels: Record<OverlayMode, TranslationKey> = {
+    Off: "overlay.off",
+    Focus: "overlay.focus",
+    "All Targets": "overlay.allTargets",
+    Evidence: "overlay.evidence",
+    Vision: "overlay.vision"
   };
-  return labels[mode];
+  return t(labels[mode]);
 }
 
-function formatTaskStatus(status?: string): string {
-  const labels: Record<string, string> = {
-    running: "执行中",
-    planning: "规划中",
-    observing: "观察中",
-    executing: "执行中",
-    verifying: "校验中",
-    awaiting_confirmation: "待确认",
-    completed: "已完成",
-    failed: "错误",
-    stopped: "已停止",
-    blocked: "已阻塞"
+function formatTaskStatus(status: string | undefined, t: Translator): string {
+  const labels: Record<string, TranslationKey> = {
+    running: "status.running",
+    planning: "status.planning",
+    observing: "status.observing",
+    executing: "status.executing",
+    verifying: "status.verifying",
+    awaiting_confirmation: "status.awaiting_confirmation",
+    completed: "status.completed",
+    failed: "status.failed",
+    stopped: "status.stopped",
+    blocked: "status.blocked"
   };
-  return status ? (labels[status] ?? status) : "空闲";
+  if (!status) return t("status.idle");
+  const key = labels[status];
+  return key ? t(key) : status;
 }
 
 function statusTone(status?: string): string {
@@ -98,7 +104,7 @@ function iconButton(className: string, icon: Parameters<typeof iconMarkup>[0], l
   return node;
 }
 
-function renderTopBar(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderTopBar(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const topbar = el("header", "nc-app-header");
 
   const brand = el("div", "nc-brand");
@@ -107,23 +113,29 @@ function renderTopBar(state: SidepanelState, handlers: SidepanelHandlers): HTMLE
   logo.alt = "";
   const meta = el("div", "nc-brand__meta");
   meta.append(el("span", "nc-brand__eyebrow", "NaturalClick"));
-  meta.append(el("h1", "nc-brand__title", state.view === "settings" ? "设置" : state.view === "history" ? "历史会话" : "任务对话"));
+  meta.append(
+    el(
+      "h1",
+      "nc-brand__title",
+      state.view === "settings" ? t("view.settings") : state.view === "history" ? t("view.history") : t("view.chat")
+    )
+  );
   brand.append(logo, meta);
 
   const status = el("div", "nc-status");
   status.append(el("span", `nc-status__dot nc-status__dot--${statusTone(state.activeTask?.status)}`));
-  status.append(el("span", "nc-status__text", formatTaskStatus(state.activeTask?.status)));
+  status.append(el("span", "nc-status__text", formatTaskStatus(state.activeTask?.status, t)));
 
   const actions = el("div", "nc-toolbar");
-  const copy = iconButton("nc-tool-button", "copy", "复制执行日志");
+  const copy = iconButton("nc-tool-button", "copy", t("toolbar.copyLog"));
   copy.addEventListener("click", () => handlers.onCopyLog?.());
-  const download = iconButton("nc-tool-button", "download", "下载执行日志");
+  const download = iconButton("nc-tool-button", "download", t("toolbar.downloadLog"));
   download.addEventListener("click", () => handlers.onDownloadLog?.());
-  const fresh = iconButton("nc-tool-button", "plus", "新建会话");
+  const fresh = iconButton("nc-tool-button", "plus", t("toolbar.newSession"));
   fresh.addEventListener("click", () => handlers.onNewSession?.());
-  const history = iconButton("nc-tool-button", "history", "历史会话");
+  const history = iconButton("nc-tool-button", "history", t("toolbar.history"));
   history.addEventListener("click", () => handlers.onOpenHistory?.());
-  const settings = iconButton("nc-tool-button", "settings", "设置");
+  const settings = iconButton("nc-tool-button", "settings", t("toolbar.settings"));
   settings.addEventListener("click", () => handlers.onOpenSettings?.());
   actions.append(copy, download, fresh, history, settings);
 
@@ -131,24 +143,24 @@ function renderTopBar(state: SidepanelState, handlers: SidepanelHandlers): HTMLE
   return topbar;
 }
 
-function renderGuidance(handlers: SidepanelHandlers): HTMLElement {
+function renderGuidance(handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const card = el("article", "nc-inline-alert nc-inline-alert--warning");
   const copy = el("div", "nc-inline-alert__copy");
-  copy.append(el("strong", undefined, "需要先配置模型"));
-  copy.append(el("p", undefined, "配置 Planner 模型后，就可以让 Agent 操作当前 Chrome 页面。"));
-  const open = button("nc-quiet-button", "去设置");
+  copy.append(el("strong", undefined, t("guidance.title")));
+  copy.append(el("p", undefined, t("guidance.detail")));
+  const open = button("nc-quiet-button", t("guidance.action"));
   open.addEventListener("click", () => handlers.onOpenSettings?.());
   card.append(copy, open);
   return card;
 }
 
-function renderEmptyState(): HTMLElement {
+function renderEmptyState(t: Translator): HTMLElement {
   const empty = el("section", "nc-empty-state");
   const mark = el("div", "nc-empty-state__mark");
   mark.append(el("span", undefined, "⌁"));
   empty.append(mark);
-  empty.append(el("h2", undefined, "开始你的自动化任务"));
-  empty.append(el("p", undefined, "输入目标后按 Enter 发送，Agent 会在这里持续输出执行过程。"));
+  empty.append(el("h2", undefined, t("empty.title")));
+  empty.append(el("p", undefined, t("empty.detail")));
   return empty;
 }
 
@@ -166,96 +178,116 @@ function renderTimelineItem(item: TimelineItem): HTMLElement {
   return row;
 }
 
-function renderTaskSummary(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement | undefined {
+function renderTaskSummary(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement | undefined {
   const task = state.activeTask;
   if (!task) return undefined;
 
   const card = el("article", "nc-task-summary");
   const top = el("div", "nc-task-summary__top");
-  top.append(el("span", "nc-task-summary__label", "当前任务"));
+  top.append(el("span", "nc-task-summary__label", t("task.current")));
   if (task.semanticTargetId) {
-    const highlight = button("nc-quiet-button", "标记目标");
+    const highlight = button("nc-quiet-button", t("task.highlightTarget"));
     highlight.addEventListener("click", () => handlers.onHighlightTarget?.(task.semanticTargetId!));
     top.append(highlight);
   }
   card.append(top);
-  card.append(el("p", "nc-task-summary__text", task.currentAction ?? "等待 Agent 决定下一步"));
+  card.append(el("p", "nc-task-summary__text", task.currentAction ?? t("task.pending")));
   if (task.targetLabel || task.expectedOutcome) {
     const meta = el("dl", "nc-task-summary__meta");
-    if (task.targetLabel) meta.append(el("dt", undefined, "目标"), el("dd", undefined, task.targetLabel));
-    if (task.expectedOutcome) meta.append(el("dt", undefined, "预期"), el("dd", undefined, task.expectedOutcome));
+    if (task.targetLabel) meta.append(el("dt", undefined, t("task.target")), el("dd", undefined, task.targetLabel));
+    if (task.expectedOutcome) meta.append(el("dt", undefined, t("task.expected")), el("dd", undefined, task.expectedOutcome));
     card.append(meta);
   }
   return card;
 }
 
-function renderChatView(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderChatView(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const view = el("main", "nc-chat-view");
-  if (needsModelGuidance(state)) view.append(renderGuidance(handlers));
+  if (needsModelGuidance(state)) view.append(renderGuidance(handlers, t));
 
-  const taskSummary = renderTaskSummary(state, handlers);
+  const taskSummary = renderTaskSummary(state, handlers, t);
   if (taskSummary) view.append(taskSummary);
 
   const stream = el("section", "nc-chat-stream");
   stream.setAttribute("aria-live", "polite");
   const items = visibleTimelineItems(state.timeline);
   if (items.length === 0) {
-    stream.append(renderEmptyState());
+    stream.append(renderEmptyState(t));
   } else {
     items.forEach((item) => stream.append(renderTimelineItem(item)));
   }
 
   const activity = el("section", "nc-activity-bar");
-  activity.append(el("strong", undefined, state.activityText ?? state.activeTask?.currentAction ?? "等待任务..."));
+  activity.append(el("strong", undefined, state.activityText ?? state.activeTask?.currentAction ?? t("activity.waiting")));
   stream.append(activity);
   view.append(stream);
   return view;
 }
 
-function renderHistoryView(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderHistoryView(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const view = el("main", "nc-page-view");
-  view.append(renderPageHeader("历史会话", handlers));
+  view.append(renderPageHeader(t("view.history"), handlers, t));
 
   const list = el("section", "nc-session-list");
   const sessions = state.sessions ?? [];
   if (sessions.length === 0) {
     const empty = el("article", "nc-page-empty");
-    empty.append(el("h2", undefined, "暂无历史会话"));
-    empty.append(el("p", undefined, "开始一次任务后，这里会保留本次侧边栏可见的会话摘要。"));
+    empty.append(el("h2", undefined, t("history.emptyTitle")));
+    empty.append(el("p", undefined, t("history.emptyDetail")));
     list.append(empty);
   } else {
-    sessions.forEach((session) => list.append(renderSessionSummary(session)));
+    sessions.forEach((session) => list.append(renderSessionSummary(session, t)));
   }
   view.append(list);
   return view;
 }
 
-function renderSessionSummary(session: SessionSummary): HTMLElement {
+function renderSessionSummary(session: SessionSummary, t: Translator): HTMLElement {
   const row = el("article", "nc-session-card");
   const head = el("div", "nc-session-card__head");
   head.append(el("strong", undefined, session.title));
-  head.append(el("span", undefined, formatTaskStatus(session.status)));
+  head.append(el("span", undefined, formatTaskStatus(session.status, t)));
   row.append(head);
-  row.append(el("p", undefined, `${session.eventCount} 条事件 · ${session.updatedAt}`));
+  row.append(el("p", undefined, `${t("history.eventCount", { count: session.eventCount })} · ${session.updatedAt}`));
   return row;
 }
 
-function renderPageHeader(title: string, handlers: SidepanelHandlers): HTMLElement {
+function renderPageHeader(title: string, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const header = el("header", "nc-page-header");
-  const back = iconButton("nc-back-button", "back", "返回对话");
+  const back = iconButton("nc-back-button", "back", t("page.backToChat"));
   back.addEventListener("click", () => handlers.onBackToChat?.());
   header.append(back, el("h2", undefined, title));
   return header;
 }
 
-function renderOverlayControls(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderLanguageControls(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const controls = el("section", "nc-settings-group");
-  controls.append(el("h3", undefined, "页面标记"));
-  controls.append(el("p", undefined, "标记模式只影响页面上的可视化提示，不关闭观察、绑定或执行能力。"));
+  controls.append(el("h3", undefined, t("settings.language.title")));
+  controls.append(el("p", undefined, t("settings.language.description")));
+
+  const currentLocale = normalizeLocale(state.locale);
+  const options = el("div", "nc-segmented nc-segmented--language");
+  ([
+    ["en", t("settings.language.english")],
+    ["zh-CN", t("settings.language.chinese")]
+  ] as Array<[SidepanelLocale, string]>).forEach(([locale, label]) => {
+    const option = button(`nc-segment${currentLocale === locale ? " nc-segment--active" : ""}`, label);
+    option.setAttribute("aria-pressed", String(currentLocale === locale));
+    option.addEventListener("click", () => handlers.onLocaleChange?.(locale));
+    options.append(option);
+  });
+  controls.append(options);
+  return controls;
+}
+
+function renderOverlayControls(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
+  const controls = el("section", "nc-settings-group");
+  controls.append(el("h3", undefined, t("settings.marker.title")));
+  controls.append(el("p", undefined, t("settings.marker.description")));
 
   const options = el("div", "nc-segmented");
   (["Off", "Focus", "All Targets", "Evidence", "Vision"] as OverlayMode[]).forEach((mode) => {
-    const option = button(`nc-segment${state.overlayMode === mode ? " nc-segment--active" : ""}`, formatOverlayMode(mode));
+    const option = button(`nc-segment${state.overlayMode === mode ? " nc-segment--active" : ""}`, formatOverlayMode(mode, t));
     option.setAttribute("aria-pressed", String(state.overlayMode === mode));
     option.addEventListener("click", () => handlers.onOverlayModeChange?.(mode));
     options.append(option);
@@ -264,14 +296,14 @@ function renderOverlayControls(state: SidepanelState, handlers: SidepanelHandler
   return controls;
 }
 
-function renderSafetyControls(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderSafetyControls(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const controls = el("section", "nc-settings-group");
-  controls.append(el("h3", undefined, "执行权限"));
-  controls.append(el("p", undefined, "权限配置会影响 Agent 是否需要在中高风险动作前询问你。"));
+  controls.append(el("h3", undefined, t("settings.permission.title")));
+  controls.append(el("p", undefined, t("settings.permission.description")));
 
   const options = el("div", "nc-segmented nc-segmented--safety");
   (["conservative", "balanced", "autonomous", "experimental_full_auto"] as SidepanelSafetyMode[]).forEach((mode) => {
-    const option = button(`nc-segment${state.safetyMode === mode ? " nc-segment--active" : ""}`, formatSafetyMode(mode));
+    const option = button(`nc-segment${state.safetyMode === mode ? " nc-segment--active" : ""}`, formatSafetyMode(mode, t));
     option.setAttribute("aria-pressed", String(state.safetyMode === mode));
     option.addEventListener("click", () => handlers.onSafetyModeChange?.(mode));
     options.append(option);
@@ -327,19 +359,19 @@ function renderSelectField(
   return wrapper;
 }
 
-function renderModelSettings(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderModelSettings(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const group = el("section", "nc-settings-group");
-  group.append(el("h3", undefined, "大模型 API"));
+  group.append(el("h3", undefined, t("settings.model.title")));
   const form = el("form", "nc-settings-form");
   const settings = state.modelSettings ?? defaultModelSettings();
   const detectedModels = state.detectedModels ?? [];
 
   form.append(
-    renderInputField("API", settings.providerBaseUrl, (value) => handlers.onModelSettingChange?.("providerBaseUrl", value), {
+    renderInputField(t("settings.model.api"), settings.providerBaseUrl, (value) => handlers.onModelSettingChange?.("providerBaseUrl", value), {
       placeholder: "https://api.openai.com/v1",
       autocomplete: "url"
     }),
-    renderInputField("API Key", settings.apiKey, (value) => handlers.onModelSettingChange?.("apiKey", value), {
+    renderInputField(t("settings.model.apiKey"), settings.apiKey, (value) => handlers.onModelSettingChange?.("apiKey", value), {
       type: "password",
       placeholder: "sk-...",
       autocomplete: "off"
@@ -348,7 +380,10 @@ function renderModelSettings(state: SidepanelState, handlers: SidepanelHandlers)
 
   if (settings.apiKey.trim()) {
     const row = el("div", "nc-model-detect-row");
-    const detect = button("nc-quiet-button nc-model-detect-button", state.modelDetectionStatus === "checking" ? "检测中..." : "检测模型");
+    const detect = button(
+      "nc-quiet-button nc-model-detect-button",
+      state.modelDetectionStatus === "checking" ? t("settings.model.detecting") : t("settings.model.detect")
+    );
     detect.disabled = state.modelDetectionStatus === "checking" || !settings.providerBaseUrl.trim();
     detect.addEventListener("click", () => handlers.onDetectModels?.());
     row.append(detect);
@@ -360,18 +395,18 @@ function renderModelSettings(state: SidepanelState, handlers: SidepanelHandlers)
 
   form.append(
     renderSelectField(
-      "Planner 模型",
+      t("settings.model.planner"),
       settings.plannerModel,
       detectedModels,
       (value) => handlers.onModelSettingChange?.("plannerModel", value),
-      detectedModels.length > 0 ? "请选择 Planner 模型" : "检测后自动选择第一个模型"
+      detectedModels.length > 0 ? t("settings.model.plannerPlaceholder") : t("settings.model.plannerAutoPlaceholder")
     ),
     renderSelectField(
-      "Vision 模型",
+      t("settings.model.vision"),
       settings.visionModel ?? "",
       detectedModels,
       (value) => handlers.onModelSettingChange?.("visionModel", value),
-      detectedModels.length > 0 ? "不启用视觉模型" : "检测后可选择视觉模型",
+      detectedModels.length > 0 ? t("settings.model.visionPlaceholder") : t("settings.model.visionAutoPlaceholder"),
       true
     )
   );
@@ -379,47 +414,52 @@ function renderModelSettings(state: SidepanelState, handlers: SidepanelHandlers)
   const canSave = Boolean(settings.providerBaseUrl.trim() && settings.apiKey.trim() && settings.plannerModel.trim());
   const saved = state.modelSaveStatus === "saved" && !state.modelSettingsDirty;
   const saveRow = el("div", "nc-settings-save-row");
-  const save = button("nc-primary-button", "保存设置");
+  const save = button("nc-primary-button", t("settings.save"));
   save.disabled = !canSave || saved;
   save.addEventListener("click", () => handlers.onSaveModelSettings?.());
   saveRow.append(save);
   const saveMessage =
     state.modelSaveMessage ??
     (state.modelSettingsDirty
-      ? "有未保存修改"
+      ? t("settings.save.unsaved")
       : saved
-        ? "设置已保存，可开始任务。"
+        ? t("settings.save.saved")
         : canSave
-          ? "点击保存后生效。"
-          : "检测并选择 Planner 模型后保存。");
+          ? t("settings.save.ready")
+          : t("settings.save.needsPlanner"));
   saveRow.append(el("span", `nc-settings-save-message nc-settings-save-message--${state.modelSaveStatus ?? "idle"}`, saveMessage));
   form.append(saveRow);
 
-  form.append(el("p", "nc-settings-note", "API Key 只用于模型检测和后续模型调用配置，不会写入 Trace。"));
+  form.append(el("p", "nc-settings-note", t("settings.model.note")));
   group.append(form);
   return group;
 }
 
-function renderSettingsView(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderSettingsView(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const view = el("main", "nc-page-view");
-  view.append(renderPageHeader("设置", handlers));
-  view.append(renderModelSettings(state, handlers), renderOverlayControls(state, handlers), renderSafetyControls(state, handlers));
+  view.append(renderPageHeader(t("view.settings"), handlers, t));
+  view.append(
+    renderLanguageControls(state, handlers, t),
+    renderModelSettings(state, handlers, t),
+    renderOverlayControls(state, handlers, t),
+    renderSafetyControls(state, handlers, t)
+  );
   return view;
 }
 
-function renderComposer(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderComposer(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const form = el("form", "nc-composer");
   const label = el("label", "nc-composer__field");
-  label.append(el("span", "nc-sr-only", "任务描述"));
+  label.append(el("span", "nc-sr-only", t("composer.descriptionLabel")));
   const textarea = el("textarea", "nc-textarea") as HTMLTextAreaElement;
   textarea.rows = 3;
-  textarea.placeholder = "描述你的任务...（Enter 发送，Shift+Enter 换行）";
+  textarea.placeholder = t("composer.placeholder");
   label.append(textarea);
 
   const submit = iconButton(
     `nc-send-button${state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status) ? " nc-send-button--stop" : ""}`,
     state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status) ? "stop" : "send",
-    state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status) ? "停止任务" : "发送任务"
+    state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status) ? t("composer.stop") : t("composer.send")
   );
   submit.type = "submit";
   form.append(label, submit);
@@ -447,16 +487,17 @@ function renderComposer(state: SidepanelState, handlers: SidepanelHandlers): HTM
 
 export function renderSidepanel(root: HTMLElement, input: SidepanelState, handlers: SidepanelHandlers = {}): void {
   const state = withDerivedMode(input);
+  const t = createTranslator(state.locale);
   const viewName = state.view ?? "chat";
   const shell = el("section", `nc-shell nc-shell--${state.mode} nc-shell--view-${viewName}`);
-  shell.append(renderTopBar(state, handlers));
+  shell.append(renderTopBar(state, handlers, t));
 
   if (viewName === "history") {
-    shell.append(renderHistoryView(state, handlers));
+    shell.append(renderHistoryView(state, handlers, t));
   } else if (viewName === "settings") {
-    shell.append(renderSettingsView(state, handlers));
+    shell.append(renderSettingsView(state, handlers, t));
   } else {
-    shell.append(renderChatView(state, handlers), renderComposer(state, handlers));
+    shell.append(renderChatView(state, handlers, t), renderComposer(state, handlers, t));
   }
 
   root.replaceChildren(shell);

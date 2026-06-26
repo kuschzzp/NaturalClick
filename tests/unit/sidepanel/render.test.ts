@@ -15,23 +15,23 @@ function baseState(overrides: Partial<SidepanelState> = {}): SidepanelState {
 }
 
 describe("sidepanel render", () => {
-  it("renders the conversation home with old-style toolbar actions", () => {
+  it("renders the conversation home in English by default", () => {
     const root = document.createElement("main");
 
-    renderSidepanel(root, baseState({ modelConfigured: false, activityText: "等待任务..." }));
+    renderSidepanel(root, baseState({ modelConfigured: false, activityText: "Waiting for a task..." }));
 
     expect(root.textContent).toContain("NaturalClick");
-    expect(root.textContent).toContain("任务对话");
-    expect(root.textContent).toContain("空闲");
-    expect(root.textContent).toContain("开始你的自动化任务");
-    expect(root.textContent).toContain("等待任务...");
-    expect(root.textContent).toContain("需要先配置模型");
-    expect(root.querySelector('button[aria-label="复制执行日志"]')).not.toBeNull();
-    expect(root.querySelector('button[aria-label="下载执行日志"]')).not.toBeNull();
-    expect(root.querySelector('button[aria-label="新建会话"]')).not.toBeNull();
-    expect(root.querySelector('button[aria-label="历史会话"]')).not.toBeNull();
-    expect(root.querySelector('button[aria-label="设置"]')).not.toBeNull();
-    expect(root.querySelector("textarea")?.getAttribute("placeholder")).toBe("描述你的任务...（Enter 发送，Shift+Enter 换行）");
+    expect(root.textContent).toContain("Task Chat");
+    expect(root.textContent).toContain("Idle");
+    expect(root.textContent).toContain("Start your automation task");
+    expect(root.textContent).toContain("Waiting for a task...");
+    expect(root.textContent).toContain("Model setup required");
+    expect(root.querySelector('button[aria-label="Copy run log"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="Download run log"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="New session"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="History"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="Settings"]')).not.toBeNull();
+    expect(root.querySelector("textarea")?.getAttribute("placeholder")).toBe("Describe your task... (Enter to send, Shift+Enter for newline)");
   });
 
   it("keeps the running task visible without turning the home into a flow board", () => {
@@ -53,12 +53,12 @@ describe("sidepanel render", () => {
 
     renderSidepanel(root, state);
 
-    expect(root.textContent).toContain("执行中");
-    expect(root.textContent).toContain("当前任务");
+    expect(root.textContent).toContain("Running");
+    expect(root.textContent).toContain("Current task");
     expect(root.textContent).toContain("点击个人版继续");
-    expect(root.textContent).toContain("标记目标");
+    expect(root.textContent).toContain("Highlight target");
     expect(root.textContent).not.toContain("当前对话流");
-    expect(root.querySelector('button[aria-label="停止任务"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="Stop task"]')).not.toBeNull();
   });
 
   it("renders the history page from the top toolbar entry", () => {
@@ -71,10 +71,10 @@ describe("sidepanel render", () => {
       })
     );
 
-    expect(root.textContent).toContain("历史会话");
+    expect(root.textContent).toContain("History");
     expect(root.textContent).toContain("打开定价页面");
-    expect(root.textContent).toContain("8 条事件");
-    expect(root.querySelector('button[aria-label="返回对话"]')).not.toBeNull();
+    expect(root.textContent).toContain("8 events");
+    expect(root.querySelector('button[aria-label="Back to chat"]')).not.toBeNull();
   });
 
   it("renders settings as a full sidepanel page", () => {
@@ -95,27 +95,61 @@ describe("sidepanel render", () => {
         },
         detectedModels: ["gpt-4.1-mini", "gpt-4.1"],
         modelDetectionStatus: "success",
-        modelDetectionMessage: "检测到 2 个模型，已选择 gpt-4.1-mini。",
+        modelDetectionMessage: "Detected 2 models. Selected gpt-4.1-mini; save settings to apply.",
+        modelSettingsDirty: true
+      })
+    );
+
+    expect(root.textContent).toContain("Settings");
+    expect(root.textContent).toContain("Language");
+    expect(root.textContent).toContain("Model API");
+    expect(Array.from(root.querySelectorAll(".nc-field__label")).map((node) => node.textContent)).toEqual([
+      "API",
+      "API Key",
+      "Planner model",
+      "Vision model"
+    ]);
+    expect(root.querySelector('button[aria-label="Detect models"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="Save settings"]')).not.toBeNull();
+    expect(root.textContent).toContain("Unsaved changes");
+    expect(root.querySelector('select')?.textContent).toContain("gpt-4.1-mini");
+    expect(root.textContent).toContain("Page Markers");
+    expect(root.textContent).toContain("Execution Permission");
+    expect(root.textContent).not.toContain("运行链路");
+    expect(Array.from(root.querySelectorAll(".nc-segment--active")).map((node) => node.textContent)).toContain("Vision");
+  });
+
+  it("renders settings in Chinese when the locale is zh-CN", () => {
+    const root = document.createElement("main");
+
+    renderSidepanel(
+      root,
+      baseState({
+        locale: "zh-CN",
+        view: "settings",
+        overlayMode: "Vision",
+        safetyMode: "balanced",
+        modelSettings: {
+          providerBaseUrl: "https://api.openai.com/v1",
+          apiKey: "sk-test",
+          plannerModel: "gpt-4.1-mini",
+          visionModel: "",
+          apiKeyRef: "naturalclick:model-api-key"
+        },
+        detectedModels: ["gpt-4.1-mini"],
         modelSettingsDirty: true
       })
     );
 
     expect(root.textContent).toContain("设置");
+    expect(root.textContent).toContain("插件语言");
     expect(root.textContent).toContain("大模型 API");
-    expect(Array.from(root.querySelectorAll(".nc-field__label")).map((node) => node.textContent)).toEqual([
-      "API",
-      "API Key",
-      "Planner 模型",
-      "Vision 模型"
-    ]);
+    expect(root.textContent).toContain("有未保存修改");
     expect(root.querySelector('button[aria-label="检测模型"]')).not.toBeNull();
     expect(root.querySelector('button[aria-label="保存设置"]')).not.toBeNull();
-    expect(root.textContent).toContain("有未保存修改");
-    expect(root.querySelector('select')?.textContent).toContain("gpt-4.1-mini");
-    expect(root.textContent).toContain("页面标记");
-    expect(root.textContent).toContain("执行权限");
-    expect(root.textContent).not.toContain("运行链路");
-    expect(root.querySelector(".nc-segment--active")?.textContent).toContain("视觉");
+    expect(Array.from(root.querySelectorAll(".nc-segment--active")).map((node) => node.textContent)).toEqual(
+      expect.arrayContaining(["中文", "视觉", "平衡"])
+    );
   });
 
   it("hides model detection until an API key is entered", () => {
@@ -136,8 +170,8 @@ describe("sidepanel render", () => {
     );
 
     expect(root.textContent).toContain("API Key");
-    expect(root.querySelector('button[aria-label="检测模型"]')).toBeNull();
-    expect(root.querySelector('button[aria-label="保存设置"]')).not.toBeNull();
-    expect((root.querySelector('button[aria-label="保存设置"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(root.querySelector('button[aria-label="Detect models"]')).toBeNull();
+    expect(root.querySelector('button[aria-label="Save settings"]')).not.toBeNull();
+    expect((root.querySelector('button[aria-label="Save settings"]') as HTMLButtonElement).disabled).toBe(true);
   });
 });

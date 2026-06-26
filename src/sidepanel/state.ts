@@ -1,4 +1,5 @@
 import type { AgentEvent, AgentEventType } from "../core/events/events";
+import { createTranslator, type SidepanelLocale, type TranslationKey } from "./i18n";
 import type { ModelSettingsState } from "./settings";
 
 export type SidepanelMode = "conversation" | "workbench";
@@ -47,6 +48,7 @@ export interface SessionSummary {
 
 export interface SidepanelState {
   mode: SidepanelMode;
+  locale?: SidepanelLocale;
   view?: SidepanelView;
   overlayMode: OverlayMode;
   safetyMode: SidepanelSafetyMode;
@@ -218,11 +220,12 @@ export function deriveRuntimeFlow(state: SidepanelState): RuntimeFlowNode[] {
   });
 }
 
-function stringPayload(payload: Record<string, unknown>, keys: string[]): string | undefined {
+function stringPayload(payload: Record<string, unknown>, keys: string[], locale?: SidepanelLocale): string | undefined {
+  const t = createTranslator(locale);
   for (const key of keys) {
     const value = payload[key];
     if (typeof value === "string" && value.trim()) return value;
-    if (typeof value === "boolean") return value ? "是" : "否";
+    if (typeof value === "boolean") return value ? t("value.true") : t("value.false");
     if (typeof value === "number") return String(value);
   }
   return undefined;
@@ -235,46 +238,14 @@ function eventTone(type: AgentEventType): TimelineItem["tone"] {
   return "info";
 }
 
-function eventTitle(type: AgentEventType): string {
-  const titles: Record<AgentEventType, string> = {
-    TaskStarted: "任务开始",
-    TaskInterpreted: "理解用户目标",
-    ObservationRequested: "正在观察页面",
-    ObservationReceived: "页面观察完成",
-    EvidenceAdded: "证据已更新",
-    PlanRequested: "请求生成计划",
-    PlanProduced: "计划已生成",
-    CommandBound: "目标已绑定",
-    PolicyEvaluated: "安全策略已评估",
-    UserConsentRequested: "需要用户确认",
-    UserConsentResolved: "确认结果已记录",
-    CommandIssued: "正在执行动作",
-    CommandResultReceived: "动作执行完成",
-    VerificationProduced: "结果校验完成",
-    MemoryUpdated: "会话记忆已更新",
-    RecoverySuggested: "恢复策略已生成",
-    TaskCompleted: "任务完成",
-    TaskFailed: "任务失败",
-    TaskStopped: "任务已停止",
-    ModelCallStarted: "模型调用开始",
-    ModelCallProgress: "模型正在输出",
-    ModelCallCompleted: "模型调用完成",
-    ModelCallFailed: "模型调用失败",
-    RuntimeSuspended: "运行时已挂起",
-    RuntimeResumed: "运行时已恢复",
-    ModelContractViolation: "模型输出契约异常",
-    ScreenshotCaptured: "截图已捕获",
-    VisionRequested: "视觉识别中",
-    VisionCompleted: "视觉识别完成",
-    VisualEvidenceAdded: "视觉证据已更新"
-  };
-  return titles[type];
+function eventTitle(type: AgentEventType, locale?: SidepanelLocale): string {
+  return createTranslator(locale)(`event.${type}` as TranslationKey);
 }
 
-export function mapEventToTimelineItem(event: AgentEvent): TimelineItem {
+export function mapEventToTimelineItem(event: AgentEvent, locale?: SidepanelLocale): TimelineItem {
   return {
     id: event.id,
-    title: eventTitle(event.type),
+    title: eventTitle(event.type, locale),
     detail: stringPayload(event.payload, [
       "taskText",
       "instruction",
@@ -286,7 +257,7 @@ export function mapEventToTimelineItem(event: AgentEvent): TimelineItem {
       "expectedOutcome",
       "reason",
       "error"
-    ]),
+    ], locale),
     tone: eventTone(event.type)
   };
 }
@@ -303,7 +274,7 @@ function activeStatusForEvent(type: AgentEventType): string {
   return "running";
 }
 
-export function deriveActiveTaskFromEvents(events: AgentEvent[]): ActiveTaskState | undefined {
+export function deriveActiveTaskFromEvents(events: AgentEvent[], locale?: SidepanelLocale): ActiveTaskState | undefined {
   const latest = events.at(-1);
   if (!latest) return undefined;
 
@@ -312,11 +283,11 @@ export function deriveActiveTaskFromEvents(events: AgentEvent[]): ActiveTaskStat
     status: activeStatusForEvent(latest.type),
     activeNodeId: flowNodeForEventType(latest.type),
     currentAction:
-      stringPayload(latest.payload, ["currentAction", "taskText", "command", "commandName", "summary", "instruction"]) ??
-      eventTitle(latest.type),
-    targetLabel: stringPayload(latest.payload, ["targetLabel", "label", "semanticLabel", "elementLabel"]),
-    expectedOutcome: stringPayload(latest.payload, ["expectedOutcome", "successCriteria", "outcome"]),
-    semanticTargetId: stringPayload(latest.payload, ["semanticTargetId", "targetId", "id"]),
+      stringPayload(latest.payload, ["currentAction", "taskText", "command", "commandName", "summary", "instruction"], locale) ??
+      eventTitle(latest.type, locale),
+    targetLabel: stringPayload(latest.payload, ["targetLabel", "label", "semanticLabel", "elementLabel"], locale),
+    expectedOutcome: stringPayload(latest.payload, ["expectedOutcome", "successCriteria", "outcome"], locale),
+    semanticTargetId: stringPayload(latest.payload, ["semanticTargetId", "targetId", "id"], locale),
     bindingSource: latest.type.startsWith("Vision") || latest.type === "VisualEvidenceAdded" ? "Vision" : undefined,
     riskLevel: latest.type === "UserConsentRequested" ? "medium" : latest.type === "TaskFailed" ? "blocked" : undefined
   };
