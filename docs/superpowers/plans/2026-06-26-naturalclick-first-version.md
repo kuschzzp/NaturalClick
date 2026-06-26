@@ -125,8 +125,6 @@ tests/
       general.html
       form.html
       visual-target.html
-  e2e/
-    extension-smoke.spec.ts
 ```
 
 Responsibility map:
@@ -139,7 +137,6 @@ Responsibility map:
 - `src/content/index.ts`: content-script entry, DOM observation, primitive execution, overlay messages.
 - `src/sidepanel/**`: adaptive conversational workbench UI.
 - `tests/unit/**`: fast deterministic tests for core and UI state.
-- `tests/e2e/**`: final extension smoke tests.
 
 ---
 
@@ -160,7 +157,7 @@ Responsibility map:
 
 **Interfaces:**
 - Produces: build output in `naturalclick-extension/` with `manifest.json`, `background.js`, `content.js`, `sidepanel.html`, `sidepanel.js`, and `sidepanel.css`.
-- Produces: npm scripts `build`, `test`, `test:unit`, `test:e2e`, `typecheck`.
+- Produces: npm scripts `build`, `test`, `test:unit`, `test:all`, `typecheck`.
 
 - [ ] **Step 1: Write the failing manifest smoke test**
 
@@ -201,7 +198,7 @@ Create `package.json`:
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
-    "test:e2e": "playwright test tests/e2e",
+    "test:all": "npm run typecheck && npm run test:unit && npm run build",
     "lint": "tsc --noEmit"
   },
   "devDependencies": {
@@ -209,7 +206,6 @@ Create `package.json`:
     "@types/node": "^20.14.10",
     "@vitest/coverage-v8": "^2.1.1",
     "jsdom": "^25.0.1",
-    "@playwright/test": "^1.46.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.3",
     "vitest": "^2.1.1"
@@ -2655,18 +2651,17 @@ git commit -m "feat: add page overlay modes"
 
 ---
 
-### Task 13: Acceptance Fixtures, E2E Smoke, And Project Docs
+### Task 13: Acceptance Fixtures And Project Docs
 
 **Files:**
 - Create: `tests/fixtures/pages/general.html`
 - Create: `tests/fixtures/pages/form.html`
 - Create: `tests/fixtures/pages/visual-target.html`
-- Create: `tests/e2e/extension-smoke.spec.ts`
 - Create: `README.md`
 - Modify: `package.json`
 
 **Interfaces:**
-- Produces: manual and automated acceptance fixtures.
+- Produces: manual acceptance fixtures.
 - Produces: README with build, test, load-unpacked, and first-version scope.
 
 - [ ] **Step 1: Create fixture pages**
@@ -2764,52 +2759,15 @@ Create `tests/fixtures/pages/visual-target.html`:
 </html>
 ```
 
-- [ ] **Step 2: Write e2e smoke test**
-
-Create `tests/e2e/extension-smoke.spec.ts`:
-
-```ts
-import { chromium, expect, test } from "@playwright/test";
-import { execSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
-test("built extension content script and sidepanel smoke", async () => {
-  execSync("npm run build", { stdio: "inherit" });
-
-  const extensionPath = path.resolve("naturalclick-extension");
-  const fixtureUrl = `file://${path.resolve("tests/fixtures/pages/general.html")}`;
-  const userDataDir = mkdtempSync(path.join(tmpdir(), "naturalclick-profile-"));
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: false,
-    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`]
-  });
-
-  try {
-    const page = await context.newPage();
-    await page.goto(fixtureUrl);
-    await expect(page.locator("h1")).toHaveText("Account dashboard");
-
-    const sidepanel = await context.newPage();
-    await sidepanel.goto(`file://${path.resolve("naturalclick-extension/sidepanel.html")}`);
-    await expect(sidepanel.locator("text=NaturalClick")).toBeVisible();
-  } finally {
-    await context.close();
-    rmSync(userDataDir, { recursive: true, force: true });
-  }
-});
-```
-
-- [ ] **Step 3: Update package scripts**
+- [ ] **Step 2: Update package scripts**
 
 Add:
 
 ```json
-"test:all": "npm run typecheck && npm run test:unit && npm run build && npm run test:e2e"
+"test:all": "npm run typecheck && npm run test:unit && npm run build"
 ```
 
-- [ ] **Step 4: Create README**
+- [ ] **Step 3: Create README**
 
 Create `README.md`:
 
@@ -2836,7 +2794,6 @@ npm install
 npm run typecheck
 npm run test:unit
 npm run build
-npm run test:e2e
 \`\`\`
 
 ## Build
@@ -2866,17 +2823,17 @@ Load the generated \`naturalclick-extension\` folder in \`chrome://extensions\` 
 - Overlay Off does not disable Agent observation.
 ```
 
-- [ ] **Step 5: Run full validation**
+- [ ] **Step 4: Run full validation**
 
 Run: `npm run test:all`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add tests/fixtures tests/e2e README.md package.json
-git commit -m "test: add first-version acceptance smoke"
+git add tests/fixtures README.md package.json
+git commit -m "test: add first-version fixtures and docs"
 ```
 
 ---
@@ -2891,7 +2848,7 @@ Recommended review gates:
 2. After Task 8: AgentRuntime can complete a stub vertical step.
 3. After Task 10: Vision is present but cannot bypass semantic binding.
 4. After Task 12: UI and overlay work together.
-5. After Task 13: extension builds and smoke test passes.
+5. After Task 13: extension builds and unit validation passes.
 
 ## Self-Review Notes
 

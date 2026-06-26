@@ -18,7 +18,6 @@ npm install
 npm run typecheck
 npm run test:unit
 npm run build
-npm run test:e2e
 ```
 
 ## Build

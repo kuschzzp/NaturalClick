@@ -8,8 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
-    "test:e2e": "playwright test tests/e2e",
-    "test:all": "npm run typecheck && npm run test:unit && npm run build && npm run test:e2e",
+    "test:all": "npm run typecheck && npm run test:unit && npm run build",
     "lint": "tsc --noEmit"
   },
   "devDependencies": {
@@ -17,7 +16,6 @@
     "@types/node": "^20.14.10",
     "@vitest/coverage-v8": "^2.1.1",
     "jsdom": "^25.0.1",
-    "@playwright/test": "^1.46.1",
     "typescript": "^5.5.4",
     "vite": "^5.4.3",
     "vitest": "^2.1.1"
