@@ -26,7 +26,8 @@ npm run build
 npm run build
 ```
 
-Load the generated `naturalclick-extension` folder in `chrome://extensions` using "Load unpacked".
+Load the committed `naturalclick-extension` folder in `chrome://extensions` using "Load unpacked".
+Developers only need to run `npm run build` after changing source files to refresh that installable folder.
 
 ## First-Version Scope
 

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "NaturalClick Agent",
+  "version": "0.1.0",
+  "description": "A DOM-first, vision-assisted browser operation Agent.",
+  "action": {
+    "default_title": "NaturalClick Agent"
+  },
+  "permissions": ["activeTab", "scripting", "sidePanel", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
