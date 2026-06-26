@@ -6,6 +6,7 @@ export type SidepanelView = "chat" | "history" | "settings";
 export type OverlayMode = "Off" | "Focus" | "All Targets" | "Evidence" | "Vision";
 export type SidepanelSafetyMode = "conservative" | "balanced" | "autonomous" | "experimental_full_auto";
 export type ModelDetectionStatus = "idle" | "checking" | "success" | "error";
+export type ModelSaveStatus = "idle" | "saved" | "error";
 export type FlowNodeId = "start" | "intent" | "observe" | "route" | "plan" | "act" | "verify" | "reply";
 export type RuntimeFlowNodeStatus = "done" | "active" | "waiting" | "blocked";
 
@@ -57,6 +58,9 @@ export interface SidepanelState {
   sessions?: SessionSummary[];
   activityText?: string;
   modelSettings?: ModelSettingsState;
+  modelSettingsDirty?: boolean;
+  modelSaveStatus?: ModelSaveStatus;
+  modelSaveMessage?: string;
   detectedModels?: string[];
   modelDetectionStatus?: ModelDetectionStatus;
   modelDetectionMessage?: string;

@@ -30,6 +30,8 @@ let state: SidepanelState = {
   activityText: "等待任务...",
   sessions: loadStoredSessions(),
   modelSettings: loadStoredModelSettings(),
+  modelSettingsDirty: false,
+  modelSaveStatus: "idle",
   detectedModels: loadStoredDetectedModels(),
   modelDetectionStatus: "idle",
   timeline: [{ id: "welcome", title: "准备就绪", detail: "配置 Planner 模型后，就可以让 Agent 操作当前页面。" }]
@@ -94,11 +96,13 @@ function loadStoredModelSettings(): ModelSettingsState {
   }
 }
 
-function saveStoredModelSettings(settings: ModelSettingsState): void {
+function saveStoredModelSettings(settings: ModelSettingsState): boolean {
   try {
     localStorage.setItem(STORAGE_KEY_MODEL_SETTINGS, JSON.stringify(settings));
+    return true;
   } catch {
     // Settings can still be used in memory when storage is unavailable.
+    return false;
   }
 }
 
@@ -112,11 +116,13 @@ function loadStoredDetectedModels(): string[] {
   }
 }
 
-function saveStoredDetectedModels(models: string[]): void {
+function saveStoredDetectedModels(models: string[]): boolean {
   try {
     localStorage.setItem(`${STORAGE_KEY_MODEL_SETTINGS}.models`, JSON.stringify(models));
+    return true;
   } catch {
     // Detection results are a convenience cache only.
+    return false;
   }
 }
 
@@ -259,6 +265,9 @@ function paint(): void {
     },
     onDetectModels: () => {
       void detectModels();
+    },
+    onSaveModelSettings: () => {
+      saveModelSettings();
     }
   });
 }
@@ -353,13 +362,49 @@ function updateModelSetting(field: "providerBaseUrl" | "apiKey" | "plannerModel"
   state = {
     ...state,
     modelSettings: settings,
-    modelConfigured: isModelConfigured(settings),
+    modelConfigured: false,
+    modelSettingsDirty: true,
+    modelSaveStatus: "idle",
+    modelSaveMessage: "有未保存修改",
     modelDetectionStatus: resetDetection ? "idle" : state.modelDetectionStatus,
     modelDetectionMessage: resetDetection ? undefined : state.modelDetectionMessage,
     detectedModels: resetDetection ? [] : state.detectedModels
   };
-  saveStoredModelSettings(settings);
-  if (resetDetection) saveStoredDetectedModels([]);
+  paint();
+}
+
+function saveModelSettings(): void {
+  const settings = state.modelSettings ?? defaultModelSettings();
+  if (!isModelConfigured(settings)) {
+    state = {
+      ...state,
+      modelConfigured: false,
+      modelSaveStatus: "error",
+      modelSaveMessage: "请先填写 API、API Key，并选择 Planner 模型。"
+    };
+    paint();
+    return;
+  }
+
+  const settingsSaved = saveStoredModelSettings(settings);
+  const modelsSaved = saveStoredDetectedModels(state.detectedModels ?? []);
+  if (!settingsSaved || !modelsSaved) {
+    state = {
+      ...state,
+      modelSaveStatus: "error",
+      modelSaveMessage: "保存失败，当前浏览器存储不可用。"
+    };
+    paint();
+    return;
+  }
+
+  state = {
+    ...state,
+    modelConfigured: true,
+    modelSettingsDirty: false,
+    modelSaveStatus: "saved",
+    modelSaveMessage: "设置已保存，可开始任务。"
+  };
   paint();
 }
 
@@ -417,13 +462,14 @@ async function detectModels(): Promise<void> {
     state = {
       ...state,
       modelSettings: nextSettings,
-      modelConfigured: isModelConfigured(nextSettings),
+      modelConfigured: false,
+      modelSettingsDirty: true,
       detectedModels: models,
       modelDetectionStatus: "success",
-      modelDetectionMessage: `检测到 ${models.length} 个模型，已选择 ${models[0]}。`
+      modelDetectionMessage: `检测到 ${models.length} 个模型，已选择 ${models[0]}，请保存设置。`,
+      modelSaveStatus: "idle",
+      modelSaveMessage: "有未保存修改"
     };
-    saveStoredModelSettings(nextSettings);
-    saveStoredDetectedModels(models);
   } catch (error) {
     state = {
       ...state,

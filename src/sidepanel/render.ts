@@ -25,6 +25,7 @@ export interface SidepanelHandlers {
   onBackToChat?: () => void;
   onModelSettingChange?: (field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel", value: string) => void;
   onDetectModels?: () => void;
+  onSaveModelSettings?: () => void;
 }
 
 function formatSafetyMode(mode: SidepanelSafetyMode): string {
@@ -374,6 +375,26 @@ function renderModelSettings(state: SidepanelState, handlers: SidepanelHandlers)
       true
     )
   );
+
+  const canSave = Boolean(settings.providerBaseUrl.trim() && settings.apiKey.trim() && settings.plannerModel.trim());
+  const saved = state.modelSaveStatus === "saved" && !state.modelSettingsDirty;
+  const saveRow = el("div", "nc-settings-save-row");
+  const save = button("nc-primary-button", "保存设置");
+  save.disabled = !canSave || saved;
+  save.addEventListener("click", () => handlers.onSaveModelSettings?.());
+  saveRow.append(save);
+  const saveMessage =
+    state.modelSaveMessage ??
+    (state.modelSettingsDirty
+      ? "有未保存修改"
+      : saved
+        ? "设置已保存，可开始任务。"
+        : canSave
+          ? "点击保存后生效。"
+          : "检测并选择 Planner 模型后保存。");
+  saveRow.append(el("span", `nc-settings-save-message nc-settings-save-message--${state.modelSaveStatus ?? "idle"}`, saveMessage));
+  form.append(saveRow);
+
   form.append(el("p", "nc-settings-note", "API Key 只用于模型检测和后续模型调用配置，不会写入 Trace。"));
   group.append(form);
   return group;

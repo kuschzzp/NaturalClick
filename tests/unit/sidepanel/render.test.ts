@@ -95,7 +95,8 @@ describe("sidepanel render", () => {
         },
         detectedModels: ["gpt-4.1-mini", "gpt-4.1"],
         modelDetectionStatus: "success",
-        modelDetectionMessage: "检测到 2 个模型，已选择 gpt-4.1-mini。"
+        modelDetectionMessage: "检测到 2 个模型，已选择 gpt-4.1-mini。",
+        modelSettingsDirty: true
       })
     );
 
@@ -108,6 +109,8 @@ describe("sidepanel render", () => {
       "Vision 模型"
     ]);
     expect(root.querySelector('button[aria-label="检测模型"]')).not.toBeNull();
+    expect(root.querySelector('button[aria-label="保存设置"]')).not.toBeNull();
+    expect(root.textContent).toContain("有未保存修改");
     expect(root.querySelector('select')?.textContent).toContain("gpt-4.1-mini");
     expect(root.textContent).toContain("页面标记");
     expect(root.textContent).toContain("执行权限");
@@ -134,5 +137,7 @@ describe("sidepanel render", () => {
 
     expect(root.textContent).toContain("API Key");
     expect(root.querySelector('button[aria-label="检测模型"]')).toBeNull();
+    expect(root.querySelector('button[aria-label="保存设置"]')).not.toBeNull();
+    expect((root.querySelector('button[aria-label="保存设置"]') as HTMLButtonElement).disabled).toBe(true);
   });
 });
