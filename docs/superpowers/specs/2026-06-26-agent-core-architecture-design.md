@@ -135,6 +135,7 @@ ObservePagePort
 ExecutePrimitivePort
 PlanWithModelPort
 VerifyWithModelPort
+AssembleModelContextPort
 PersistEventPort
 LoadEventsPort
 PersistSnapshotPort
@@ -158,7 +159,7 @@ Chrome adapters:
   prompts, settings, trace viewer.
 - Storage adapter: event log, derived snapshots, session memory, redaction.
 - LLM adapter: OpenAI-compatible requests, streaming, timeout handling,
-  contract validation.
+  context assembly, contract validation, and model capability diagnostics.
 - Screenshot/vision adapter: screenshot capture, first-stage visual recognition,
   visual target grounding, and visual verification. It enhances observation,
   binding, and verification, but does not become the main planning model.
@@ -1109,7 +1110,408 @@ Add scenarios through Capability and Profile first.
 Modify Agent Core only when the core vocabulary cannot express the need.
 ```
 
-## 13. Safety policy and configuration
+## 13. Model configuration and context assembly
+
+Model configuration is part of the Agent capability system. It is not merely a
+form with `baseUrl`, `apiKey`, and `model`.
+
+The first version keeps this intentionally simple:
+
+- One global OpenAI-compatible provider.
+- One global extension-level configuration.
+- Multiple role model names under that provider.
+- Planner uses a model by default.
+- Vision uses a model only when `VisionCapability` is triggered.
+- Verifier is deterministic first and calls a model only when inconclusive.
+- Summarizer is template/evidence-based first and calls a model only when
+  requested or when the result is too complex for a template.
+
+No first-version support for:
+
+- Multiple provider profiles.
+- Per-session model overrides.
+- Provider marketplace.
+- Automatic model list discovery.
+- Routing Planner to one provider and Vision to another.
+
+### Global provider configuration
+
+```text
+GlobalModelConfig
+  provider
+  roleModels
+  capabilities
+  runtime
+  contextBudget
+  logging
+  privacy
+```
+
+```text
+ProviderConfig
+  baseUrl
+  apiKeyRef
+  compatibilityMode
+  defaultHeaders
+```
+
+`apiKeyRef` refers to protected extension storage. API keys must not appear in
+events, exported logs, model traces, screenshots, or user-visible summaries.
+
+### Role model binding
+
+```text
+RoleModelConfig
+  plannerModel
+  visionModel
+  verifierModel
+  summarizerModel
+```
+
+Rules:
+
+- `plannerModel` is required.
+- `visionModel` is optional. If absent, `VisionCapability` is disabled and the
+  Agent runs DOM-only.
+- `verifierModel` is optional. If absent, optional model verification reuses
+  `plannerModel`.
+- `summarizerModel` is optional. If absent, optional model summarization reuses
+  `plannerModel`.
+
+Role defaults:
+
+```text
+planner:
+  useModel: always
+
+vision:
+  useModel: when_visual_capability_triggered
+
+verifier:
+  useModel: only_when_deterministic_verification_is_inconclusive
+
+summarizer:
+  useModel: only_when_requested_or_complex
+```
+
+### Model capabilities
+
+OpenAI-compatible providers differ. The Agent must not infer all behavior from
+model names.
+
+Capabilities are manually declared and optionally tested:
+
+```text
+ModelCapabilities
+  supportsStreaming
+  supportsJsonMode
+  supportsToolUse
+  supportsVisionInput
+  supportsReasoningSummary
+  maxContextTokens
+  maxOutputTokens
+```
+
+Optional tests:
+
+```text
+Test connection
+Test planner JSON
+Test streaming
+Test vision input
+```
+
+Test results are diagnostic evidence, not hidden magic:
+
+```text
+CapabilityTestResult
+  capability
+  status: passed | failed | skipped
+  testedAt
+  errorSummary
+```
+
+Capability implications:
+
+- Planner requires text input and structured JSON output.
+- Vision requires `supportsVisionInput`, a configured `visionModel`, screenshot
+  permission, and policy permission to send screenshot data.
+- Streaming is preferred but optional.
+- If JSON mode is unavailable, the model call falls back to strict JSON prompt
+  plus contract repair.
+
+### JSON contract strategy
+
+Planner and optional model verifier outputs use this order:
+
+```text
+if supportsJsonMode:
+  request JSON mode / structured response format
+else:
+  request strict JSON through prompt contract
+```
+
+Every model result still passes the same validation:
+
+- JSON parses.
+- Schema is valid.
+- Command type exists.
+- Required fields exist.
+- Risk hint is valid.
+- Expected outcome is non-empty.
+- Success criteria are verifiable.
+- Planner did not output primitive-only actions such as direct coordinates.
+
+Failure behavior:
+
+```text
+ModelContractViolation
+  -> attempt contract repair
+  -> retry within role repair limit
+  -> fail safely if still invalid
+```
+
+The first version should default to one repair attempt for Planner. Verifier and
+Summarizer should not loop on repeated repair attempts.
+
+### Role-specific runtime behavior
+
+Default runtime budget:
+
+```text
+planner:
+  requestTimeoutMs: 60000
+  firstTokenTimeoutMs: 15000
+  maxRetries: 1
+  contractRepairAttempts: 1
+
+vision:
+  requestTimeoutMs: 45000
+  firstTokenTimeoutMs: 15000
+  maxRetries: 0
+  minIntervalMs: 750
+  maxCallsPerStep: 1
+
+verifier:
+  requestTimeoutMs: 15000
+  firstTokenTimeoutMs: 5000
+  maxRetries: 0
+
+summarizer:
+  requestTimeoutMs: 20000
+  firstTokenTimeoutMs: 8000
+  maxRetries: 0
+```
+
+Timeout fallback:
+
+- Planner timeout: compact context once, retry once, then fail safely.
+- Vision timeout: mark visual recognition unavailable for this step and continue
+  DOM-only when possible.
+- Verifier timeout: use deterministic or `inconclusive` verification and let the
+  next step replan from evidence.
+- Summarizer timeout: use a template summary from events and evidence.
+
+### Model logging and privacy
+
+Model call logs use tiers:
+
+```text
+summary
+debug
+raw
+sensitive
+```
+
+Default saved data:
+
+```text
+modelName
+role
+requestId
+durationMs
+streamingEnabled
+tokenEstimate or provider usage
+status
+errorSummary
+parsedContractResult
+```
+
+Default excluded data:
+
+```text
+raw prompt
+raw response
+API key
+screenshot image
+sensitive field values
+```
+
+Developer mode may enable:
+
+```text
+storeRawModelRequests
+storeRawModelResponses
+storePromptFragments
+storeContractRepairPayloads
+```
+
+Always-on redaction:
+
+```text
+redactApiKeys
+redactSensitiveValues by default
+redactScreenshots by default
+```
+
+Screenshot logging is separate:
+
+```text
+storeScreenshotRefs: true
+storeScreenshotImages: false by default
+sendScreenshotsToRemoteVision: controlled by vision config and policy
+```
+
+### Context assembly
+
+The Agent must not send full raw observations or full event logs directly to a
+model. Every model call goes through `ContextAssembler`.
+
+Role-specific model context:
+
+```text
+PlannerContext
+  task frame
+  active goal and subgoal
+  focused observation
+  evidence summary
+  recent trace summary
+  session memory summary
+  capability summary
+  scenario profile summary
+  policy context
+  response schema
+
+VisionContext
+  screenshot or cropped region
+  target hints
+  minimal task and subgoal context
+  relevant DOM candidate refs
+  relevant evidence refs
+
+VerifierContext
+  semantic command
+  expected outcome
+  success criteria
+  before/after deltas
+  relevant evidence
+  primitive result summary
+
+SummarizerContext
+  completed goals
+  final evidence set
+  unresolved issues
+  important failures
+  user-facing output constraints
+```
+
+Context sources are prioritized:
+
+```text
+system contract and schema
+user task and active subgoal
+current command and expected outcome
+relevant evidence
+focused observation
+recent trace summary
+session memory summary
+capability and policy summary
+raw excerpts only when necessary
+```
+
+### Context budget
+
+Each role has a budget derived from model capabilities and user configuration:
+
+```text
+ContextBudgetConfig
+  plannerMaxInputTokens
+  visionMaxInputTokens
+  verifierMaxInputTokens
+  summarizerMaxInputTokens
+  reservedOutputTokens
+  evidenceLimit
+  recentEventLimit
+  observationCandidateLimit
+  rawExcerptLimit
+  compressionStrategy
+```
+
+Defaults should be computed from `maxContextTokens` when possible, while keeping
+reserved output space for valid JSON.
+
+The first version may estimate tokens approximately, but the estimator must be
+conservative. It should prefer underfilling the context to silently truncating
+the response schema or required task state.
+
+### Compression order
+
+If assembled context is too large, reduce it in this order:
+
+1. Keep system contract, role instructions, JSON schema, user task, and active
+   subgoal.
+2. Keep command-related evidence and current success criteria.
+3. Keep recent failures and unresolved questions.
+4. Keep high-confidence and non-expired evidence.
+5. Summarize older trace events into `RecentTraceSummary`.
+6. Reduce `FocusedObservation` to relevant regions and candidates.
+7. Drop low-confidence, expired, duplicate, and unrelated candidates.
+8. Replace verbose text blocks with evidence claims and excerpts.
+9. Include raw excerpts only when the role cannot act from evidence.
+10. Fail safely or request a narrower observation if still too large.
+
+Hard rule:
+
+```text
+Never truncate JSON schema, safety policy, user task, active subgoal, or command
+success criteria to fit raw page content.
+```
+
+### Over-budget behavior
+
+Planner:
+
+- Compact focused observation.
+- Summarize older trace.
+- Prefer evidence over raw DOM.
+- Retry once with compact context.
+- If still too large, request narrower observation, ask the user to clarify, or
+  fail safely.
+
+Vision:
+
+- Prefer cropped region screenshots.
+- Minimize text context.
+- If still too large or disallowed, skip visual analysis for this step.
+
+Verifier:
+
+- Keep only the semantic command, expected outcome, before/after delta, and
+  related evidence.
+- If still inconclusive, return `inconclusive` instead of bloating context.
+
+Summarizer:
+
+- Summarize in chunks when needed.
+- Final output must still cite or reference evidence IDs internally.
+
+Events:
+
+- Full event logs do not enter model context.
+- Context assembly decisions write debug events when compression materially
+  changes what the model sees.
+
+## 14. Safety policy and configuration
 
 Safety uses:
 
@@ -1232,7 +1634,7 @@ PolicyDecision
   requiredUserPrompt
 ```
 
-## 14. Session memory
+## 15. Session memory
 
 The first version supports session-level memory, not long-term memory.
 
@@ -1278,7 +1680,7 @@ Must not enter memory:
 - Failed creation results.
 - Plaintext sensitive data without explicit scoped permission.
 
-## 15. Output layers
+## 16. Output layers
 
 Output is derived from events and evidence, not ad hoc strings from modules.
 
@@ -1326,7 +1728,7 @@ exported logs
 Normal users should not see prompts, raw model fragments, raw DOM indexes,
 coordinates, or internal debug labels unless they open the developer trace.
 
-## 16. First-version acceptance scenarios
+## 17. First-version acceptance scenarios
 
 ### Primary: general browser operation
 
@@ -1390,7 +1792,7 @@ Must demonstrate:
 - Verifier uses visual evidence to confirm whether the settings panel opened.
 - No visual model output directly becomes an unreviewed coordinate click.
 
-## 17. Future enhancement direction
+## 18. Future enhancement direction
 
 Backoffice enhancement:
 
@@ -1420,7 +1822,7 @@ Later vision expansion:
 Vision must remain an evidence contributor for observation, binding, and
 verification. It must not replace the semantic command model.
 
-## 18. Design invariants
+## 19. Design invariants
 
 These rules should stay true even as the implementation grows:
 
@@ -1439,3 +1841,9 @@ These rules should stay true even as the implementation grows:
 13. Vision enhances observation, binding, and verification; it does not plan.
 14. Coordinate primitives are last-mile execution details after semantic
     binding and policy.
+15. Model configuration is global in the first version, but role behavior is
+    still explicit.
+16. Models receive assembled role context, not raw event logs or full raw page
+    dumps.
+17. Context compression preserves task, schema, policy, active subgoal, and
+    success criteria before raw content.
