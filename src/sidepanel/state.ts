@@ -1,9 +1,11 @@
 import type { AgentEvent, AgentEventType } from "../core/events/events";
+import type { ModelSettingsState } from "./settings";
 
 export type SidepanelMode = "conversation" | "workbench";
 export type SidepanelView = "chat" | "history" | "settings";
 export type OverlayMode = "Off" | "Focus" | "All Targets" | "Evidence" | "Vision";
 export type SidepanelSafetyMode = "conservative" | "balanced" | "autonomous" | "experimental_full_auto";
+export type ModelDetectionStatus = "idle" | "checking" | "success" | "error";
 export type FlowNodeId = "start" | "intent" | "observe" | "route" | "plan" | "act" | "verify" | "reply";
 export type RuntimeFlowNodeStatus = "done" | "active" | "waiting" | "blocked";
 
@@ -54,6 +56,10 @@ export interface SidepanelState {
   timeline?: TimelineItem[];
   sessions?: SessionSummary[];
   activityText?: string;
+  modelSettings?: ModelSettingsState;
+  detectedModels?: string[];
+  modelDetectionStatus?: ModelDetectionStatus;
+  modelDetectionMessage?: string;
   decisionSummary?: string;
   evidenceSummary?: string[];
   traceSummary?: string[];

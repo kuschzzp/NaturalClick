@@ -1,7 +1,6 @@
-import { button, el, textInput } from "./components";
+import { button, el } from "./components";
 import {
   needsModelGuidance,
-  RUNTIME_FLOW,
   withDerivedMode,
   type OverlayMode,
   type SessionSummary,
@@ -24,6 +23,8 @@ export interface SidepanelHandlers {
   onNewSession?: () => void;
   onOpenHistory?: () => void;
   onBackToChat?: () => void;
+  onModelSettingChange?: (field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel", value: string) => void;
+  onDetectModels?: () => void;
 }
 
 function formatSafetyMode(mode: SidepanelSafetyMode): string {
@@ -103,7 +104,10 @@ function renderTopBar(state: SidepanelState, handlers: SidepanelHandlers): HTMLE
   const logo = el("img", "nc-brand__logo") as HTMLImageElement;
   logo.src = "icons/icon-48.png";
   logo.alt = "";
-  brand.append(logo, el("h1", "nc-brand__title", "NaturalClick Agent"));
+  const meta = el("div", "nc-brand__meta");
+  meta.append(el("span", "nc-brand__eyebrow", "NaturalClick"));
+  meta.append(el("h1", "nc-brand__title", state.view === "settings" ? "设置" : state.view === "history" ? "历史会话" : "任务对话"));
+  brand.append(logo, meta);
 
   const status = el("div", "nc-status");
   status.append(el("span", `nc-status__dot nc-status__dot--${statusTone(state.activeTask?.status)}`));
@@ -275,38 +279,110 @@ function renderSafetyControls(state: SidepanelState, handlers: SidepanelHandlers
   return controls;
 }
 
-function renderModelSettings(): HTMLElement {
+function renderInputField(
+  label: string,
+  value: string,
+  onInput: (value: string) => void,
+  options: { type?: string; placeholder?: string; autocomplete?: string } = {}
+): HTMLElement {
+  const wrapper = el("label", "nc-field");
+  wrapper.append(el("span", "nc-field__label", label));
+  const input = el("input", "nc-input") as HTMLInputElement;
+  input.type = options.type ?? "text";
+  input.value = value;
+  input.placeholder = options.placeholder ?? "";
+  if (options.autocomplete) input.setAttribute("autocomplete", options.autocomplete);
+  input.addEventListener("input", () => onInput(input.value));
+  wrapper.append(input);
+  return wrapper;
+}
+
+function renderSelectField(
+  label: string,
+  value: string,
+  models: string[],
+  onChange: (value: string) => void,
+  placeholder: string,
+  allowEmpty = false
+): HTMLElement {
+  const wrapper = el("label", "nc-field");
+  wrapper.append(el("span", "nc-field__label", label));
+  const select = el("select", "nc-input nc-select") as HTMLSelectElement;
+  select.disabled = models.length === 0;
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = placeholder;
+  empty.disabled = !allowEmpty;
+  select.append(empty);
+  models.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    select.append(option);
+  });
+  select.value = value && models.includes(value) ? value : "";
+  select.addEventListener("change", () => onChange(select.value));
+  wrapper.append(select);
+  return wrapper;
+}
+
+function renderModelSettings(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
   const group = el("section", "nc-settings-group");
   group.append(el("h3", undefined, "大模型 API"));
   const form = el("form", "nc-settings-form");
-  const settings = defaultModelSettings();
-  form.append(
-    textInput("Base URL", settings.providerBaseUrl),
-    textInput("Planner 模型", settings.plannerModel, "gpt-4.1-mini"),
-    textInput("Vision 模型", settings.visionModel ?? "", "可选"),
-    textInput("API Key 引用", settings.apiKeyRef)
-  );
-  form.append(el("p", "nc-settings-note", "第一版使用一个全局 OpenAI-compatible Provider。API Key 不会写入 Trace。"));
-  group.append(form);
-  return group;
-}
+  const settings = state.modelSettings ?? defaultModelSettings();
+  const detectedModels = state.detectedModels ?? [];
 
-function renderRuntimeSummary(state: SidepanelState): HTMLElement {
-  const group = el("section", "nc-settings-group");
-  group.append(el("h3", undefined, "运行链路"));
-  const flow = el("div", "nc-runtime-strip");
-  RUNTIME_FLOW.forEach((node) => {
-    const item = el("span", "nc-runtime-chip", node.label);
-    flow.append(item);
-  });
-  group.append(flow);
+  form.append(
+    renderInputField("API", settings.providerBaseUrl, (value) => handlers.onModelSettingChange?.("providerBaseUrl", value), {
+      placeholder: "https://api.openai.com/v1",
+      autocomplete: "url"
+    }),
+    renderInputField("API Key", settings.apiKey, (value) => handlers.onModelSettingChange?.("apiKey", value), {
+      type: "password",
+      placeholder: "sk-...",
+      autocomplete: "off"
+    })
+  );
+
+  if (settings.apiKey.trim()) {
+    const row = el("div", "nc-model-detect-row");
+    const detect = button("nc-quiet-button nc-model-detect-button", state.modelDetectionStatus === "checking" ? "检测中..." : "检测模型");
+    detect.disabled = state.modelDetectionStatus === "checking" || !settings.providerBaseUrl.trim();
+    detect.addEventListener("click", () => handlers.onDetectModels?.());
+    row.append(detect);
+    if (state.modelDetectionMessage) {
+      row.append(el("span", `nc-model-detect-message nc-model-detect-message--${state.modelDetectionStatus ?? "idle"}`, state.modelDetectionMessage));
+    }
+    form.append(row);
+  }
+
+  form.append(
+    renderSelectField(
+      "Planner 模型",
+      settings.plannerModel,
+      detectedModels,
+      (value) => handlers.onModelSettingChange?.("plannerModel", value),
+      detectedModels.length > 0 ? "请选择 Planner 模型" : "检测后自动选择第一个模型"
+    ),
+    renderSelectField(
+      "Vision 模型",
+      settings.visionModel ?? "",
+      detectedModels,
+      (value) => handlers.onModelSettingChange?.("visionModel", value),
+      detectedModels.length > 0 ? "不启用视觉模型" : "检测后可选择视觉模型",
+      true
+    )
+  );
+  form.append(el("p", "nc-settings-note", "API Key 只用于模型检测和后续模型调用配置，不会写入 Trace。"));
+  group.append(form);
   return group;
 }
 
 function renderSettingsView(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
   const view = el("main", "nc-page-view");
   view.append(renderPageHeader("设置", handlers));
-  view.append(renderModelSettings(), renderOverlayControls(state, handlers), renderSafetyControls(state, handlers), renderRuntimeSummary(state));
+  view.append(renderModelSettings(state, handlers), renderOverlayControls(state, handlers), renderSafetyControls(state, handlers));
   return view;
 }
 

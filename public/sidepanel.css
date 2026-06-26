@@ -74,7 +74,7 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-height: 56px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
@@ -84,18 +84,34 @@ button {
 .nc-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
 .nc-brand__logo {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   flex: 0 0 auto;
-  border-radius: 10px;
+  border-radius: 9px;
   box-shadow:
     0 0 0 1px rgba(23, 33, 43, 0.1),
     0 6px 14px rgba(31, 117, 93, 0.22);
+}
+
+.nc-brand__meta {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.nc-brand__eyebrow {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .nc-brand__title {
@@ -103,7 +119,7 @@ button {
   min-width: 0;
   overflow: hidden;
   color: var(--ink);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 750;
   line-height: 1.2;
   text-overflow: ellipsis;
@@ -206,7 +222,8 @@ button {
 .nc-segment:focus-visible,
 .nc-send-button:focus-visible,
 .nc-textarea:focus-visible,
-.nc-input:focus-visible {
+.nc-input:focus-visible,
+.nc-select:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
@@ -276,6 +293,12 @@ button {
   font-size: 12px;
   font-weight: 750;
   white-space: nowrap;
+}
+
+.nc-quiet-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
 }
 
 .nc-task-summary {
@@ -578,6 +601,52 @@ button {
   font-size: 12px;
 }
 
+.nc-select {
+  appearance: none;
+  padding-right: 30px;
+  background:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%) calc(100% - 16px) 14px / 5px 5px no-repeat,
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%) calc(100% - 11px) 14px / 5px 5px no-repeat,
+    #ffffff;
+}
+
+.nc-select:disabled {
+  cursor: not-allowed;
+  color: #8a9aa7;
+  background:
+    linear-gradient(45deg, transparent 50%, #a7b4bd 50%) calc(100% - 16px) 14px / 5px 5px no-repeat,
+    linear-gradient(135deg, #a7b4bd 50%, transparent 50%) calc(100% - 11px) 14px / 5px 5px no-repeat,
+    #f7fafb;
+}
+
+.nc-model-detect-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.nc-model-detect-button {
+  min-height: 34px;
+  border-color: rgba(47, 143, 114, 0.36);
+  background: var(--primary-soft);
+}
+
+.nc-model-detect-message {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.nc-model-detect-message--success {
+  color: var(--primary-strong);
+}
+
+.nc-model-detect-message--error {
+  color: var(--danger);
+}
+
 .nc-segmented {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -681,8 +750,8 @@ button {
 
 @media (max-width: 360px) {
   .nc-brand__logo {
-    width: 30px;
-    height: 30px;
+    width: 28px;
+    height: 28px;
   }
 
   .nc-tool-button {

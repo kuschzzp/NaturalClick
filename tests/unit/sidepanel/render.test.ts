@@ -20,7 +20,8 @@ describe("sidepanel render", () => {
 
     renderSidepanel(root, baseState({ modelConfigured: false, activityText: "等待任务..." }));
 
-    expect(root.textContent).toContain("NaturalClick Agent");
+    expect(root.textContent).toContain("NaturalClick");
+    expect(root.textContent).toContain("任务对话");
     expect(root.textContent).toContain("空闲");
     expect(root.textContent).toContain("开始你的自动化任务");
     expect(root.textContent).toContain("等待任务...");
@@ -79,13 +80,59 @@ describe("sidepanel render", () => {
   it("renders settings as a full sidepanel page", () => {
     const root = document.createElement("main");
 
-    renderSidepanel(root, baseState({ view: "settings", overlayMode: "Vision", safetyMode: "autonomous" }));
+    renderSidepanel(
+      root,
+      baseState({
+        view: "settings",
+        overlayMode: "Vision",
+        safetyMode: "autonomous",
+        modelSettings: {
+          providerBaseUrl: "https://api.openai.com/v1",
+          apiKey: "sk-test",
+          plannerModel: "gpt-4.1-mini",
+          visionModel: "",
+          apiKeyRef: "naturalclick:model-api-key"
+        },
+        detectedModels: ["gpt-4.1-mini", "gpt-4.1"],
+        modelDetectionStatus: "success",
+        modelDetectionMessage: "检测到 2 个模型，已选择 gpt-4.1-mini。"
+      })
+    );
 
     expect(root.textContent).toContain("设置");
     expect(root.textContent).toContain("大模型 API");
+    expect(Array.from(root.querySelectorAll(".nc-field__label")).map((node) => node.textContent)).toEqual([
+      "API",
+      "API Key",
+      "Planner 模型",
+      "Vision 模型"
+    ]);
+    expect(root.querySelector('button[aria-label="检测模型"]')).not.toBeNull();
+    expect(root.querySelector('select')?.textContent).toContain("gpt-4.1-mini");
     expect(root.textContent).toContain("页面标记");
     expect(root.textContent).toContain("执行权限");
-    expect(root.textContent).toContain("运行链路");
+    expect(root.textContent).not.toContain("运行链路");
     expect(root.querySelector(".nc-segment--active")?.textContent).toContain("视觉");
+  });
+
+  it("hides model detection until an API key is entered", () => {
+    const root = document.createElement("main");
+
+    renderSidepanel(
+      root,
+      baseState({
+        view: "settings",
+        modelSettings: {
+          providerBaseUrl: "https://api.openai.com/v1",
+          apiKey: "",
+          plannerModel: "",
+          visionModel: "",
+          apiKeyRef: "naturalclick:model-api-key"
+        }
+      })
+    );
+
+    expect(root.textContent).toContain("API Key");
+    expect(root.querySelector('button[aria-label="检测模型"]')).toBeNull();
   });
 });

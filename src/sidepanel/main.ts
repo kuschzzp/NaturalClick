@@ -1,6 +1,7 @@
 import { sendRuntimeMessage } from "../adapters/chrome/messaging";
 import type { SessionStateResponse } from "../shared/protocol";
 import { renderSidepanel } from "./render";
+import { defaultModelSettings, type ModelSettingsState } from "./settings";
 import {
   deriveActiveTaskFromEvents,
   mapEventToTimelineItem,
@@ -17,6 +18,7 @@ if (!root) {
 }
 const appRoot = root;
 const STORAGE_KEY_SESSION_SUMMARIES = "naturalclick.sidepanel.sessionSummaries.v1";
+const STORAGE_KEY_MODEL_SETTINGS = "naturalclick.sidepanel.modelSettings.v1";
 
 let state: SidepanelState = {
   mode: "conversation",
@@ -27,8 +29,13 @@ let state: SidepanelState = {
   traceOpen: false,
   activityText: "等待任务...",
   sessions: loadStoredSessions(),
+  modelSettings: loadStoredModelSettings(),
+  detectedModels: loadStoredDetectedModels(),
+  modelDetectionStatus: "idle",
   timeline: [{ id: "welcome", title: "准备就绪", detail: "配置 Planner 模型后，就可以让 Agent 操作当前页面。" }]
 };
+
+state = { ...state, modelConfigured: isModelConfigured(state.modelSettings) };
 
 function hasChromeRuntime(): boolean {
   return Boolean(globalThis.chrome?.runtime?.sendMessage);
@@ -66,6 +73,55 @@ function saveStoredSessions(sessions: SessionSummary[]): void {
   } catch {
     // Storage can be unavailable in restricted preview contexts; the sidepanel can still run without history persistence.
   }
+}
+
+function loadStoredModelSettings(): ModelSettingsState {
+  const fallback = defaultModelSettings();
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_MODEL_SETTINGS);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<ModelSettingsState>;
+    return {
+      ...fallback,
+      providerBaseUrl: typeof parsed.providerBaseUrl === "string" ? parsed.providerBaseUrl : fallback.providerBaseUrl,
+      apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
+      plannerModel: typeof parsed.plannerModel === "string" ? parsed.plannerModel : "",
+      visionModel: typeof parsed.visionModel === "string" ? parsed.visionModel : "",
+      apiKeyRef: typeof parsed.apiKeyRef === "string" ? parsed.apiKeyRef : fallback.apiKeyRef
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveStoredModelSettings(settings: ModelSettingsState): void {
+  try {
+    localStorage.setItem(STORAGE_KEY_MODEL_SETTINGS, JSON.stringify(settings));
+  } catch {
+    // Settings can still be used in memory when storage is unavailable.
+  }
+}
+
+function loadStoredDetectedModels(): string[] {
+  try {
+    const raw = localStorage.getItem(`${STORAGE_KEY_MODEL_SETTINGS}.models`);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && Boolean(item.trim())) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredDetectedModels(models: string[]): void {
+  try {
+    localStorage.setItem(`${STORAGE_KEY_MODEL_SETTINGS}.models`, JSON.stringify(models));
+  } catch {
+    // Detection results are a convenience cache only.
+  }
+}
+
+function isModelConfigured(settings?: ModelSettingsState): boolean {
+  return Boolean(settings?.providerBaseUrl.trim() && settings.apiKey.trim() && settings.plannerModel.trim());
 }
 
 function buildSessionTitle(timeline: TimelineItem[]): string {
@@ -197,6 +253,12 @@ function paint(): void {
     onSafetyModeChange: (mode) => {
       state = { ...state, safetyMode: mode as SidepanelState["safetyMode"] };
       paint();
+    },
+    onModelSettingChange: (field, value) => {
+      updateModelSetting(field, value);
+    },
+    onDetectModels: () => {
+      void detectModels();
     }
   });
 }
@@ -283,6 +345,93 @@ async function highlightTarget(semanticId: string): Promise<void> {
     appendLocalTimeline({ id: `highlight-${Date.now()}`, title: "目标高亮失败", detail: response.error, tone: "warning" });
     paint();
   }
+}
+
+function updateModelSetting(field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel", value: string): void {
+  const settings = { ...(state.modelSettings ?? defaultModelSettings()), [field]: value };
+  const resetDetection = field === "providerBaseUrl" || field === "apiKey";
+  state = {
+    ...state,
+    modelSettings: settings,
+    modelConfigured: isModelConfigured(settings),
+    modelDetectionStatus: resetDetection ? "idle" : state.modelDetectionStatus,
+    modelDetectionMessage: resetDetection ? undefined : state.modelDetectionMessage,
+    detectedModels: resetDetection ? [] : state.detectedModels
+  };
+  saveStoredModelSettings(settings);
+  if (resetDetection) saveStoredDetectedModels([]);
+  paint();
+}
+
+function modelEndpoint(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/models`;
+}
+
+function extractModelIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object") return [];
+  const data = (payload as { data?: unknown }).data;
+  if (!Array.isArray(data)) return [];
+  const ids = data
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string") return (item as { id: string }).id;
+      return "";
+    })
+    .filter((item) => item.trim());
+  return Array.from(new Set(ids));
+}
+
+async function detectModels(): Promise<void> {
+  const settings = state.modelSettings ?? defaultModelSettings();
+  const providerBaseUrl = settings.providerBaseUrl.trim();
+  const apiKey = settings.apiKey.trim();
+  if (!providerBaseUrl || !apiKey) {
+    state = {
+      ...state,
+      modelDetectionStatus: "error",
+      modelDetectionMessage: "请先填写 API 和 API Key。"
+    };
+    paint();
+    return;
+  }
+
+  state = { ...state, modelDetectionStatus: "checking", modelDetectionMessage: "正在检测模型..." };
+  paint();
+
+  try {
+    const response = await fetch(modelEndpoint(providerBaseUrl), {
+      headers: { Authorization: `Bearer ${apiKey}` }
+    });
+    if (!response.ok) {
+      throw new Error(`模型检测失败：HTTP ${response.status}`);
+    }
+    const models = extractModelIds(await response.json());
+    if (models.length === 0) {
+      throw new Error("没有检测到可用模型。");
+    }
+    const nextSettings: ModelSettingsState = {
+      ...settings,
+      plannerModel: models[0],
+      visionModel: settings.visionModel && models.includes(settings.visionModel) ? settings.visionModel : ""
+    };
+    state = {
+      ...state,
+      modelSettings: nextSettings,
+      modelConfigured: isModelConfigured(nextSettings),
+      detectedModels: models,
+      modelDetectionStatus: "success",
+      modelDetectionMessage: `检测到 ${models.length} 个模型，已选择 ${models[0]}。`
+    };
+    saveStoredModelSettings(nextSettings);
+    saveStoredDetectedModels(models);
+  } catch (error) {
+    state = {
+      ...state,
+      modelDetectionStatus: "error",
+      modelDetectionMessage: error instanceof Error ? error.message : "模型检测失败。"
+    };
+  }
+  paint();
 }
 
 async function copyLog(): Promise<void> {
