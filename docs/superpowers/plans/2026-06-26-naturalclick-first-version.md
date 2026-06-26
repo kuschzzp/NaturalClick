@@ -159,7 +159,7 @@ Responsibility map:
 - Create: `tests/unit/build/manifest.test.ts`
 
 **Interfaces:**
-- Produces: build output in `dist/` with `manifest.json`, `background.js`, `content.js`, `sidepanel.html`, `sidepanel.js`, and `sidepanel.css`.
+- Produces: build output in `naturalclick-extension/` with `manifest.json`, `background.js`, `content.js`, `sidepanel.html`, `sidepanel.js`, and `sidepanel.css`.
 - Produces: npm scripts `build`, `test`, `test:unit`, `test:e2e`, `typecheck`.
 
 - [ ] **Step 1: Write the failing manifest smoke test**
@@ -251,7 +251,7 @@ export default defineConfig({
   publicDir: "public",
   build: {
     emptyOutDir: true,
-    outDir: "dist",
+    outDir: "naturalclick-extension",
     rollupOptions: {
       input: {
         background: "src/background/index.ts",
@@ -442,7 +442,7 @@ Expected: PASS.
 
 Run: `npm run build`
 
-Expected: `dist/manifest.json`, `dist/background.js`, `dist/content.js`, and `dist/sidepanel.html` exist.
+Expected: `naturalclick-extension/manifest.json`, `naturalclick-extension/background.js`, `naturalclick-extension/content.js`, and `naturalclick-extension/sidepanel.html` exist.
 
 - [ ] **Step 7: Commit**
 
@@ -2778,7 +2778,7 @@ import path from "node:path";
 test("built extension content script and sidepanel smoke", async () => {
   execSync("npm run build", { stdio: "inherit" });
 
-  const extensionPath = path.resolve("dist");
+  const extensionPath = path.resolve("naturalclick-extension");
   const fixtureUrl = `file://${path.resolve("tests/fixtures/pages/general.html")}`;
   const userDataDir = mkdtempSync(path.join(tmpdir(), "naturalclick-profile-"));
   const context = await chromium.launchPersistentContext(userDataDir, {
@@ -2792,7 +2792,7 @@ test("built extension content script and sidepanel smoke", async () => {
     await expect(page.locator("h1")).toHaveText("Account dashboard");
 
     const sidepanel = await context.newPage();
-    await sidepanel.goto(`file://${path.resolve("dist/sidepanel.html")}`);
+    await sidepanel.goto(`file://${path.resolve("naturalclick-extension/sidepanel.html")}`);
     await expect(sidepanel.locator("text=NaturalClick")).toBeVisible();
   } finally {
     await context.close();
@@ -2845,7 +2845,7 @@ npm run test:e2e
 npm run build
 \`\`\`
 
-Load the generated \`dist\` folder in \`chrome://extensions\` using "Load unpacked".
+Load the generated \`naturalclick-extension\` folder in \`chrome://extensions\` using "Load unpacked".
 
 ## First-version scope
 

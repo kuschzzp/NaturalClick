@@ -4,7 +4,7 @@ export default defineConfig({
   publicDir: "public",
   build: {
     emptyOutDir: true,
-    outDir: "dist",
+    outDir: "naturalclick-extension",
     rollupOptions: {
       input: {
         background: "src/background/index.ts",
