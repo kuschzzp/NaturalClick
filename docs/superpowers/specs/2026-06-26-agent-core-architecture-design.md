@@ -9,6 +9,9 @@ new branch intentionally removes the previous extension implementation and old
 design notes. The old codebase may explain what failed, but it is not the basis
 for the new design.
 
+Companion detailed design:
+`docs/superpowers/specs/2026-06-26-agent-execution-loop-detailed-design.md`
+
 ## 1. Purpose
 
 NaturalClick should be a Chrome browser operation Agent, not a pile of

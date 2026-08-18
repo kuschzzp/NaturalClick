@@ -6,6 +6,8 @@ export type SemanticCommandType =
   | "ReadContent"
   | "OpenTab"
   | "SwitchTab"
+  | "BrowserNavigation"
+  | "PressKey"
   | "WaitForChange"
   | "AskUser"
   | "FinishTask"
@@ -24,8 +26,14 @@ export interface SemanticCommand {
 }
 
 export type BrowserPrimitive =
+  | { type: "navigate"; url: string }
+  | { type: "open_tab"; url: string; active?: boolean }
+  | { type: "history"; action: "back" | "forward" | "reload" }
+  | { type: "key_press"; key: string }
   | { type: "dom_click"; semanticId: string }
   | { type: "dom_input"; semanticId: string; value: string }
+  | { type: "dom_select_option"; semanticId: string; value: string }
+  | { type: "read_content"; semanticId?: string; query?: string }
   | { type: "scroll"; direction: "up" | "down"; amount: number }
   | { type: "wait"; milliseconds: number }
   | { type: "capture_screenshot" }

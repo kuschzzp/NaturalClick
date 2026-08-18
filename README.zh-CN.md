@@ -6,7 +6,7 @@
 
 NaturalClick 把 Chrome 侧边栏变成一个可检查的浏览器 Agent 工作区。它观察当前页面，整理证据，规划语义命令，在本地 Chrome 中执行动作，验证结果，并保留可追踪的会话记录。
 
-[English](./README.md) · [许可证](./LICENSE) · [可安装扩展目录](./naturalclick-extension) · [核心架构设计](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [侧边栏体验设计](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md)
+[English](./README.md) · [许可证](./LICENSE) · [可安装扩展目录](./naturalclick-extension) · [核心架构设计](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [侧边栏体验设计](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md) · [通用 Agent 升级说明](./docs/superpowers/specs/2026-07-07-universal-agent-browser-upgrade.md)
 
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
 [![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
@@ -201,6 +201,16 @@ Overlay 是用户可视化。
 关闭 Overlay 不会关闭观察、绑定或执行能力。
 ```
 
+## 通用 Agent 升级
+
+当前升级线关注通用浏览器操作可靠性，不做站点专用流程。
+
+- 快速执行路径：显式 URL 跳转，以及唯一精确可见的低风险控件，可以在调用 Planner 模型之前执行。
+- Page Atlas 与隐藏句柄：观察结果会生成紧凑 atlas 和隐藏可绑定句柄，执行不依赖可见页面标记。
+- 模型配置中心：Provider URL、API Key、检测到的模型列表、Planner model、可选 Vision model 都会作为结构化设置保存。
+- Debug Overlay 默认不干扰：页面标记只用于可视化，`Off` 会移除 overlay root，视觉截图前也应清理可见标记。
+- 诊断日志：遇到识别、模型、停止或执行速度问题时，可使用侧边栏顶部工具栏复制或下载执行日志。
+
 ## 模型配置
 
 第一版本使用一个全局 OpenAI-compatible Provider。
@@ -289,8 +299,10 @@ npm run test:all
 - Event store 行为。
 - Agent runtime 状态流转。
 - 命令绑定。
+- fast path 性能护栏。
 - 上下文组装和压缩。
 - 观察和证据处理。
+- Page Atlas fixture 识别。
 - Policy 与 consent 行为。
 - Vision 结果归一化。
 - 验证和记忆更新。

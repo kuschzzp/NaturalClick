@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createEventId, createStepId } from "../../../src/shared/ids";
 import { MemoryEventStore } from "../../../src/core/events/memory-event-store";
 import { StateReducer } from "../../../src/core/events/reducer";
+import { deriveSessionExecutionHealth, shouldSuspendRecoveredSession } from "../../../src/core/events/runtime-health";
 import type { AgentEvent } from "../../../src/core/events/events";
 
 function event(type: AgentEvent["type"], payload: Record<string, unknown> = {}): AgentEvent {
@@ -43,5 +44,16 @@ describe("event store and reducer", () => {
 
     expect(state.runtimeStatus).toBe("waiting");
     expect(state.pendingConsent?.riskLevel).toBe("medium");
+  });
+
+  it("detects sessions that were interrupted while still running", () => {
+    const runningEvents = [event("TaskStarted"), event("ModelCallStarted")];
+    const suspendedEvents = [...runningEvents, event("RuntimeSuspended", { reason: "background_recovered_without_controller" })];
+
+    expect(deriveSessionExecutionHealth(runningEvents)).toBe("running");
+    expect(shouldSuspendRecoveredSession(runningEvents)).toBe(true);
+    expect(deriveSessionExecutionHealth(suspendedEvents)).toBe("suspended");
+    expect(shouldSuspendRecoveredSession(suspendedEvents)).toBe(false);
+    expect(StateReducer.reduce(undefined, suspendedEvents).runtimeStatus).toBe("paused");
   });
 });

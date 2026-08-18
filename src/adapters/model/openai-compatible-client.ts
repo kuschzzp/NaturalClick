@@ -1,4 +1,5 @@
 import type { GlobalModelConfig } from "../../core/model/config";
+import { extractOpenAICompatibleText, parseLooseJson } from "../../core/model/openai-compatible";
 import type { GroundVisualTargetRequest, VisualTargetCandidate } from "../../core/vision/vision";
 import { parseVisualTargetCandidates } from "../../core/vision/vision";
 
@@ -12,27 +13,6 @@ interface ChatCompletionResponse {
 
 function endpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
-}
-
-function extractText(response: ChatCompletionResponse): string {
-  const content = response.choices?.[0]?.message?.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.map((part) => part.text ?? "").join("\n");
-  return "";
-}
-
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-    if (!match) return undefined;
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      return undefined;
-    }
-  }
 }
 
 export class OpenAICompatibleClient {
@@ -92,6 +72,6 @@ export class OpenAICompatibleClient {
 
     if (!response.ok) return [];
     const json = (await response.json()) as ChatCompletionResponse;
-    return parseVisualTargetCandidates(parseJson(extractText(json)));
+    return parseVisualTargetCandidates(parseLooseJson(extractOpenAICompatibleText(json)));
   }
 }

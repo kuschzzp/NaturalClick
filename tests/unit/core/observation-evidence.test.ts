@@ -102,6 +102,148 @@ describe("page observation and evidence", () => {
     expect(focused.textBlocks.map((block) => block.text)).toContain("Security settings");
   });
 
+  it("keeps readable text in default observation when controls fill the candidate budget", () => {
+    document.body.innerHTML = `
+      <main>
+        <h1>南京天气搜索结果</h1>
+        <p>南京今日多云，气温 22 到 29 度。</p>
+        ${Array.from({ length: 20 }, (_, index) => `<button>候选按钮 ${index}</button>`).join("")}
+      </main>
+    `;
+
+    const page = observePage(document, { candidateLimit: 5 });
+
+    expect(page.controls).toHaveLength(5);
+    expect(page.textBlocks.map((block) => block.text)).toEqual(expect.arrayContaining(["南京天气搜索结果", "南京今日多云，气温 22 到 29 度。"]));
+    expect(page.observation).toMatchObject({
+      returnedControls: 5,
+      returnedTextBlocks: 2
+    });
+  });
+
+  it("narrows observation results by query and sidebar scope while preserving bindable controls", () => {
+    document.body.innerHTML = `
+      <aside class="app-sidebar">
+        <nav aria-label="主导航">
+          <a href="/home">首页</a>
+          <a href="/orders">订单管理</a>
+          <a href="/customers">客户管理</a>
+        </nav>
+      </aside>
+      <main>
+        ${Array.from({ length: 40 }, (_, index) => `<button>无关按钮 ${index}</button>`).join("")}
+      </main>
+    `;
+
+    const page = observePage(document, {
+      request: {
+        reason: "Need order menu",
+        query: "订单 管理",
+        scope: "sidebar",
+        preferredRoles: ["link", "menuitem"]
+      },
+      candidateLimit: 2,
+      observationRound: 2
+    });
+
+    expect(page.controls.map((control) => control.label)).toEqual(["订单管理", "客户管理"]);
+    expect(page.controls[0]?.locatorHints.length).toBeGreaterThan(0);
+    expect(page.observation).toMatchObject({
+      query: "订单 管理",
+      scope: "sidebar",
+      candidateLimit: 2,
+      returnedControls: 2
+    });
+  });
+
+  it("includes form fields when form_fields expansion is requested", () => {
+    document.body.innerHTML = `
+      <main>
+        <form aria-label="客户资料">
+          <label for="name">客户名称</label>
+          <input id="name" />
+          <label for="phone">手机号</label>
+          <input id="phone" />
+          <button type="submit">保存客户</button>
+        </form>
+        <button>返回</button>
+      </main>
+    `;
+
+    const page = observePage(document, {
+      request: {
+        reason: "Need customer form",
+        query: "客户",
+        scope: "form",
+        expand: ["form_fields"],
+        preferredRoles: ["textbox", "button"]
+      },
+      candidateLimit: 5,
+      observationRound: 2
+    });
+
+    expect(page.controls.map((control) => control.label)).toEqual(["客户名称", "手机号", "保存客户"]);
+    expect(page.forms[0]?.label).toBe("客户资料");
+  });
+
+  it("returns table row actions when tables expansion matches table text", () => {
+    document.body.innerHTML = `
+      <main>
+        <table>
+          <thead><tr><th>订单号</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>ORD-1001</td><td><button>查看</button></td></tr>
+            <tr><td>ORD-1002</td><td><button>取消</button></td></tr>
+          </tbody>
+        </table>
+        <button>刷新</button>
+      </main>
+    `;
+
+    const page = observePage(document, {
+      request: {
+        reason: "Need order row action",
+        query: "ORD-1002",
+        scope: "main_content",
+        expand: ["tables"],
+        preferredRoles: ["button"]
+      },
+      candidateLimit: 4,
+      observationRound: 2
+    });
+
+    expect(page.controls.map((control) => control.label)).toContain("取消");
+  });
+
+  it("returns validation feedback and invalid fields when validation expansion is requested", () => {
+    document.body.innerHTML = `
+      <main>
+        <form aria-label="登录">
+          <label for="email">邮箱</label>
+          <input id="email" aria-invalid="true" />
+          <div role="alert">邮箱不能为空</div>
+          <button>登录</button>
+        </form>
+      </main>
+    `;
+
+    const page = observePage(document, {
+      request: {
+        reason: "Need validation detail",
+        query: "邮箱",
+        scope: "form",
+        expand: ["validation_feedback", "form_fields"],
+        preferredRoles: ["textbox", "button"]
+      },
+      candidateLimit: 5,
+      observationRound: 2
+    });
+
+    expect(page.feedback).toContain("邮箱不能为空");
+    expect(page.textBlocks.map((block) => block.text)).toContain("邮箱不能为空");
+    expect(page.controls.map((control) => control.label)).toContain("邮箱");
+  });
+
   it("emits typed evidence from page models and supports explicit evidence shapes", () => {
     document.body.innerHTML = `<button id="settings" aria-label="Settings">Gear</button>`;
     const page = observePage(document);

@@ -1,3 +1,7 @@
+import type { NeedMoreObservationRequest, ObservationExpansion, ObservationScope } from "../model/contracts";
+import type { InteractiveElementRecord } from "./interactive-index";
+import type { PageAtlas } from "./page-atlas";
+
 export type VisibilityState = "visible" | "hidden";
 
 export interface LocatorHint {
@@ -12,6 +16,14 @@ export interface ElementBounds {
   width: number;
   height: number;
 }
+
+export interface ElementPoint {
+  x: number;
+  y: number;
+}
+
+export type OcclusionState = "clear" | "covered" | "offscreen" | "unknown";
+export type ExpandedState = "expanded" | "collapsed" | "unknown";
 
 export interface PageIdentity {
   url: string;
@@ -40,12 +52,18 @@ export interface ControlCandidate {
   valueState?: "empty" | "filled" | "checked" | "unchecked" | "mixed" | "selected";
   checked?: boolean;
   disabled: boolean;
+  focused?: boolean;
   required: boolean;
   validation?: string;
   formRef?: string;
   regionRef?: string;
+  parentRef?: string;
+  childRefs?: string[];
   visibility: VisibilityState;
   bounds?: ElementBounds;
+  clickablePoint?: ElementPoint;
+  occlusion?: OcclusionState;
+  expandedState?: ExpandedState;
   interactionHints: string[];
   locatorHints: LocatorHint[];
   confidence: number;
@@ -92,6 +110,21 @@ export interface RiskSignal {
   confidence: number;
 }
 
+export interface ObservationRetrievalMetadata {
+  request?: NeedMoreObservationRequest;
+  query?: string;
+  scope?: ObservationScope;
+  expand?: ObservationExpansion[];
+  candidateLimit: number;
+  totalControls: number;
+  returnedControls: number;
+  omittedControls: number;
+  totalTextBlocks: number;
+  returnedTextBlocks: number;
+  omittedTextBlocks: number;
+  strategy: "default_ranked" | "request_ranked" | "fallback_full_snapshot";
+}
+
 export interface PageModel {
   pageIdentity: PageIdentity;
   viewport: ViewportSnapshot;
@@ -102,4 +135,9 @@ export interface PageModel {
   readableContent: string[];
   riskSignals: RiskSignal[];
   capturedAt: number;
+  observation?: ObservationRetrievalMetadata;
+  atlas?: PageAtlas;
+  atlasText?: string;
+  interactiveIndex?: InteractiveElementRecord[];
+  interactiveIndexText?: string;
 }

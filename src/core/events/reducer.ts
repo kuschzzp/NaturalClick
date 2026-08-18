@@ -1,4 +1,5 @@
 import type { AgentEvent } from "./events";
+import { deriveSessionExecutionHealth } from "./runtime-health";
 import type { TaskRuntimeState, TaskSnapshot } from "./snapshot";
 
 function initialFrom(event: AgentEvent): TaskRuntimeState {
@@ -46,6 +47,12 @@ export class StateReducer {
         state.pendingConsent = undefined;
         state.runtimeStatus = "running";
       }
+      if (event.type === "RuntimeSuspended") {
+        state.runtimeStatus = "paused";
+      }
+      if (event.type === "RuntimeResumed") {
+        state.runtimeStatus = "running";
+      }
       if (event.type === "VerificationProduced" && event.payload.status === "failed") {
         state.failedAttempts = [...state.failedAttempts, event.id];
       }
@@ -58,6 +65,10 @@ export class StateReducer {
       if (event.type === "TaskStopped") {
         state.runtimeStatus = "stopped";
       }
+    }
+
+    if (state && state.runtimeStatus === "running" && deriveSessionExecutionHealth(events) === "suspended") {
+      state.runtimeStatus = "paused";
     }
 
     return state ?? {

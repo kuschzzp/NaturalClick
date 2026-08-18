@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NaturalClick Agent",
-  "version": "0.1.0",
+  "version": "0.1.191",
   "description": "A DOM-first, vision-assisted browser operation Agent.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -30,8 +30,14 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["content-loader.js"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content.js", "chunks/*.js"],
+      "matches": ["<all_urls>"]
     }
   ]
 }

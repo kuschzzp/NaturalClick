@@ -73,3 +73,5 @@ export interface GlobalModelConfig {
   logging: ModelLoggingConfig;
   privacy: ModelPrivacyConfig;
 }
+
+export { createGlobalModelConfigFromRuntime } from "./model-config-service";

@@ -50,6 +50,24 @@ describe("policy engine", () => {
     expect(decision.requiredUserPrompt).toContain("submit");
   });
 
+  it("allows explicit low-risk search submits in balanced mode", () => {
+    const searchSubmit: SemanticCommand = {
+      ...command("SubmitCurrentForm", "Search"),
+      inputs: { intent: "search", query: "customers" },
+      expectedOutcome: "search results are shown",
+      riskHint: "low"
+    };
+
+    const decision = evaluatePolicy(searchSubmit, {
+      safetyMode: "balanced",
+      origin: "https://example.test",
+      pageIdentity: "Fixture"
+    });
+
+    expect(decision.status).toBe("allow");
+    expect(decision.riskLevel).toBe("low");
+  });
+
   it("hard-blocks payment even in experimental full auto", () => {
     const decision = evaluatePolicy(command("ActivateTarget", "Pay now"), {
       safetyMode: "experimental_full_auto",

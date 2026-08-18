@@ -23,7 +23,7 @@ export interface PolicyDecision {
 }
 
 const sensitiveInputKeys = ["password", "token", "secret", "apiKey", "creditCard", "cardNumber", "cvv", "cvc"];
-const highRiskCommandTypes = new Set<SemanticCommand["type"]>(["SubmitCurrentForm", "NavigateTo", "OpenTab"]);
+const highRiskCommandTypes = new Set<SemanticCommand["type"]>(["NavigateTo", "OpenTab"]);
 const hardBlockPatterns = [
   /\bpay\b/i,
   /\bpayment\b/i,
@@ -50,11 +50,17 @@ function hardBlockReason(command: SemanticCommand): string | undefined {
 }
 
 function classifyRisk(command: SemanticCommand): Exclude<PolicyRiskLevel, "hard_block"> {
+  if (isLowRiskSearchSubmit(command)) return "low";
   if (command.riskHint === "high") return "high";
   if (command.riskHint === "medium") return "medium";
+  if (command.type === "SubmitCurrentForm") return "medium";
   if (highRiskCommandTypes.has(command.type)) return "medium";
   if (command.type === "FillField" && redactionsFor(command).length > 0) return "high";
   return "low";
+}
+
+function isLowRiskSearchSubmit(command: SemanticCommand): boolean {
+  return command.type === "SubmitCurrentForm" && command.inputs.intent === "search" && command.riskHint === "low";
 }
 
 function promptFor(command: SemanticCommand, reason: string): string {
@@ -101,7 +107,7 @@ export function evaluatePolicy(command: SemanticCommand, context: PolicyContext)
   }
 
   if (context.safetyMode === "balanced") {
-    if (riskLevel === "low" && command.type !== "SubmitCurrentForm") {
+    if (riskLevel === "low" && (command.type !== "SubmitCurrentForm" || isLowRiskSearchSubmit(command))) {
       return decision("allow", riskLevel, ["Balanced mode allows low-risk commands without extra confirmation."], redactions);
     }
     const reason = "Balanced mode requires consent for submit, navigation, or medium-risk actions.";

@@ -6,7 +6,7 @@
 
 NaturalClick turns the Chrome side panel into an inspectable browser-agent workspace. It observes the active page, builds evidence, plans semantic commands, executes local Chrome actions, verifies the result, and keeps a traceable session record.
 
-[简体中文](./README.zh-CN.md) · [License](./LICENSE) · [Installable Extension](./naturalclick-extension) · [Architecture Spec](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [Side Panel Spec](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md)
+[简体中文](./README.zh-CN.md) · [License](./LICENSE) · [Installable Extension](./naturalclick-extension) · [Architecture Spec](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [Side Panel Spec](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md) · [Universal Agent Upgrade](./docs/superpowers/specs/2026-07-07-universal-agent-browser-upgrade.md)
 
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
 [![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
@@ -201,6 +201,16 @@ Overlay is user visualization.
 Turning overlay off must not disable observation, binding, or execution.
 ```
 
+## Universal Agent Upgrade
+
+The current upgrade line focuses on general browser-operation reliability instead of site-specific flows.
+
+- Fast execution path: explicit URL navigation and one exact visible low-risk control can execute before a planner model call.
+- Page Atlas and hidden handles: observation produces a compact atlas and hidden bindable handles, so execution does not depend on visible page markers.
+- Model configuration center: provider URL, API key, detected model list, planner model, and optional vision model are saved as structured settings.
+- Debug overlay default-off behavior: page markers are visualization only, and `Off` removes the overlay root before vision screenshots.
+- Diagnostic logs: use the side panel toolbar's copy or download log actions when reporting recognition, model, stop, or execution-speed issues.
+
 ## Model Configuration
 
 The first version uses one global OpenAI-compatible provider.
@@ -291,8 +301,10 @@ The current test suite covers:
 - Event store behavior.
 - Agent runtime state transitions.
 - Command binding.
+- Fast-path performance guardrails.
 - Context assembly and compression.
 - Observation and evidence handling.
+- Page Atlas fixture recognition.
 - Policy and consent behavior.
 - Vision result normalization.
 - Verification and memory updates.

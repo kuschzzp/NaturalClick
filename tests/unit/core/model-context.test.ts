@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assemblePlannerContext } from "../../../src/core/context/assembler";
+import { elideStaleObservations } from "../../../src/core/context/stale-observation-elision";
 import { resolveRoleModel } from "../../../src/core/model/role-router";
 import { validatePlannerDecision } from "../../../src/core/model/contracts";
 import type { GlobalModelConfig } from "../../../src/core/model/config";
@@ -97,5 +98,19 @@ describe("model role routing and context assembly", () => {
     expect(context.candidates).toHaveLength(2);
     expect(context.evidence).toHaveLength(3);
     expect(context.schema.type).toBe("PlannerDecision");
+  });
+
+  it("elides old interactive indexes but keeps the latest one", () => {
+    const history = [
+      { role: "user", content: '<interactive_index total="100">old</interactive_index>' },
+      { role: "assistant", content: "ok" },
+      { role: "user", content: '<interactive_index total="3">latest</interactive_index>' }
+    ];
+
+    const elided = elideStaleObservations(history);
+
+    expect(JSON.stringify(elided)).toContain("[stale interactive index elided");
+    expect(JSON.stringify(elided)).toContain("latest");
+    expect(JSON.stringify(elided)).not.toContain(">old<");
   });
 });

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Iframe Form Fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>供应商资料</h1>
+      <iframe
+        title="供应商表单"
+        srcdoc='
+          <!doctype html>
+          <html lang="zh-CN">
+            <body>
+              <form id="supplier-form">
+                <label for="supplier-name">供应商名称</label>
+                <input id="supplier-name" name="supplierName" />
+                <button type="submit">保存</button>
+              </form>
+            </body>
+          </html>
+        '
+      ></iframe>
+    </main>
+  </body>
+</html>
