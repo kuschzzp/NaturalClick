@@ -1,6 +1,8 @@
 interface ChatCompletionChoice {
   delta?: ChatMessageLike;
   message?: ChatMessageLike;
+  text?: unknown;
+  finish_reason?: unknown;
 }
 
 interface ChatCompletionLike {
@@ -12,6 +14,7 @@ interface ChatMessageLike {
   reasoning?: string | Array<{ text?: string }>;
   reasoning_content?: string | Array<{ text?: string }>;
   reasoningContent?: string | Array<{ text?: string }>;
+  refusal?: string;
   function_call?: {
     arguments?: unknown;
   };
@@ -76,6 +79,17 @@ export function extractOpenAICompatibleReasoningText(payload: unknown): string {
   const choice = (payload as ChatCompletionLike | undefined)?.choices?.[0];
   const message = choice?.delta ?? choice?.message;
   return contentText(message?.reasoning_content) || contentText(message?.reasoning) || contentText(message?.reasoningContent);
+}
+
+export function extractOpenAICompatibleCompletionText(payload: unknown): string {
+  const choice = (payload as ChatCompletionLike | undefined)?.choices?.[0];
+  return typeof choice?.text === "string" ? choice.text : "";
+}
+
+export function extractOpenAICompatibleRefusal(payload: unknown): string {
+  const choice = (payload as ChatCompletionLike | undefined)?.choices?.[0];
+  const message = choice?.delta ?? choice?.message;
+  return typeof message?.refusal === "string" ? message.refusal : "";
 }
 
 export function extractOpenAICompatibleToolCallDeltas(payload: unknown): OpenAICompatibleToolCallDelta[] {

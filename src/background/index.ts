@@ -6,7 +6,8 @@ import { ChromeStorageEventStore } from "../adapters/chrome/chrome-storage-event
 import { ChromeSessionMemory } from "../adapters/chrome/chrome-session-memory";
 import { createChromeModelConfigStore } from "../adapters/chrome/model-config-store";
 import { runtimeEventBus } from "../adapters/chrome/runtime-event-bus";
-import { captureVisibleTabScreenshot, getActiveTab, sendActiveTabMessage } from "../adapters/chrome/tabs";
+import { ModelProtocolHttpError, requestPlannerProtocolTurn, type PlannerModelMessage } from "../adapters/model/planner-model-client";
+import { captureTabScreenshot, getActiveTab, getTab, selectNewTaskChildTab, sendActiveTabMessage, sendTabMessageTo } from "../adapters/chrome/tabs";
 import { defaultCapabilitySettings, resolveCapabilitySettings, type CapabilitySettingsState } from "../core/capabilities/settings";
 import { defaultCapabilityToolGroups, toolGroupsForCapabilitySettings, toolRuntimeCapabilitiesForSettings } from "../core/capabilities/registry";
 import { sanitizeFileAttachmentContexts, stripGeneratedArtifactContent, type FileAttachmentContext } from "../core/capabilities/file-artifacts";
@@ -16,10 +17,11 @@ import { assemblePlannerPageContext } from "../core/context/page-context-assembl
 import { deriveSessionExecutionHealth, shouldSuspendRecoveredSession } from "../core/events/runtime-health";
 import type { GlobalModelConfig } from "../core/model/config";
 import { createModelConfigService } from "../core/model/model-config-service";
-import { extractOpenAICompatibleText, extractOpenAICompatibleToolCalls, parseLooseJson, type OpenAICompatibleToolCall } from "../core/model/openai-compatible";
-import type { NeedMoreObservationRequest, PlannerDecision } from "../core/model/contracts";
-import type { PlannerTurn } from "../core/model/contracts";
-import { readOpenAICompatibleStreamTurn } from "../core/model/streaming-client";
+import { parseLooseJson, type OpenAICompatibleToolCall } from "../core/model/openai-compatible";
+import { validatePlannerTurn, type NeedMoreObservationRequest, type PlannerDecision, type PlannerTurn } from "../core/model/contracts";
+import { expandedPlannerOutputBudget, plannerOutputBudget, protocolCandidates, type ModelStreamProgress, type ModelTurnResult, type ResolvedModelApiProtocol } from "../core/model/model-protocol";
+import { plannerResponseJsonSchema } from "../core/model/planner-schema";
+import { PlannerTimeoutError, plannerTimeoutPolicy, remainingPlannerBudget, withPlannerRequestTimeout, type PlannerTimeoutPolicy } from "../core/model/planner-timeout";
 import type { PageModel } from "../core/observation/page-model";
 import type { ConsentScope } from "../core/policy/consent";
 import type { SafetyMode } from "../core/policy/policy";
@@ -36,7 +38,6 @@ import {
   selectPlannerNativeTools,
   shouldRetryPlannerRequestWithoutTools
 } from "../core/runtime/planner-native-tools";
-import { toOpenAIChatTools } from "../core/tools/openai-tool-schema";
 import type { ToolDefinition, ToolGroup, ToolResult, ToolRuntimeCapabilities } from "../core/tools/tool";
 import { executeRegisteredTool, type CustomSearchRequest, type LoadToolGroupsResult, type ToolObserveOptions } from "../core/tools/tool-executor";
 import { createDefaultToolRegistry } from "../core/tools/tool-registry";
@@ -60,7 +61,17 @@ const skillStore = new ChromeSkillStore();
 const artifactStore = new ChromeArtifactStore();
 const modelConfigService = createModelConfigService(createChromeModelConfigStore());
 const toolRegistry = createDefaultToolRegistry();
-let activeSession: { sessionId: string; taskId: string } | undefined;
+const resolvedPlannerProtocols = new Map<string, ResolvedModelApiProtocol>();
+interface ActiveSessionRef {
+  sessionId: string;
+  taskId: string;
+  targetTabId?: number;
+  targetWindowId?: number;
+  targetTabUrl?: string;
+  targetTabTitle?: string;
+}
+
+let activeSession: ActiveSessionRef | undefined;
 let activeController: ExecutionController | undefined;
 let activeOverlayMode: OverlayMode = "Off";
 let activeCapabilitySettings: CapabilitySettingsState = defaultCapabilitySettings();
@@ -115,21 +126,70 @@ async function appendEvent(event: AgentEvent): Promise<void> {
   if (stoppedSessionIds.has(event.sessionId) && event.type !== "TaskStopped") return;
   await eventStore.append(event);
   if (!detachedSessionIds.has(event.sessionId)) {
-    activeSession = { sessionId: event.sessionId, taskId: event.taskId };
+    activeSession = activeSession?.sessionId === event.sessionId && activeSession.taskId === event.taskId
+      ? { ...activeSession, sessionId: event.sessionId, taskId: event.taskId }
+      : { sessionId: event.sessionId, taskId: event.taskId };
     void persistActiveSession(activeSession).catch(() => undefined);
     runtimeEventBus.broadcast(event);
     void syncOverlayForEvent(event).catch(() => undefined);
   }
 }
 
-function isSessionRef(value: unknown): value is { sessionId: string; taskId: string } {
+function isSessionRef(value: unknown): value is ActiveSessionRef {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return typeof record.sessionId === "string" && Boolean(record.sessionId) && typeof record.taskId === "string" && Boolean(record.taskId);
+  return (
+    typeof record.sessionId === "string" &&
+    Boolean(record.sessionId) &&
+    typeof record.taskId === "string" &&
+    Boolean(record.taskId) &&
+    (record.targetTabId === undefined || typeof record.targetTabId === "number") &&
+    (record.targetWindowId === undefined || typeof record.targetWindowId === "number")
+  );
 }
 
-async function persistActiveSession(session: { sessionId: string; taskId: string }): Promise<void> {
+async function persistActiveSession(session: ActiveSessionRef): Promise<void> {
   await chrome.storage.local.set({ [ACTIVE_SESSION_STORAGE_KEY]: session });
+}
+
+function tabTarget(tab: chrome.tabs.Tab): Pick<ActiveSessionRef, "targetTabId" | "targetWindowId" | "targetTabUrl" | "targetTabTitle"> | undefined {
+  if (tab.id === undefined) return undefined;
+  return {
+    targetTabId: tab.id,
+    targetWindowId: tab.windowId,
+    targetTabUrl: tab.url,
+    targetTabTitle: tab.title
+  };
+}
+
+async function bindActiveTaskToTab(tab: chrome.tabs.Tab): Promise<boolean> {
+  const target = tabTarget(tab);
+  if (!activeSession || !target) return false;
+  activeSession = { ...activeSession, ...target };
+  await persistActiveSession(activeSession);
+  return true;
+}
+
+async function resolveTaskTab(rebindMissing = false): Promise<chrome.tabs.Tab | undefined> {
+  const targetTabId = activeSession?.targetTabId;
+  if (targetTabId !== undefined) {
+    const target = await getTab(targetTabId);
+    if (target) return target;
+  }
+  if (!rebindMissing) return undefined;
+  const activeTab = await getActiveTab();
+  if (!activeTab || !(await bindActiveTaskToTab(activeTab))) return undefined;
+  return activeTab;
+}
+
+async function sendTaskTabMessage<TResponse = unknown>(message: NaturalClickRequest): Promise<NaturalClickResponse<TResponse>> {
+  const targetTabId = activeSession?.targetTabId;
+  if (targetTabId === undefined) return sendActiveTabMessage<TResponse>(message);
+  const response = await sendTabMessageTo<TResponse>(targetTabId, message);
+  if (!response.ok && response.error === "task_tab_not_found") {
+    await suspendTaskForClosedTab(targetTabId);
+  }
+  return response;
 }
 
 async function clearPersistedActiveSession(): Promise<void> {
@@ -545,7 +605,7 @@ async function observeActivePage(
   options?: Partial<ObservePageRuntimeOptions> & Pick<ToolObserveOptions, "mode">,
   syncOverlay = true
 ): Promise<PageModel> {
-  const response = await sendActiveTabMessage<PageModel>({
+  const response = await sendTaskTabMessage<PageModel>({
     type: "OBSERVE_PAGE",
     observationRequest,
     observationRound: options?.observationRound,
@@ -559,7 +619,7 @@ async function observeActivePage(
     }
     return response.data;
   }
-  return fallbackPageModel(await getActiveTab(), response.error);
+  return fallbackPageModel(await resolveTaskTab(false), response.error);
 }
 
 async function observeActivePageForTool(options?: ToolObserveOptions): Promise<PageModel> {
@@ -576,7 +636,7 @@ async function observeActivePageForTool(options?: ToolObserveOptions): Promise<P
 
 async function syncOverlayForPage(page: PageModel): Promise<void> {
   if (activeOverlayMode === "Off") return;
-  await sendActiveTabMessage({
+  await sendTaskTabMessage({
     type: "SET_OVERLAY_MODE",
     mode: activeOverlayMode,
     targets: overlayTargetsFromPage(page, { currentTargetId: currentOverlayTargetId })
@@ -590,7 +650,7 @@ async function syncOverlayForEvent(event: AgentEvent): Promise<void> {
   await syncOverlayForPage(lastObservedPage);
 }
 
-function modelConfig(settings: RuntimeModelSettings, overrides: { supportsToolUse?: boolean } = {}): GlobalModelConfig {
+function modelConfig(settings: RuntimeModelSettings, overrides: { supportsToolUse?: boolean; maxOutputTokens?: number } = {}): GlobalModelConfig {
   return {
     provider: {
       baseUrl: settings.providerBaseUrl,
@@ -609,10 +669,10 @@ function modelConfig(settings: RuntimeModelSettings, overrides: { supportsToolUs
       supportsVisionInput: Boolean(settings.visionModel),
       supportsReasoningSummary: true,
       maxContextTokens: 32000,
-      maxOutputTokens: 2200
+      maxOutputTokens: overrides.maxOutputTokens ?? 12000
     },
     runtime: {
-      planner: { requestTimeoutMs: 60000, firstTokenTimeoutMs: 30000, maxRetries: 0 },
+      planner: { requestTimeoutMs: 120000, firstTokenTimeoutMs: 30000, maxRetries: 0 },
       vision: { requestTimeoutMs: 60000, firstTokenTimeoutMs: 30000, maxRetries: 0 },
       verifier: { requestTimeoutMs: 60000, firstTokenTimeoutMs: 30000, maxRetries: 0 },
       summarizer: { requestTimeoutMs: 60000, firstTokenTimeoutMs: 30000, maxRetries: 0 }
@@ -622,7 +682,7 @@ function modelConfig(settings: RuntimeModelSettings, overrides: { supportsToolUs
       visionMaxInputTokens: 12000,
       verifierMaxInputTokens: 12000,
       summarizerMaxInputTokens: 12000,
-      reservedOutputTokens: 2200,
+      reservedOutputTokens: overrides.maxOutputTokens ?? 12000,
       evidenceLimit: 20,
       recentEventLimit: 20,
       observationCandidateLimit: 80,
@@ -659,25 +719,7 @@ function abortErrorReason(error: unknown, runtimeSignal?: AbortSignal): string {
   return String(error);
 }
 
-type PlannerChatMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string }
-  | { role: "assistant"; content: string | null; tool_calls?: PlannerAssistantToolCall[] }
-  | { role: "tool"; tool_call_id: string; content: string };
-
-interface PlannerAssistantToolCall {
-  id: string;
-  type: "function";
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-interface PlannerModelTurnResponse {
-  text: string;
-  toolCalls: OpenAICompatibleToolCall[];
-}
+type PlannerChatMessage = PlannerModelMessage;
 
 type PlannerErrorWithMetrics = Error & { plannerMetrics?: PlannerPortMetrics };
 
@@ -756,126 +798,186 @@ async function executePlannerNativeToolCall(call: OpenAICompatibleToolCall, tool
 async function requestPlannerModelTurn(input: {
   stepId: string;
   settings: RuntimeModelSettings;
-  config: GlobalModelConfig;
-  endpoint: string;
-  signal: AbortSignal;
+  protocol: ResolvedModelApiProtocol;
+  capabilities: {
+    structuredOutputs: boolean;
+    jsonMode: boolean;
+    strictTools: boolean;
+    reasoning: boolean;
+  };
+  maxOutputTokens: number;
+  stream: boolean;
+  parentSignal?: AbortSignal;
+  timeoutPolicy: PlannerTimeoutPolicy;
+  totalDeadlineAt: number;
+  totalStartedAt: number;
   messages: PlannerChatMessage[];
   nativeTools: ToolDefinition[];
   nativeToolRound: number;
-}): Promise<PlannerModelTurnResponse> {
+  recoveryAttempt?: number;
+  stage?: string;
+}): Promise<ModelTurnResult> {
   const startedAt = Date.now();
+  let stage = input.stage ?? "connecting";
+  const endpoint = `${input.settings.providerBaseUrl.replace(/\/+$/, "")}/${input.protocol === "responses" ? "responses" : input.protocol === "chat_completions" ? "chat/completions" : "completions"}`;
   await appendBackgroundStepEvent(input.stepId, "ModelCallStarted", {
     role: "planner",
     model: input.settings.plannerModel,
-    endpoint: input.endpoint,
+    endpoint,
+    protocol: input.protocol,
+    maxOutputTokens: input.maxOutputTokens,
+    reasoningEffort: input.capabilities.reasoning ? "low" : undefined,
     nativeTools: input.nativeTools.map((tool) => tool.name),
-    nativeToolRound: input.nativeToolRound
+    nativeToolRound: input.nativeToolRound,
+    recoveryAttempt: input.recoveryAttempt ?? 0,
+    stage,
+    firstResponseTimeoutMs: input.timeoutPolicy.firstResponseTimeoutMs,
+    streamIdleTimeoutMs: input.timeoutPolicy.streamIdleTimeoutMs,
+    requestTimeoutMs: input.timeoutPolicy.requestTimeoutMs,
+    totalTimeoutMs: input.timeoutPolicy.totalTimeoutMs
   });
-
-  const response = await fetch(input.endpoint, {
-    method: "POST",
-    signal: input.signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${input.settings.apiKey}`
-    },
-    body: JSON.stringify({
+  let pendingChunk = "";
+  let pendingContentChunk = "";
+  let pendingReasoningChunk = "";
+  let pendingToolArgumentsChunk = "";
+  let pendingStreamKinds = new Set<string>();
+  let progressEventIndex = 0;
+  let latestReceivedChars = 0;
+  let latestToolArgumentsChars = 0;
+  let latestToolCallNames: string[] = [];
+  let lastToolFingerprint = "";
+  let lastProgressAt = Date.now();
+  const progressTiming = (): Record<string, number> => ({
+    elapsedMs: Math.max(0, Date.now() - input.totalStartedAt),
+    requestElapsedMs: Math.max(0, Date.now() - startedAt),
+    remainingBudgetMs: remainingPlannerBudget(input.totalDeadlineAt)
+  });
+  const emitStage = async (): Promise<void> => {
+    await appendBackgroundStepEvent(input.stepId, "ModelCallProgress", {
+      role: "planner",
       model: input.settings.plannerModel,
-      temperature: 0.2,
-      max_tokens: input.config.capabilities.maxOutputTokens,
-      stream: input.config.capabilities.supportsStreaming,
-      messages: input.messages,
-      ...(input.nativeTools.length
-        ? {
-            tools: toOpenAIChatTools(input.nativeTools),
-            tool_choice: "auto"
-          }
-        : {})
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error(`planner_http_${response.status}`);
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  let text = "";
-  let toolCalls: OpenAICompatibleToolCall[] = [];
-  if (response.body && contentType.includes("text/event-stream")) {
-    let pendingChunk = "";
-    let pendingContentChunk = "";
-    let pendingReasoningChunk = "";
-    let pendingToolArgumentsChunk = "";
-    let pendingStreamKinds = new Set<string>();
-    let progressEventIndex = 0;
-    let latestReceivedChars = 0;
-    let latestToolArgumentsChars = 0;
-    let latestToolCallNames: string[] = [];
-    let lastToolFingerprint = "";
-    let lastProgressAt = Date.now();
-    const flushProgress = async (force = false): Promise<void> => {
-      const now = Date.now();
-      const toolFingerprint = latestToolCallNames.join("|");
-      const hasVisibleProgress = pendingChunk.length > 0 || toolFingerprint !== lastToolFingerprint;
-      if (!hasVisibleProgress) return;
-      if (!force && now - lastProgressAt < 80 && pendingChunk.length < 96 && toolFingerprint === lastToolFingerprint) return;
-      progressEventIndex += 1;
-      await appendBackgroundStepEvent(input.stepId, "ModelCallProgress", {
-        role: "planner",
-        model: input.settings.plannerModel,
-        chunk: pendingChunk,
-        contentChunk: pendingContentChunk,
-        reasoningChunk: pendingReasoningChunk,
-        toolArgumentsChunk: pendingToolArgumentsChunk,
-        chunkIndex: progressEventIndex,
-        receivedChars: latestReceivedChars,
-        toolCallNames: latestToolCallNames,
-        toolArgumentsChars: latestToolArgumentsChars,
-        streamKinds: [...pendingStreamKinds],
-        nativeToolRound: input.nativeToolRound
-      });
-      pendingChunk = "";
-      pendingContentChunk = "";
-      pendingReasoningChunk = "";
-      pendingToolArgumentsChunk = "";
-      pendingStreamKinds = new Set<string>();
-      lastToolFingerprint = toolFingerprint;
-      lastProgressAt = now;
-    };
-    const turn = await readOpenAICompatibleStreamTurn(response.body, async (progress) => {
-      pendingChunk += progress.visibleChunk;
-      pendingContentChunk += progress.chunk;
-      pendingReasoningChunk += progress.reasoningChunk ?? "";
-      pendingToolArgumentsChunk += progress.toolArgumentsChunk ?? "";
-      latestReceivedChars = progress.visibleReceivedChars;
-      latestToolArgumentsChars = progress.toolArgumentsChars ?? latestToolArgumentsChars;
-      latestToolCallNames = progress.toolCallNames ?? latestToolCallNames;
-      if (progress.chunk) pendingStreamKinds.add("content");
-      if (progress.reasoningChunk) pendingStreamKinds.add("reasoning");
-      if (progress.toolArgumentsChunk) pendingStreamKinds.add("tool_arguments");
-      await flushProgress(false);
+      protocol: input.protocol,
+      stage,
+      chunkIndex: progressEventIndex,
+      receivedChars: latestReceivedChars,
+      nativeToolRound: input.nativeToolRound,
+      recoveryAttempt: input.recoveryAttempt ?? 0,
+      ...progressTiming()
     });
-    await flushProgress(true);
-    text = turn.text;
-    toolCalls = turn.toolCalls;
-  } else {
-    const payload = await response.json();
-    toolCalls = extractOpenAICompatibleToolCalls(payload);
-    text = toolCalls.length ? "" : extractOpenAICompatibleText(payload);
+  };
+  const flushProgress = async (force = false): Promise<void> => {
+    const now = Date.now();
+    const toolFingerprint = latestToolCallNames.join("|");
+    const hasVisibleProgress = pendingChunk.length > 0 || toolFingerprint !== lastToolFingerprint;
+    if (!hasVisibleProgress) return;
+    if (!force && now - lastProgressAt < 80 && pendingChunk.length < 96 && toolFingerprint === lastToolFingerprint) return;
+    progressEventIndex += 1;
+    await appendBackgroundStepEvent(input.stepId, "ModelCallProgress", {
+      role: "planner",
+      model: input.settings.plannerModel,
+      protocol: input.protocol,
+      chunk: pendingChunk,
+      contentChunk: pendingContentChunk,
+      reasoningChunk: pendingReasoningChunk,
+      toolArgumentsChunk: pendingToolArgumentsChunk,
+      chunkIndex: progressEventIndex,
+      receivedChars: latestReceivedChars,
+      toolCallNames: latestToolCallNames,
+      toolArgumentsChars: latestToolArgumentsChars,
+      streamKinds: [...pendingStreamKinds],
+      stage,
+      nativeToolRound: input.nativeToolRound,
+      recoveryAttempt: input.recoveryAttempt ?? 0,
+      ...progressTiming()
+    });
+    pendingChunk = "";
+    pendingContentChunk = "";
+    pendingReasoningChunk = "";
+    pendingToolArgumentsChunk = "";
+    pendingStreamKinds = new Set<string>();
+    lastToolFingerprint = toolFingerprint;
+    lastProgressAt = now;
+  };
+  const onProgress = async (progress: ModelStreamProgress): Promise<void> => {
+    const content = progress.contentChunk ?? "";
+    const reasoning = progress.reasoningChunk ?? "";
+    const toolArguments = progress.toolArgumentsChunk ?? "";
+    pendingChunk += `${content}${reasoning}${toolArguments}`;
+    pendingContentChunk += content;
+    pendingReasoningChunk += reasoning;
+    pendingToolArgumentsChunk += toolArguments;
+    latestReceivedChars = progress.visibleReceivedChars;
+    latestToolArgumentsChars = progress.toolArgumentsChars ?? latestToolArgumentsChars;
+    latestToolCallNames = progress.toolCallNames ?? latestToolCallNames;
+    if (content) {
+      pendingStreamKinds.add("content");
+      stage = "content";
+    }
+    if (reasoning) {
+      pendingStreamKinds.add("reasoning");
+      stage = "reasoning";
+    }
+    if (toolArguments) {
+      pendingStreamKinds.add("tool_arguments");
+      stage = "tool_arguments";
+    }
+    await flushProgress(false);
+  };
+  await emitStage();
+  const heartbeat = setInterval(() => void emitStage().catch(() => undefined), 2_000);
+  let turn: ModelTurnResult;
+  try {
+    turn = await withPlannerRequestTimeout({
+      policy: input.timeoutPolicy,
+      totalDeadlineAt: input.totalDeadlineAt,
+      parentSignal: input.parentSignal,
+      run: (signal, activity) => requestPlannerProtocolTurn({
+        protocol: input.protocol,
+        baseUrl: input.settings.providerBaseUrl,
+        apiKey: input.settings.apiKey,
+        model: input.settings.plannerModel,
+        messages: input.messages,
+        nativeTools: input.protocol === "completions" ? [] : input.nativeTools,
+        capabilities: input.capabilities,
+        maxOutputTokens: input.maxOutputTokens,
+        stream: input.stream,
+        signal,
+        onProgress,
+        onActivity: async ({ kind }) => {
+          activity.markActivity();
+          if (kind === "response_headers") {
+            stage = input.stream ? "waiting_model_output" : "receiving_response";
+            await emitStage();
+          }
+        }
+      })
+    });
+  } finally {
+    clearInterval(heartbeat);
   }
-
-  const outputChars = text.length || toolCalls.reduce((count, call) => count + call.argumentsText.length, 0);
+  await flushProgress(true);
+  const outputChars = turn.text.length || turn.toolCalls.reduce((count, call) => count + call.argumentsText.length, 0);
   await appendBackgroundStepEvent(input.stepId, "ModelCallCompleted", {
     role: "planner",
     model: input.settings.plannerModel,
+    protocol: input.protocol,
+    responseId: turn.responseId,
+    completionStatus: turn.status,
+    finishReason: turn.finishReason,
+    incompleteReason: turn.incompleteReason,
+    inputTokens: turn.usage?.inputTokens,
+    outputTokens: turn.usage?.outputTokens,
+    reasoningTokens: turn.usage?.reasoningTokens,
     outputChars,
-    outputPreview: text.slice(0, 12000),
-    nativeToolCalls: toolCalls.map((call) => call.name),
+    outputPreview: turn.text.slice(0, 12000),
+    nativeToolCalls: turn.toolCalls.map((call) => call.name),
     nativeToolRound: input.nativeToolRound,
-    durationMs: Math.max(0, Date.now() - startedAt)
+    recoveryAttempt: input.recoveryAttempt ?? 0,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    totalElapsedMs: Math.max(0, Date.now() - input.totalStartedAt),
+    stage: "complete"
   });
-
-  return { text, toolCalls };
+  return turn;
 }
 
 async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, runtimeSignal?: AbortSignal): Promise<PlannerPortResult> {
@@ -884,88 +986,37 @@ async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, 
   }
 
   const activeRuntimeConfig = await modelConfigService.resolveActiveRuntimeConfig().catch(() => undefined);
+  const matchingRuntime = runtimeMatchesPlannerSettings(activeRuntimeConfig, settings) ? activeRuntimeConfig : undefined;
   const nativeToolsSupported = !input.contractRepair && plannerSupportsNativeTools(settings, activeRuntimeConfig);
-  const config = modelConfig(settings, { supportsToolUse: nativeToolsSupported });
-  const controller = new AbortController();
-  if (runtimeSignal?.aborted) controller.abort();
-  const abortFromRuntime = () => controller.abort();
-  runtimeSignal?.addEventListener("abort", abortFromRuntime, { once: true });
-  const timeout = setTimeout(() => controller.abort(), config.runtime.planner.requestTimeoutMs);
-  const endpoint = `${settings.providerBaseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const schema = {
-    commandTurn: {
-      taskUnderstanding: "string",
-      activeSubgoal: "string",
-      shortPlan: ["string"],
-      nextCommand: {
-        type: "NavigateTo | ActivateTarget | FillField | ScrollRegion | ReadContent | PressKey | WaitForChange | SelectOption | SubmitCurrentForm",
-        targetGoal: "string",
-        inputs: "object"
-      },
-      expectedOutcome: "string",
-      successCriteria: ["page_changed | target_visible | menu_expanded | menu_collapsed | child_target_visible | control_value_matches | control_state_matches | content_read | submission_feedback_or_validation | key_pressed"],
-      riskHint: "low | medium | high",
-      missingInfo: ["string"],
-      assumptions: ["string"],
-      reasoningSummary: "string"
-    },
-    batchCommandTurn: {
-      taskUnderstanding: "string",
-      activeSubgoal: "string",
-      shortPlan: ["string"],
-      nextCommands: [
-        {
-          type: "NavigateTo | ActivateTarget | FillField | ScrollRegion | ReadContent | PressKey | WaitForChange | SelectOption | SubmitCurrentForm",
-          targetGoal: "string",
-          inputs: "object; prefer observed semanticId/controlId/controlRef for page controls",
-          expectedOutcome: "string",
-          successCriteria: ["page_changed | target_visible | menu_expanded | menu_collapsed | child_target_visible | control_value_matches | control_state_matches | content_read | submission_feedback_or_validation | key_pressed"],
-          riskHint: "low | medium | high"
-        }
-      ],
-      expectedOutcome: "string",
-      successCriteria: ["string"],
-      riskHint: "low | medium | high",
-      missingInfo: ["string"],
-      assumptions: ["string"],
-      reasoningSummary: "string"
-    },
-    needMoreObservationTurn: {
-      type: "NeedMoreObservation",
-      reason: "string",
-        query: "string",
-        scope: "current_viewport | full_page | navigation | sidebar | main_content | form | dialog | scroll_container | visual",
-        expand: ["more_candidates | nearby_text | hidden_menus | offscreen_links | form_fields | tables | validation_feedback | visual_labels"],
-        preferredRoles: ["button | link | textbox | searchbox | combobox | menuitem | listitem | table | grid | tab | checkbox | radio"],
-        targetTextHints: ["string"],
-        ambiguousCandidates: [
-          {
-            semanticId: "string",
-            label: "string",
-            role: "string",
-            regionRef: "string",
-            visibility: "string"
-          }
-        ]
-      },
-    askUserTurn: {
-      type: "AskUser",
-      question: "string",
-      options: ["string"],
-      reason: "string"
-    },
-    finishTaskTurn: {
-      type: "FinishTask",
-      summary: "string",
-      evidenceRefs: ["string"]
-    },
-    rule:
-      "Return only one JSON object. Prefer direct turns: commandTurn or batchCommandTurn fields directly at top level, or {\"type\":\"NeedMoreObservation\"...}, {\"type\":\"AskUser\"...}, {\"type\":\"FinishTask\"...}. Wrapped keys commandTurn, needMoreObservationTurn, askUserTurn, and finishTaskTurn are accepted for compatibility."
+  let outputBudget = plannerOutputBudget(matchingRuntime?.maxOutputTokens);
+  const config = modelConfig(settings, { supportsToolUse: nativeToolsSupported, maxOutputTokens: outputBudget });
+  const officialOpenAi = normalizedEndpointBase(settings.providerBaseUrl).toLowerCase() === "https://api.openai.com/v1";
+  const configuredProtocol = matchingRuntime?.protocol ?? "auto";
+  const capabilities = {
+    structuredOutputs: matchingRuntime?.structuredOutputs ?? officialOpenAi,
+    jsonMode: matchingRuntime?.jsonMode ?? officialOpenAi,
+    strictTools: matchingRuntime?.strictTools ?? officialOpenAi,
+    reasoning: matchingRuntime?.reasoning ?? /^(gpt-5|o\d)/i.test(settings.plannerModel)
   };
+  const totalStartedAt = Date.now();
+  const timeoutPolicy = plannerTimeoutPolicy({ model: settings.plannerModel, reasoning: capabilities.reasoning });
+  const totalDeadlineAt = totalStartedAt + timeoutPolicy.totalTimeoutMs;
+  const protocolKey = `${normalizedEndpointBase(settings.providerBaseUrl)}|${settings.plannerModel}`;
+  const candidates = protocolCandidates({
+    protocol: configuredProtocol,
+    provider: matchingRuntime?.provider ?? (officialOpenAi ? "openai" : "custom"),
+    baseUrl: settings.providerBaseUrl
+  });
+  const cachedProtocol = configuredProtocol === "auto" ? resolvedPlannerProtocols.get(protocolKey) : undefined;
+  const protocolQueue = cachedProtocol && candidates.includes(cachedProtocol)
+    ? [cachedProtocol, ...candidates.filter((protocol) => protocol !== cachedProtocol)]
+    : [...candidates];
+  let selectedProtocol: ResolvedModelApiProtocol | undefined;
+  const schema = plannerResponseJsonSchema();
   const userLanguage = userLanguageForTask(input.taskFrame.taskText);
   const systemPrompt = [
     "You are NaturalClick Agent's browser planner for a Chrome extension.",
-    "Return only one JSON object. Do not use markdown or prose outside JSON.",
+    "Return only one JSON object with commandTurn, needMoreObservationTurn, askUserTurn, and finishTaskTurn. Exactly one branch must be non-null. Do not use markdown or prose outside JSON.",
     "Use semantic commands only. Never output primitive actions such as dom_click, dom_input, dom_select_option, coordinate_click, or raw JavaScript.",
     "User-visible text fields must match the user's language. If userLanguage is zh-CN, write AskUser.question, FinishTask.summary, taskUnderstanding, activeSubgoal, expectedOutcome, and reasoningSummary in Chinese. If userLanguage is en, write them in English.",
     "Use observed page controls. When a control has semanticId, put it in inputs.controlId, inputs.semanticId, or inputs.controlRef exactly as observed.",
@@ -978,9 +1029,9 @@ async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, 
     "If a batch includes navigation, submit, or a click likely to change the page, place that action last.",
     "Each nextCommands item should include expectedOutcome, successCriteria, and riskHint. Use control_value_matches for FillField and SelectOption, control_state_matches for checkbox/switch/radio state changes, content_read for ReadContent, key_pressed for PressKey, page_changed or submission_feedback_or_validation for submit/login/navigation, target_visible for simple activation, menu_expanded or child_target_visible when expanding navigation/menu controls, and menu_collapsed when collapsing them.",
     "For tasks that ask to open a website or search the web, prefer NavigateTo with inputs.url as an absolute URL. For Baidu search, use https://www.baidu.com/s?wd=<encoded query>.",
-    "If the task is already complete, return {\"type\":\"FinishTask\",\"summary\":\"...\",\"evidenceRefs\":[]}.",
-    "If the current page context is insufficient, return {\"type\":\"NeedMoreObservation\",...}.",
-    "If user input is required, return {\"type\":\"AskUser\",...}.",
+    "If the task is already complete, fill finishTaskTurn and set the other three branches to null.",
+    "If the current page context is insufficient, fill needMoreObservationTurn and set the other three branches to null.",
+    "If user input is required, fill askUserTurn and set the other three branches to null.",
     "If native read-only tools are available, you may use them only to inspect page context or search enabled context. After tool results, return the final planner JSON object.",
     "Use load_tools when you need optional enabled groups such as files, scratchpad, schedule, search, or skills before returning a browser action.",
     "If attachments are present, use their filename, mime, size, and capped textPreview as user-provided context. Do not assume the attachment contains more than the preview.",
@@ -1016,26 +1067,102 @@ async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, 
     let nativeToolRound = 0;
     let nativeToolsDisabled = !config.capabilities.supportsToolUse;
 
+    const requestNegotiatedTurn = async (
+      requestMessages: PlannerChatMessage[],
+      nativeTools: ToolDefinition[],
+      options: { stream: boolean; recoveryAttempt?: number; stage?: string } = { stream: true }
+    ): Promise<ModelTurnResult> => {
+      const remainingBudgetMs = remainingPlannerBudget(totalDeadlineAt);
+      if (remainingBudgetMs < Math.min(10_000, timeoutPolicy.firstResponseTimeoutMs)) {
+        throw new PlannerTimeoutError("planner_total_budget_exhausted", Date.now() - totalStartedAt, false);
+      }
+      const attemptProtocols = selectedProtocol ? [selectedProtocol] : protocolQueue;
+      let lastProtocolError: unknown;
+      for (const protocol of attemptProtocols) {
+        try {
+          plannerModelCalls += 1;
+          const turn = await requestPlannerModelTurn({
+            stepId: input.stepId,
+            settings,
+            protocol,
+            capabilities,
+            maxOutputTokens: outputBudget,
+            stream: options.stream,
+            parentSignal: runtimeSignal,
+            timeoutPolicy,
+            totalDeadlineAt,
+            totalStartedAt,
+            messages: requestMessages,
+            nativeTools,
+            nativeToolRound,
+            recoveryAttempt: options.recoveryAttempt,
+            stage: options.stage
+          });
+          selectedProtocol = protocol;
+          if (configuredProtocol === "auto") resolvedPlannerProtocols.set(protocolKey, protocol);
+          return turn;
+        } catch (error) {
+          lastProtocolError = error;
+          if (error instanceof PlannerTimeoutError) {
+            Object.assign(error, {
+              protocol,
+              nativeToolRound,
+              recoveryAttempt: options.recoveryAttempt ?? 0
+            });
+          }
+          if (configuredProtocol === "auto" && error instanceof ModelProtocolHttpError && error.protocolUnsupported && protocol !== attemptProtocols.at(-1)) {
+            await appendBackgroundStepEvent(input.stepId, "ModelCallProgress", {
+              role: "planner",
+              model: settings.plannerModel,
+              protocol,
+              stage: "protocol_fallback",
+              elapsedMs: Date.now() - totalStartedAt,
+              remainingBudgetMs: remainingPlannerBudget(totalDeadlineAt)
+            });
+            await appendBackgroundStepEvent(input.stepId, "RecoverySuggested", {
+              reason: "planner_protocol_fallback",
+              fromProtocol: protocol,
+              status: error.status
+            }, "debug");
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw lastProtocolError ?? new Error("planner_provider_protocol_error");
+    };
+
+    const requestRecoverableTurn = async (requestMessages: PlannerChatMessage[], nativeTools: ToolDefinition[]): Promise<ModelTurnResult> => {
+      let turn = await requestNegotiatedTurn(requestMessages, nativeTools, { stream: true });
+      if (turn.status === "incomplete") {
+        const expanded = expandedPlannerOutputBudget(outputBudget);
+        if (turn.incompleteReason !== "max_output_tokens" || expanded <= outputBudget) throw new Error("planner_output_truncated");
+        outputBudget = expanded;
+        turn = await requestNegotiatedTurn(requestMessages, nativeTools, { stream: true, recoveryAttempt: 1, stage: "retrying_truncated_output" });
+      }
+      if (turn.status === "incomplete") throw new Error("planner_output_truncated");
+      if (turn.status === "refused") throw new Error("planner_refused");
+      if (turn.status === "failed") throw new Error("planner_provider_protocol_error");
+      if (!turn.text.trim() && turn.toolCalls.length === 0) {
+        turn = await requestNegotiatedTurn(requestMessages, nativeTools, { stream: false, recoveryAttempt: 1, stage: "retrying_empty_output" });
+      }
+      if (turn.status === "incomplete") throw new Error("planner_output_truncated");
+      if (turn.status === "refused") throw new Error("planner_refused");
+      if (turn.status === "failed") throw new Error("planner_provider_protocol_error");
+      if (!turn.text.trim() && turn.toolCalls.length === 0) throw new Error("planner_empty_output");
+      return turn;
+    };
+
     while (true) {
       const capabilities = toolRuntimeCapabilitiesForSettings(activeCapabilitySettings, {
         tools: !nativeToolsDisabled,
         vision: activeRuntimeConfig?.vision ?? Boolean(settings.visionModel)
       });
       const nativeTools = nativeToolsDisabled ? [] : plannerNativeTools(activeCapabilitySettings, capabilities);
-      let turn: PlannerModelTurnResponse;
+      let turn: ModelTurnResult;
 
       try {
-        plannerModelCalls += 1;
-        turn = await requestPlannerModelTurn({
-          stepId: input.stepId,
-          settings,
-          config,
-          endpoint,
-          signal: controller.signal,
-          messages,
-          nativeTools,
-          nativeToolRound
-        });
+        turn = await requestRecoverableTurn(messages, nativeTools);
       } catch (error) {
         if (nativeTools.length && shouldRetryPlannerRequestWithoutTools(error)) {
           await appendBackgroundStepEvent(
@@ -1052,6 +1179,14 @@ async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, 
             "debug"
           );
           nativeToolsDisabled = true;
+          await appendBackgroundStepEvent(input.stepId, "ModelCallProgress", {
+            role: "planner",
+            model: settings.plannerModel,
+            protocol: selectedProtocol,
+            stage: "retrying_without_tools",
+            elapsedMs: Date.now() - totalStartedAt,
+            remainingBudgetMs: remainingPlannerBudget(totalDeadlineAt)
+          });
           continue;
         }
         throw error;
@@ -1081,8 +1216,45 @@ async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, 
       break;
     }
 
-    const parsed = parseLooseJson(text);
-    if (!parsed) throw new Error("planner_returned_non_json");
+    let parsed = parseLooseJson(text);
+    let validation = validatePlannerTurn(parsed);
+    if (!parsed || !validation.ok) {
+      const violation = parsed && !validation.ok ? validation.message : "Planner output was not valid JSON.";
+      await appendBackgroundStepEvent(input.stepId, "ModelContractViolation", {
+        message: violation,
+        rawOutputPreview: text.slice(0, 12000),
+        protocol: selectedProtocol
+      }, "debug");
+      const repairMessages: PlannerChatMessage[] = [
+        ...messages,
+        ...(text.trim() ? [{ role: "assistant" as const, content: text }] : []),
+        {
+          role: "user",
+          content: JSON.stringify({
+            contractRepair: {
+              message: violation,
+              instruction: "Return one complete object matching the supplied JSON Schema. Preserve the intended action. Do not include prose."
+            },
+            schema
+          })
+        }
+      ];
+      await appendBackgroundStepEvent(input.stepId, "ModelCallProgress", {
+        role: "planner",
+        model: settings.plannerModel,
+        protocol: selectedProtocol,
+        stage: "contract_repair",
+        elapsedMs: Date.now() - totalStartedAt,
+        remainingBudgetMs: remainingPlannerBudget(totalDeadlineAt)
+      });
+      const repaired = await requestNegotiatedTurn(repairMessages, [], { stream: false, recoveryAttempt: 1, stage: "contract_repair" });
+      if (repaired.status === "refused") throw new Error("planner_refused");
+      if (repaired.status === "incomplete") throw new Error("planner_output_truncated");
+      if (repaired.status !== "completed" || !repaired.text.trim()) throw new Error("planner_repair_exhausted");
+      parsed = parseLooseJson(repaired.text);
+      validation = validatePlannerTurn(parsed);
+      if (!parsed || !validation.ok) throw new Error("planner_repair_exhausted");
+    }
     return {
       turn: parsed as PlannerDecision | PlannerTurn,
       metrics: {
@@ -1090,20 +1262,27 @@ async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, 
       }
     };
   } catch (error) {
+    const resolvedError = error;
+    const totalElapsedMs = Date.now() - totalStartedAt;
+    const requestElapsedMs = resolvedError instanceof PlannerTimeoutError ? resolvedError.elapsedMs : undefined;
     await appendBackgroundStepEvent(
       input.stepId,
       "ModelCallFailed",
       {
         role: "planner",
         model: settings.plannerModel,
-        reason: abortErrorReason(error, runtimeSignal)
+        reason: abortErrorReason(resolvedError, runtimeSignal),
+        protocol: selectedProtocol ?? (resolvedError && typeof resolvedError === "object" && "protocol" in resolvedError ? (resolvedError as { protocol?: unknown }).protocol : undefined),
+        timeoutReason: resolvedError instanceof PlannerTimeoutError ? resolvedError.reason : undefined,
+        elapsedMs: totalElapsedMs,
+        requestElapsedMs,
+        totalElapsedMs,
+        receivedResponse: resolvedError instanceof PlannerTimeoutError ? resolvedError.receivedResponse : undefined,
+        totalTimeoutMs: timeoutPolicy.totalTimeoutMs
       },
       "user"
     );
-    throw plannerErrorWithMetrics(error, { modelCalls: Math.max(1, typeof plannerModelCalls === "number" ? plannerModelCalls : 0) });
-  } finally {
-    clearTimeout(timeout);
-    runtimeSignal?.removeEventListener("abort", abortFromRuntime);
+    throw plannerErrorWithMetrics(resolvedError, { modelCalls: Math.max(1, typeof plannerModelCalls === "number" ? plannerModelCalls : 0) });
   }
 }
 
@@ -1113,6 +1292,19 @@ function tabUpdate(tabId: number, updateProperties: chrome.tabs.UpdateProperties
 
 function tabCreate(createProperties: chrome.tabs.CreateProperties): Promise<chrome.tabs.Tab> {
   return chrome.tabs.create(createProperties);
+}
+
+async function adoptTaskChildTab(sourceTabId: number, tabsBefore: Set<number>): Promise<void> {
+  if (activeSession?.targetTabId !== sourceTabId) return;
+  const child = selectNewTaskChildTab(await chrome.tabs.query({}), tabsBefore, sourceTabId);
+  if (!child?.id) return;
+  if (child.status !== "complete") {
+    await waitForTabComplete(child.id, 15000, activeRunAbortController?.signal);
+  }
+  const updated = await getTab(child.id);
+  await bindActiveTaskToTab(updated ?? child);
+  lastObservedPage = undefined;
+  currentOverlayTargetId = undefined;
 }
 
 async function tabHistoryAction(tabId: number, action: "back" | "forward" | "reload"): Promise<void> {
@@ -1183,11 +1375,13 @@ async function executePrimitive(primitive: BrowserPrimitive): Promise<PrimitiveR
   if (primitive.type === "navigate") {
     const signal = activeRunAbortController?.signal;
     if (signal?.aborted) throw taskStoppedError();
-    const tab = await getActiveTab();
-    if (!tab?.id) return { status: "failed", reason: "active_tab_not_found", details: { primitive } };
+    const tab = await resolveTaskTab(false);
+    if (!tab?.id) return { status: "failed", reason: "task_tab_not_found", details: { primitive } };
     if (signal?.aborted) throw taskStoppedError();
     await tabUpdate(tab.id, { url: primitive.url });
     await waitForTabComplete(tab.id, 15000, signal);
+    const updated = await getTab(tab.id);
+    if (updated) await bindActiveTaskToTab(updated);
     return { status: "success", details: { primitive: "navigate", url: primitive.url, tabId: tab.id } };
   }
 
@@ -1198,14 +1392,16 @@ async function executePrimitive(primitive: BrowserPrimitive): Promise<PrimitiveR
     if (!tab.id) return { status: "failed", reason: "created_tab_missing_id", details: { primitive } };
     if (signal?.aborted) throw taskStoppedError();
     await waitForTabComplete(tab.id, 15000, signal);
+    const updated = await getTab(tab.id);
+    await bindActiveTaskToTab(updated ?? tab);
     return { status: "success", details: { primitive: "open_tab", url: primitive.url, tabId: tab.id, active: primitive.active !== false } };
   }
 
   if (primitive.type === "history") {
     const signal = activeRunAbortController?.signal;
     if (signal?.aborted) throw taskStoppedError();
-    const tab = await getActiveTab();
-    if (!tab?.id) return { status: "failed", reason: "active_tab_not_found", details: { primitive } };
+    const tab = await resolveTaskTab(false);
+    if (!tab?.id) return { status: "failed", reason: "task_tab_not_found", details: { primitive } };
     if (signal?.aborted) throw taskStoppedError();
     await tabHistoryAction(tab.id, primitive.action);
     await waitForTabComplete(tab.id, 15000, signal);
@@ -1220,28 +1416,37 @@ async function executePrimitive(primitive: BrowserPrimitive): Promise<PrimitiveR
     };
   }
 
-  const response = await sendActiveTabMessage<PrimitiveResult>({ type: "EXECUTE_PRIMITIVE", primitive, pageModel: lastObservedPage });
+  const sourceTabId = activeSession?.targetTabId;
+  const tabsBefore = primitive.type === "dom_click"
+    ? new Set((await chrome.tabs.query({})).flatMap((tab) => tab.id === undefined ? [] : [tab.id]))
+    : undefined;
+  const response = await sendTaskTabMessage<PrimitiveResult>({ type: "EXECUTE_PRIMITIVE", primitive, pageModel: lastObservedPage });
+  if (response.ok && response.data.status === "success" && sourceTabId !== undefined && tabsBefore) {
+    await adoptTaskChildTab(sourceTabId, tabsBefore);
+  }
   return response.ok ? response.data : { status: "failed", reason: response.error, details: { primitive } };
 }
 
 function cancelActiveContentPrimitive(reason: string): void {
-  void sendActiveTabMessage({ type: "CANCEL_ACTIVE_PRIMITIVE", reason }).catch(() => undefined);
+  void sendTaskTabMessage({ type: "CANCEL_ACTIVE_PRIMITIVE", reason }).catch(() => undefined);
 }
 
 async function captureCleanVisibleTabScreenshot(): Promise<{ dataUrl: string; capturedAt: number }> {
   const shouldRestoreOverlay = activeOverlayMode !== "Off";
   if (shouldRestoreOverlay) {
-    await sendActiveTabMessage({ type: "SET_OVERLAY_MODE", mode: "Off" });
+    await sendTaskTabMessage({ type: "SET_OVERLAY_MODE", mode: "Off" });
   }
 
   try {
-    return await captureVisibleTabScreenshot();
+    const target = await resolveTaskTab(false);
+    if (!target?.id) throw new Error("task_tab_not_found");
+    return await captureTabScreenshot(target.id);
   } finally {
     if (shouldRestoreOverlay) {
       if (lastObservedPage) {
         await syncOverlayForPage(lastObservedPage);
       } else {
-        await sendActiveTabMessage({ type: "SET_OVERLAY_MODE", mode: activeOverlayMode });
+        await sendTaskTabMessage({ type: "SET_OVERLAY_MODE", mode: activeOverlayMode });
       }
     }
   }
@@ -1564,6 +1769,9 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
   }
 
   if (message.type === "START_TASK") {
+    const initialTaskTab = await getActiveTab();
+    const initialTarget = initialTaskTab ? tabTarget(initialTaskTab) : undefined;
+    if (!initialTaskTab || !initialTarget) return errorResponse("active_tab_not_found");
     const restored = await restoreActiveSession();
     const previousTurns = restored ? await eventStore.loadSession(restored.sessionId) : [];
     const currentEvents = restored ? previousTurns.find((turn) => turn.taskId === restored.taskId)?.events ?? [] : [];
@@ -1573,7 +1781,8 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
     const conversationHistory = boundedConversationHistory(previousTurns);
     activeSession = {
       sessionId: restored?.sessionId ?? createSessionId(),
-      taskId: createTaskId()
+      taskId: createTaskId(),
+      ...initialTarget
     };
     detachedSessionIds.delete(activeSession.sessionId);
     stoppedSessionIds.delete(activeSession.sessionId);
@@ -1616,6 +1825,7 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
     if (events.at(-1)?.type !== "TaskFailed") return errorResponse("retry_task_not_failed");
     const taskText = taskTextFromEvents(events);
     if (!taskText) return errorResponse("retry_task_text_missing");
+    if (!(await resolveTaskTab(true))) return errorResponse("task_tab_not_found");
 
     const turns = await eventStore.loadSession(restored.sessionId);
     const conversationHistory = boundedConversationHistory(turns.filter((turn) => turn.taskId !== restored.taskId));
@@ -1684,6 +1894,8 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
     if (health !== "suspended") return errorResponse(`session_not_paused:${health}`);
     const taskText = taskTextFromEvents(events);
     if (!taskText) return errorResponse("resume_task_text_missing");
+    const resumedTab = await resolveTaskTab(true);
+    if (!resumedTab) return errorResponse("task_tab_not_found");
 
     const initialActionMemory = restoredActionMemory(events);
     const restoredCounters = restoreExecutionCounters(events);
@@ -1709,7 +1921,9 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
       await activeController.resumeTask(taskText, {
         resumedFromEventId: events.at(-1)?.id,
         recoveredActionMemoryItems: initialActionMemory.length,
-        restoredCounters
+        restoredCounters,
+        targetTabId: resumedTab.id,
+        targetTabUrl: resumedTab.url
       }, restoredCounters);
     } catch (error) {
       await appendTaskFailure(error);
@@ -1828,10 +2042,10 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
   if (message.type === "SET_OVERLAY_MODE") {
     activeOverlayMode = message.mode;
     if (message.mode === "Off" || message.targets?.length) {
-      return sendActiveTabMessage(message);
+      return sendTaskTabMessage(message);
     }
     const page = await observeActivePage(undefined, { observationRound: 1, candidateLimit: OVERLAY_OBSERVATION_LIMIT }, false);
-    return sendActiveTabMessage({
+    return sendTaskTabMessage({
       ...message,
       targets: overlayTargetsFromPage(page, { currentTargetId: currentOverlayTargetId })
     });
@@ -1842,7 +2056,7 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
     message.type === "EXECUTE_PRIMITIVE" ||
     message.type === "HIGHLIGHT_TARGET"
   ) {
-    return sendActiveTabMessage(message);
+    return sendTaskTabMessage(message);
   }
 
   if (message.type === "OPEN_SETTINGS") {
@@ -1862,6 +2076,42 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onConnect.addListener((port) => {
   runtimeEventBus.connect(port);
+});
+
+async function suspendTaskForClosedTab(tabId: number): Promise<void> {
+  const session = activeSession ?? (await restoreActiveSession());
+  if (!session || session.targetTabId !== tabId) return;
+  const events = await eventStore.loadAfter(session.sessionId, session.taskId);
+  if (deriveSessionExecutionHealth(events) === "terminal" || events.at(-1)?.type === "RuntimeSuspended") return;
+
+  activeController?.stop("task_tab_closed", { eventAlreadyAppended: true });
+  activeRunAbortController?.abort();
+  activeController = undefined;
+  activeRunAbortController = undefined;
+  lastObservedPage = undefined;
+  currentOverlayTargetId = undefined;
+  await appendBackgroundEvent(
+    "RuntimeSuspended",
+    {
+      reason: "task_tab_closed",
+      targetTabId: tabId,
+      targetTabUrl: session.targetTabUrl,
+      targetTabTitle: session.targetTabTitle,
+      message: "The task page was closed. Open the intended page and resume to bind the task to the current tab."
+    },
+    "user"
+  );
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void suspendTaskForClosedTab(tabId).catch(() => undefined);
+});
+
+chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  void restoreActiveSession()
+    .then((session) => session?.targetTabId === removedTabId ? getTab(addedTabId) : undefined)
+    .then((tab) => tab ? bindActiveTaskToTab(tab) : false)
+    .catch(() => undefined);
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

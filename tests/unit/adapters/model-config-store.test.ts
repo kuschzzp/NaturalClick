@@ -42,6 +42,46 @@ describe("Chrome model config store", () => {
     await expect(store.getActiveSelection()).resolves.toEqual({ instanceId: "inst_1", model: "gpt-4o-mini" });
   });
 
+  it("round-trips protocol and structured model capabilities", async () => {
+    const store = createChromeModelConfigStore(fakeStorageArea);
+    await store.saveInstance({
+      id: "inst_protocol",
+      provider: "openai",
+      label: "OpenAI Responses",
+      baseUrl: "https://api.openai.com/v1",
+      apiKeyRef: "secret:openai",
+      protocol: "responses",
+      models: [
+        {
+          id: "gpt-5",
+          vision: true,
+          tools: true,
+          structuredOutputs: true,
+          jsonMode: true,
+          strictTools: true,
+          reasoning: true,
+          maxContextTokens: 400000,
+          maxOutputTokens: 128000
+        }
+      ]
+    });
+
+    await expect(store.listInstances()).resolves.toEqual([
+      expect.objectContaining({
+        protocol: "responses",
+        models: [
+          expect.objectContaining({
+            id: "gpt-5",
+            structuredOutputs: true,
+            jsonMode: true,
+            strictTools: true,
+            reasoning: true
+          })
+        ]
+      })
+    ]);
+  });
+
   it("round-trips role selections independently from the legacy active selection", async () => {
     const store = createChromeModelConfigStore(fakeStorageArea);
 

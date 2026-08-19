@@ -66,6 +66,46 @@ describe("model config service", () => {
     });
   });
 
+  it("resolves legacy instances to auto protocol with provider-aware capabilities", async () => {
+    const service = createModelConfigService(memoryStore([openAiInstance]));
+
+    await expect(service.resolveActiveRuntimeConfig()).resolves.toMatchObject({
+      protocol: "auto",
+      structuredOutputs: true,
+      jsonMode: true,
+      strictTools: true,
+      reasoning: false
+    });
+  });
+
+  it("preserves explicit legacy completions capabilities", async () => {
+    const service = createModelConfigService(memoryStore([{
+      ...mixedInstance,
+      protocol: "completions",
+      models: [{
+        id: "legacy-text",
+        vision: false,
+        tools: false,
+        structuredOutputs: false,
+        jsonMode: false,
+        strictTools: false,
+        reasoning: false,
+        maxContextTokens: 16000,
+        maxOutputTokens: 4096
+      }]
+    }]));
+
+    await expect(service.resolveActiveRuntimeConfig()).resolves.toMatchObject({
+      protocol: "completions",
+      model: "legacy-text",
+      structuredOutputs: false,
+      jsonMode: false,
+      strictTools: false,
+      reasoning: false,
+      maxOutputTokens: 4096
+    });
+  });
+
   it("rejects selecting a model that is not in the instance model list", async () => {
     const service = createModelConfigService(memoryStore([openAiInstance]));
 

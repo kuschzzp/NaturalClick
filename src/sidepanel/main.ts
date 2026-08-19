@@ -29,11 +29,13 @@ import {
   defaultCapabilitySettings,
   defaultModelSettings,
   type ExistingModelInstanceDraft,
+  isModelApiProtocol,
   legacySettingsToModelConfigSyncRequests,
   preferredPlannerModelAfterDetection,
   resolveCapabilitySettings,
   serializeCapabilitySettings,
   type CapabilitySettingsState,
+  type ModelSettingField,
   type ModelSettingsState,
   type SearchProviderMode
 } from "./settings";
@@ -290,7 +292,8 @@ function loadStoredModelSettings(): ModelSettingsState {
       apiKey: typeof parsed.apiKey === "string" ? parsed.apiKey : "",
       plannerModel: typeof parsed.plannerModel === "string" ? parsed.plannerModel : "",
       visionModel: typeof parsed.visionModel === "string" ? parsed.visionModel : "",
-      apiKeyRef: typeof parsed.apiKeyRef === "string" ? parsed.apiKeyRef : fallback.apiKeyRef
+      apiKeyRef: typeof parsed.apiKeyRef === "string" ? parsed.apiKeyRef : fallback.apiKeyRef,
+      protocol: isModelApiProtocol(parsed.protocol) ? parsed.protocol : "auto"
     };
   } catch {
     return fallback;
@@ -317,6 +320,7 @@ function editingModelInstanceDraft(): ExistingModelInstanceDraft | undefined {
         provider: instance.provider,
         label: instance.label,
         endpointVariant: instance.endpointVariant,
+        protocol: instance.protocol ?? "auto",
         createdAt: instance.createdAt
       }
     : state.modelConfigWizardOpen
@@ -325,6 +329,7 @@ function editingModelInstanceDraft(): ExistingModelInstanceDraft | undefined {
           provider: "custom",
           label: "OpenAI Compatible",
           endpointVariant: "openai_compatible",
+          protocol: "auto",
           createdAt: Date.now()
         }
       : undefined;
@@ -1785,7 +1790,7 @@ async function highlightTarget(semanticId: string): Promise<void> {
   }
 }
 
-function updateModelSetting(field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel", value: string): void {
+function updateModelSetting(field: ModelSettingField, value: string): void {
   state = applyModelSettingChangeState(state, {
     field,
     value,

@@ -127,4 +127,56 @@ describe("OpenAI-compatible streaming client", () => {
       { names: ["read_page"], argumentChars: 16, argumentsChunk: 'atlas"}', visibleChunk: 'atlas"}' }
     ]);
   });
+
+  it("captures Chat Completions finish reason and token usage", async () => {
+    const stream = streamFrom([
+      'data: {"id":"chat_1","choices":[{"delta":{"content":"{\\"type\\":\\"FinishTask\\"}"},"finish_reason":null}]}',
+      "",
+      'data: {"id":"chat_1","choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":100,"completion_tokens":2200,"completion_tokens_details":{"reasoning_tokens":1800}}}',
+      "",
+      "data: [DONE]",
+      ""
+    ].join("\n"));
+
+    await expect(readOpenAICompatibleStreamTurn(stream)).resolves.toMatchObject({
+      responseId: "chat_1",
+      finishReason: "length",
+      usage: { inputTokens: 100, outputTokens: 2200, reasoningTokens: 1800 }
+    });
+  });
+
+  it("reads legacy Completions choices text", async () => {
+    const stream = streamFrom([
+      'data: {"id":"cmpl_1","choices":[{"text":"{\\"type\\":","finish_reason":null}]}',
+      "",
+      'data: {"id":"cmpl_1","choices":[{"text":"\\"FinishTask\\"}","finish_reason":"stop"}]}',
+      "",
+      "data: [DONE]",
+      ""
+    ].join("\n"));
+
+    await expect(readOpenAICompatibleStreamTurn(stream, undefined, { protocol: "completions" })).resolves.toMatchObject({
+      text: '{"type":"FinishTask"}',
+      responseId: "cmpl_1",
+      finishReason: "stop"
+    });
+  });
+
+  it("reports transport activity for Chat and legacy Completions streams", async () => {
+    const chatActivity: string[] = [];
+    await readOpenAICompatibleStreamTurn(
+      streamFrom('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n'),
+      undefined,
+      { protocol: "chat_completions", onActivity: () => { chatActivity.push("chat"); } }
+    );
+    const completionActivity: string[] = [];
+    await readOpenAICompatibleStreamTurn(
+      streamFrom('data: {"choices":[{"text":"ok"}]}\n\ndata: [DONE]\n'),
+      undefined,
+      { protocol: "completions", onActivity: () => { completionActivity.push("completion"); } }
+    );
+
+    expect(chatActivity).not.toHaveLength(0);
+    expect(completionActivity).not.toHaveLength(0);
+  });
 });

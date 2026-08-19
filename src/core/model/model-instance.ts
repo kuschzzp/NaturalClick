@@ -4,11 +4,17 @@ export type BuiltInProviderRef = "openai" | "anthropic" | "gemini" | "openrouter
 
 export type ProviderRef = BuiltInProviderRef | `custom:${string}`;
 
+export type ModelApiProtocol = "auto" | "responses" | "chat_completions" | "completions";
+
 export interface ModelCapability {
   id: string;
   displayName?: string;
   vision: boolean;
   tools: boolean;
+  structuredOutputs?: boolean;
+  jsonMode?: boolean;
+  strictTools?: boolean;
+  reasoning?: boolean;
   maxContextTokens: number;
   maxOutputTokens?: number;
 }
@@ -19,6 +25,7 @@ export interface ModelInstance {
   label: string;
   baseUrl: string;
   apiKeyRef: string;
+  protocol?: ModelApiProtocol;
   models: ModelCapability[];
   endpointVariant?: "openai_compatible" | "anthropic" | "gemini";
   createdAt?: number;
@@ -39,8 +46,13 @@ export interface ModelRuntimeConfig {
   model: string;
   baseUrl: string;
   apiKeyRef: string;
+  protocol?: ModelApiProtocol;
   vision: boolean;
   tools: boolean;
+  structuredOutputs?: boolean;
+  jsonMode?: boolean;
+  strictTools?: boolean;
+  reasoning?: boolean;
   maxContextTokens: number;
   maxOutputTokens?: number;
 }

@@ -303,6 +303,43 @@ describe("sidepanel state", () => {
     });
   });
 
+  it("preserves detected models when only the API protocol changes", () => {
+    const next = applyModelSettingChangeState(
+      {
+        ...base,
+        modelDetectionStatus: "success",
+        modelDetectionMessage: "Detected 2 models.",
+        detectedModels: ["gpt-5", "gpt-4.1"],
+        modelSettings: {
+          providerBaseUrl: "https://api.openai.com/v1",
+          apiKey: "sk-test",
+          plannerModel: "gpt-5",
+          visionModel: "",
+          apiKeyRef: "naturalclick:model-api-key",
+          protocol: "auto"
+        }
+      },
+      {
+        field: "protocol",
+        value: "responses",
+        defaultSettings: {
+          providerBaseUrl: "https://api.openai.com/v1",
+          apiKey: "",
+          plannerModel: "",
+          visionModel: "",
+          apiKeyRef: "naturalclick:model-api-key",
+          protocol: "auto"
+        },
+        unsavedMessage: "Unsaved changes"
+      }
+    );
+
+    expect(next.modelSettings?.protocol).toBe("responses");
+    expect(next.detectedModels).toEqual(["gpt-5", "gpt-4.1"]);
+    expect(next.modelDetectionStatus).toBe("success");
+    expect(next.modelDetectionMessage).toBe("Detected 2 models.");
+  });
+
   it("keeps quick-picked planner dirty when any persistence step fails", () => {
     const next = applyPlannerQuickPickState(
       {
@@ -397,6 +434,14 @@ describe("sidepanel state", () => {
 
     expect(item.title).toBe("页面观察完成");
     expect(item.detail).toBe("发现 3 个候选按钮");
+  });
+
+  it("explains how to resume when the bound task tab is closed", () => {
+    const item = mapEventToTimelineItem(makeEvent("RuntimeSuspended", { reason: "task_tab_closed" }), "zh-CN");
+
+    expect(item.title).toBe("运行时已挂起");
+    expect(item.detail).toContain("任务页面已关闭");
+    expect(item.detail).toContain("点击继续");
   });
 
   it("summarizes smart observation retrieval details in Chinese", () => {
@@ -511,6 +556,29 @@ describe("sidepanel state", () => {
     expect(stream?.isStreaming).toBe(true);
     expect(stream?.chunkCount).toBe(2);
     expect(stream?.model).toBe("qwen3.7-max");
+  });
+
+  it("derives visible Planner stage, protocol, and elapsed time from heartbeat progress", () => {
+    const stream = deriveLatestModelStream([
+      makeEvent("ModelCallStarted", { role: "planner", model: "gpt-5", protocol: "responses", stage: "connecting" }),
+      makeEvent("ModelCallProgress", {
+        role: "planner",
+        model: "gpt-5",
+        protocol: "responses",
+        stage: "waiting_model_output",
+        elapsedMs: 12_000,
+        chunkIndex: 0,
+        receivedChars: 0
+      })
+    ], "zh-CN");
+
+    expect(stream).toMatchObject({
+      stage: "waiting_model_output",
+      phase: "waiting",
+      protocol: "responses",
+      elapsedMs: 12_000,
+      isStreaming: true
+    });
   });
 
   it("keeps reasoning, answer content, and tool arguments in separate model streams", () => {
@@ -632,8 +700,8 @@ describe("sidepanel state", () => {
     const contract = mapEventToTimelineItem(makeEvent("TaskFailed", { reason: "invalid_contract" }), "zh-CN");
     const binding = mapEventToTimelineItem(makeEvent("RecoverySuggested", { reason: "bind_failed_replan", bindingError: "target_not_found" }), "en");
 
-    expect(contract.detail).toContain("模型契约");
-    expect(contract.detail).toContain("schema");
+    expect(contract.detail).toContain("Planner 结构不匹配");
+    expect(contract.detail).toContain("Schema");
     expect(binding.detail).toContain("Observation / binding");
     expect(binding.detail).toContain("target_not_found");
   });

@@ -5759,14 +5759,15 @@ body,
   display: flex;
   min-width: 0;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   color: var(--c-fg-3);
   font-size: 10px;
   line-height: 14px;
 }
 
 .nc-run-model-stream__model {
+  margin-right: auto;
   overflow: hidden;
   color: var(--c-fg-2);
   font-weight: 700;
@@ -5774,8 +5775,25 @@ body,
   white-space: nowrap;
 }
 
-.nc-run-model-stream__count {
+.nc-run-model-stream__count,
+.nc-run-model-stream__protocol,
+.nc-run-model-stream__elapsed {
   flex: 0 0 auto;
+}
+
+.nc-run-model-stream__protocol {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.nc-run-model-stream__stage {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 7px;
+  color: var(--c-fg-2);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
 }
 
 .nc-run-model-stream__tools {

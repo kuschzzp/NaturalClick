@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   defaultModelConfigPanelState,
+  defaultModelSettings,
   legacySettingsToModelConfigSyncRequests,
   legacySettingsToModelInstance,
   plannerModelChoices,
@@ -11,6 +12,10 @@ import {
 import type { ModelInstance } from "../../../src/core/model/model-instance";
 
 describe("sidepanel model settings migration", () => {
+  it("defaults legacy settings to automatic protocol negotiation", () => {
+    expect(defaultModelSettings().protocol).toBe("auto");
+  });
+
   it("projects legacy model settings into a model instance without raw API key", () => {
     const instance = legacySettingsToModelInstance(
       {
@@ -140,6 +145,7 @@ describe("sidepanel model settings migration", () => {
       baseUrl: "https://old.example.com/v1",
       apiKeyRef: "secret:old",
       endpointVariant: "openai_compatible",
+      protocol: "responses",
       createdAt: 123,
       models: [{ id: "old-model", vision: false, tools: true, maxContextTokens: 32000 }]
     };
@@ -164,6 +170,7 @@ describe("sidepanel model settings migration", () => {
         baseUrl: "https://new.example.com/v1",
         apiKeyRef: "secret:new",
         endpointVariant: "openai_compatible",
+        protocol: "responses",
         createdAt: 123
       }
     });
@@ -172,6 +179,19 @@ describe("sidepanel model settings migration", () => {
       role: "planner",
       selection: { instanceId: "custom_provider_1", model: "qwen-max" }
     });
+  });
+
+  it("persists an explicitly selected legacy Completions protocol", () => {
+    const instance = legacySettingsToModelInstance({
+      providerBaseUrl: "https://legacy.example.com/v1",
+      apiKey: "sk-test",
+      plannerModel: "text-davinci-compatible",
+      visionModel: "",
+      apiKeyRef: "naturalclick:model-api-key",
+      protocol: "completions"
+    });
+
+    expect(instance?.protocol).toBe("completions");
   });
 
   it("keeps planner and vision dropdown candidates focused on compatible model families", () => {

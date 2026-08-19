@@ -147,6 +147,7 @@ function resolveFirstAvailableModel(instances: ModelInstance[]): ModelRuntimeCon
 
 function toRuntimeConfig(instance: ModelInstance, model: ModelInstance["models"][number]): ModelRuntimeConfig {
   const provider = providerMetadata(instance.provider);
+  const officialOpenAi = instance.provider === "openai" && normalizedBaseUrl(instance.baseUrl) === "https://api.openai.com/v1";
   return {
     instanceId: instance.id,
     provider: instance.provider,
@@ -154,8 +155,13 @@ function toRuntimeConfig(instance: ModelInstance, model: ModelInstance["models"]
     model: model.id,
     baseUrl: instance.baseUrl,
     apiKeyRef: instance.apiKeyRef,
+    protocol: instance.protocol ?? "auto",
     vision: model.vision,
     tools: model.tools,
+    structuredOutputs: model.structuredOutputs ?? officialOpenAi,
+    jsonMode: model.jsonMode ?? officialOpenAi,
+    strictTools: model.strictTools ?? (officialOpenAi && model.tools),
+    reasoning: model.reasoning ?? /^(gpt-5|o\d)/i.test(model.id),
     maxContextTokens: model.maxContextTokens,
     maxOutputTokens: model.maxOutputTokens
   };
@@ -207,7 +213,7 @@ export function createGlobalModelConfigFromRuntime(runtime: ModelRuntimeConfig, 
       maxOutputTokens
     },
     runtime: {
-      planner: { requestTimeoutMs: 60000, firstTokenTimeoutMs: 15000, maxRetries: 1, contractRepairAttempts: 1 },
+      planner: { requestTimeoutMs: 120000, firstTokenTimeoutMs: 30000, maxRetries: 1, contractRepairAttempts: 1 },
       vision: { requestTimeoutMs: 45000, firstTokenTimeoutMs: 15000, maxRetries: 0, minIntervalMs: 750, maxCallsPerStep: 1 },
       verifier: { requestTimeoutMs: 15000, firstTokenTimeoutMs: 5000, maxRetries: 0 },
       summarizer: { requestTimeoutMs: 20000, firstTokenTimeoutMs: 8000, maxRetries: 0 }

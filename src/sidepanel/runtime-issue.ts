@@ -8,6 +8,7 @@ export type RuntimeIssueKind =
   | "execution_verification"
   | "permission_policy"
   | "runtime_budget"
+  | "task_target"
   | "runtime_performance"
   | "overlay_interference";
 
@@ -29,7 +30,70 @@ function nestedString(value: unknown, key: string): string | undefined {
   return typeof item === "string" && item.trim() ? item : undefined;
 }
 
-function issueCopy(kind: RuntimeIssueKind, locale?: SidepanelLocale): Pick<RuntimeIssue, "label" | "suggestion"> {
+function plannerReasonCopy(reason: string | undefined, locale?: SidepanelLocale): Pick<RuntimeIssue, "label" | "suggestion"> | undefined {
+  if (!reason) return undefined;
+  const zh = locale === "zh-CN";
+  const copy: Record<string, { zh: Pick<RuntimeIssue, "label" | "suggestion">; en: Pick<RuntimeIssue, "label" | "suggestion"> }> = {
+    planner_output_truncated: {
+      zh: { label: "模型输出被截断", suggestion: "Planner 已自动扩大输出预算重试。仍失败时，请提高模型输出上限或换用支持更长输出的模型。" },
+      en: { label: "Model output truncated", suggestion: "The Planner already retried with a larger output budget. Increase the output limit or use a model that supports longer outputs." }
+    },
+    planner_empty_output: {
+      zh: { label: "模型返回空内容", suggestion: "Planner 已自动改用非流式请求重试。请检查所选模型是否支持当前协议，或切换 API 协议后重试。" },
+      en: { label: "Empty model output", suggestion: "The Planner already retried without streaming. Check whether the model supports the selected protocol, or switch API protocol and retry." }
+    },
+    planner_schema_violation: {
+      zh: { label: "Planner 结构不匹配", suggestion: "模型返回内容不符合 Planner Schema。系统会自动修复一次；可改用支持 Structured Outputs 的模型提升稳定性。" },
+      en: { label: "Planner schema mismatch", suggestion: "The model output did not match the Planner schema. One repair is automatic; a model with Structured Outputs will be more reliable." }
+    },
+    planner_returned_non_json: {
+      zh: { label: "Planner 返回非 JSON", suggestion: "当前模型没有遵守 Planner 输出契约。请优先使用 Responses API 或支持 JSON Schema 的 Chat Completions 模型。" },
+      en: { label: "Planner returned non-JSON", suggestion: "The model ignored the Planner contract. Prefer Responses API or a Chat Completions model with JSON Schema support." }
+    },
+    planner_refused: {
+      zh: { label: "模型拒绝执行", suggestion: "模型明确拒绝了这次 Planner 请求。请调整任务表达、模型安全设置，或切换模型后重试。" },
+      en: { label: "Model refused the request", suggestion: "The model explicitly refused this Planner request. Adjust the task or safety settings, or switch models and retry." }
+    },
+    planner_tool_arguments_invalid: {
+      zh: { label: "工具参数无效", suggestion: "模型生成的工具参数不是有效 JSON。系统会把错误反馈给模型；重复失败时请关闭原生工具或切换支持严格工具调用的模型。" },
+      en: { label: "Invalid tool arguments", suggestion: "The model produced invalid JSON tool arguments. Repeated failures may require disabling native tools or using a model with strict tool calling." }
+    },
+    planner_provider_protocol_error: {
+      zh: { label: "模型协议不兼容", suggestion: "Provider 没有按所选协议返回有效响应。请在模型配置中改用自动检测，或固定为 Provider 实际支持的协议。" },
+      en: { label: "Model protocol mismatch", suggestion: "The provider did not return a valid response for the selected protocol. Use Auto detect or select the protocol the provider actually supports." }
+    },
+    planner_transport_timeout: {
+      zh: { label: "模型调用超时", suggestion: "请求在 Planner 时限内没有完成。请检查网络和 Provider 延迟，或切换更快的模型后重新执行。" },
+      en: { label: "Model request timed out", suggestion: "The request exceeded the Planner timeout. Check network and provider latency, or switch to a faster model and retry." }
+    },
+    planner_first_token_timeout: {
+      zh: { label: "等待模型响应超时", suggestion: "连接建立后长时间没有收到模型输出。请检查 Provider 排队、网关流式转发和当前模型的首 Token 延迟。" },
+      en: { label: "First model response timed out", suggestion: "No model output arrived in time. Check provider queueing, gateway streaming, and first-token latency for the selected model." }
+    },
+    planner_stream_idle_timeout: {
+      zh: { label: "模型流式响应中断", suggestion: "模型曾返回数据，但随后长时间没有新内容。请检查 SSE 转发、代理缓冲或 Provider 流式连接稳定性。" },
+      en: { label: "Model stream became idle", suggestion: "The model returned data and then stopped. Check SSE forwarding, proxy buffering, and provider stream stability." }
+    },
+    planner_request_timeout: {
+      zh: { label: "单次模型请求超时", suggestion: "本次模型请求超过硬上限。请缩短输入上下文、切换更快的模型，或检查 Provider 的长请求限制。" },
+      en: { label: "Model request limit reached", suggestion: "This request exceeded its hard limit. Reduce input context, use a faster model, or check the provider's long-request limits." }
+    },
+    planner_total_budget_exhausted: {
+      zh: { label: "Planner 总时间预算耗尽", suggestion: "协议探测、重试、工具调用和格式修复的累计时间已达上限。请查看执行明细定位最慢阶段后重新执行。" },
+      en: { label: "Planner time budget exhausted", suggestion: "Protocol negotiation, retries, tools, and repair exhausted the total budget. Inspect the slowest stage in execution details before retrying." }
+    },
+    planner_repair_exhausted: {
+      zh: { label: "Planner 修复失败", suggestion: "原始输出与自动修复结果都不符合契约。请切换到支持 Structured Outputs 的模型或检查兼容服务的 JSON Schema 实现。" },
+      en: { label: "Planner repair failed", suggestion: "Both the original output and automatic repair violated the contract. Use a Structured Outputs model or inspect the provider's JSON Schema support." }
+    }
+  };
+  const matched = copy[reason === "invalid_contract" ? "planner_schema_violation" : reason];
+  return matched ? matched[zh ? "zh" : "en"] : undefined;
+}
+
+function issueCopy(kind: RuntimeIssueKind, locale?: SidepanelLocale, reason?: string): Pick<RuntimeIssue, "label" | "suggestion"> {
+  const plannerCopy = plannerReasonCopy(reason, locale);
+  if (plannerCopy) return plannerCopy;
   const zh = locale === "zh-CN";
   const copy: Record<RuntimeIssueKind, Pick<RuntimeIssue, "label" | "suggestion">> = zh
     ? {
@@ -56,6 +120,10 @@ function issueCopy(kind: RuntimeIssueKind, locale?: SidepanelLocale): Pick<Runti
         runtime_budget: {
           label: "运行预算",
           suggestion: "任务达到步数、时长、观察或模型调用预算，可调整执行控制参数后继续。"
+        },
+        task_target: {
+          label: "任务页面",
+          suggestion: "任务页面已关闭。请打开要继续操作的页面，然后点击继续，任务会绑定到当前标签。"
         },
         runtime_performance: {
           label: "运行速度",
@@ -91,6 +159,10 @@ function issueCopy(kind: RuntimeIssueKind, locale?: SidepanelLocale): Pick<Runti
           label: "Runtime budget",
           suggestion: "The task hit a step, duration, observation, or model-call budget. Tune execution controls before continuing."
         },
+        task_target: {
+          label: "Task page",
+          suggestion: "The task page was closed. Open the page you want to continue on, then resume to bind the task to the current tab."
+        },
         runtime_performance: {
           label: "Runtime speed",
           suggestion: "Model calls or page observation are slow. Check the provider, switch models, or download the log to inspect slow steps."
@@ -105,7 +177,14 @@ function issueCopy(kind: RuntimeIssueKind, locale?: SidepanelLocale): Pick<Runti
 
 function kindFromReason(reason?: string): RuntimeIssueKind | undefined {
   if (!reason) return undefined;
-  if (reason === "invalid_contract" || reason.includes("contract")) return "model_contract";
+  if (
+    reason === "invalid_contract" ||
+    reason === "planner_schema_violation" ||
+    reason === "planner_returned_non_json" ||
+    reason === "planner_tool_arguments_invalid" ||
+    reason === "planner_repair_exhausted" ||
+    reason.includes("contract")
+  ) return "model_contract";
   if (reason.startsWith("planner_") || reason === "model_settings_missing") return "model_api";
   if (["target_not_found", "target_not_interactable", "needs_more_observation", "ambiguous_target"].includes(reason)) {
     return "observation_binding";
@@ -117,6 +196,7 @@ function kindFromReason(reason?: string): RuntimeIssueKind | undefined {
     return "permission_policy";
   }
   if (reason.startsWith("max_")) return "runtime_budget";
+  if (reason === "task_tab_closed" || reason === "task_tab_not_found") return "task_target";
   if (reason === "slow_model_call" || reason === "slow_observation" || reason.includes("slow_")) return "runtime_performance";
   if (reason === "overlay_active_during_vision") return "overlay_interference";
   return undefined;
@@ -132,7 +212,7 @@ export function classifyRuntimeIssue(event: AgentEvent, locale?: SidepanelLocale
   } else if (event.type === "ModelCallFailed") {
     kind = "model_api";
   } else if (event.type === "RuntimeSuspended") {
-    kind = "runtime_budget";
+    kind = reason === "task_tab_closed" || reason === "task_tab_not_found" ? "task_target" : "runtime_budget";
   } else if (
     (event.type === "ModelCallCompleted" && typeof event.payload.durationMs === "number" && event.payload.durationMs > 8000) ||
     (event.type === "ObservationReceived" && typeof event.payload.durationMs === "number" && event.payload.durationMs > 1200)
@@ -166,7 +246,7 @@ export function classifyRuntimeIssue(event: AgentEvent, locale?: SidepanelLocale
 
   kind ??= kindFromReason(reason);
   if (!kind) return undefined;
-  return { kind, reason, ...issueCopy(kind, locale) };
+  return { kind, reason, ...issueCopy(kind, locale, reason) };
 }
 
 export function formatRuntimeIssue(issue: RuntimeIssue, locale?: SidepanelLocale): string {

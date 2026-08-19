@@ -1,5 +1,5 @@
 import type { ModelRole } from "../../core/model/config";
-import type { ModelCapability, ModelConfigStore, ModelInstance, ModelSelection, ProviderRef, RoleModelSelections } from "../../core/model/model-instance";
+import type { ModelApiProtocol, ModelCapability, ModelConfigStore, ModelInstance, ModelSelection, ProviderRef, RoleModelSelections } from "../../core/model/model-instance";
 
 const STORAGE_KEY_INSTANCES = "naturalclick.model.instances.v1";
 const STORAGE_KEY_ACTIVE_SELECTION = "naturalclick.model.activeSelection.v1";
@@ -75,6 +75,7 @@ function sanitizeModelInstance(instance: ModelInstance): ModelInstance {
     label: instance.label,
     baseUrl: instance.baseUrl,
     apiKeyRef: instance.apiKeyRef,
+    protocol: instance.protocol,
     endpointVariant: instance.endpointVariant,
     models: instance.models.map(sanitizeModelCapability),
     createdAt: instance.createdAt,
@@ -88,6 +89,10 @@ function sanitizeModelCapability(model: ModelCapability): ModelCapability {
     displayName: model.displayName,
     vision: model.vision,
     tools: model.tools,
+    structuredOutputs: model.structuredOutputs,
+    jsonMode: model.jsonMode,
+    strictTools: model.strictTools,
+    reasoning: model.reasoning,
     maxContextTokens: model.maxContextTokens,
     maxOutputTokens: model.maxOutputTokens
   };
@@ -113,6 +118,7 @@ function readModelInstance(value: unknown): ModelInstance | undefined {
     label: record.label,
     baseUrl: record.baseUrl,
     apiKeyRef: record.apiKeyRef,
+    protocol: readModelApiProtocol(record.protocol),
     endpointVariant: readEndpointVariant(record.endpointVariant),
     models,
     createdAt: typeof record.createdAt === "number" && Number.isFinite(record.createdAt) ? record.createdAt : undefined,
@@ -130,6 +136,10 @@ function readModelCapability(value: unknown): ModelCapability | undefined {
     displayName: typeof record.displayName === "string" ? record.displayName : undefined,
     vision: record.vision === true,
     tools: record.tools === true,
+    structuredOutputs: typeof record.structuredOutputs === "boolean" ? record.structuredOutputs : undefined,
+    jsonMode: typeof record.jsonMode === "boolean" ? record.jsonMode : undefined,
+    strictTools: typeof record.strictTools === "boolean" ? record.strictTools : undefined,
+    reasoning: typeof record.reasoning === "boolean" ? record.reasoning : undefined,
     maxContextTokens,
     maxOutputTokens: typeof record.maxOutputTokens === "number" && Number.isFinite(record.maxOutputTokens) ? record.maxOutputTokens : undefined
   };
@@ -168,4 +178,8 @@ function isProviderRef(value: unknown): value is ProviderRef {
 
 function readEndpointVariant(value: unknown): ModelInstance["endpointVariant"] {
   return value === "openai_compatible" || value === "anthropic" || value === "gemini" ? value : undefined;
+}
+
+function readModelApiProtocol(value: unknown): ModelApiProtocol | undefined {
+  return value === "auto" || value === "responses" || value === "chat_completions" || value === "completions" ? value : undefined;
 }

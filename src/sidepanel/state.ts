@@ -6,7 +6,7 @@ import type { SkillPackageSummary } from "../core/capabilities/skills";
 import type { RuntimeSettings } from "../core/runtime/execution-budget";
 import type { ModelConfigProtocolState } from "../shared/protocol";
 import { createTranslator, type SidepanelLocale, type TranslationKey } from "./i18n";
-import { defaultModelSettings, type CapabilitySettingsState, type ModelSettingsState } from "./settings";
+import { defaultModelSettings, isModelApiProtocol, type CapabilitySettingsState, type ModelSettingField, type ModelSettingsState } from "./settings";
 import { classifyRuntimeIssue, formatRuntimeIssue } from "./runtime-issue";
 
 export type SidepanelMode = "conversation" | "workbench";
@@ -79,9 +79,12 @@ export interface ModelStreamState {
   contentText?: string;
   toolArgumentsText?: string;
   phase?: "waiting" | "reasoning" | "tool" | "answering" | "complete";
+  stage?: string;
   isStreaming: boolean;
   role?: string;
   model?: string;
+  protocol?: string;
+  elapsedMs?: number;
   chunkCount?: number;
   receivedChars?: number;
   toolNames?: string[];
@@ -374,7 +377,8 @@ function modelSettingsDraftForInstance(
       providerBaseUrl: instance.baseUrl,
       plannerModel,
       visionModel,
-      apiKeyRef: instance.apiKeyRef
+      apiKeyRef: instance.apiKeyRef,
+      protocol: instance.protocol ?? "auto"
     },
     detectedModels
   };
@@ -409,16 +413,17 @@ export function applyModelDetectionSuccessState(
 export function applyModelSettingChangeState(
   state: SidepanelState,
   input: {
-    field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel";
+    field: ModelSettingField;
     value: string;
     defaultSettings: ModelSettingsState;
     unsavedMessage: string;
   }
 ): SidepanelState {
   const resetDetection = input.field === "providerBaseUrl" || input.field === "apiKey";
+  const value = input.field === "protocol" ? (isModelApiProtocol(input.value) ? input.value : "auto") : input.value;
   const modelSettings: ModelSettingsState = {
     ...(state.modelSettings ?? input.defaultSettings),
-    [input.field]: input.value,
+    [input.field]: value,
     ...(resetDetection ? { plannerModel: "", visionModel: "" } : {})
   };
 
@@ -854,9 +859,16 @@ export function deriveLatestModelStream(events: AgentEvent[], locale?: Sidepanel
   let toolNames: string[] = [];
   let lastTitle = eventTitle(latest.type, locale);
   let latestKinds: string[] = [];
+  let stage: string | undefined;
+  let elapsedMs: number | undefined;
+  let protocol: string | undefined;
 
   for (const event of relevant) {
     lastTitle = eventTitle(event.type, locale);
+    stage = modelString(event.payload, "stage") ?? stage;
+    protocol = modelString(event.payload, "protocol") ?? protocol;
+    if (typeof event.payload.elapsedMs === "number") elapsedMs = Math.max(elapsedMs ?? 0, event.payload.elapsedMs);
+    if (typeof event.payload.totalElapsedMs === "number") elapsedMs = Math.max(elapsedMs ?? 0, event.payload.totalElapsedMs);
     if (event.type === "ModelCallProgress") {
       const chunk = modelRawString(event.payload, "chunk");
       const reasoningChunk = modelRawString(event.payload, "reasoningChunk");
@@ -900,15 +912,22 @@ export function deriveLatestModelStream(events: AgentEvent[], locale?: Sidepanel
   const text = contentText || reasoningText || toolArgumentsText;
   const truncated = [reasoningFullText, answerFullText, toolArgumentsFullText].some((value) => value.length > maxVisibleChars);
   const isStreaming = latest.type === "ModelCallStarted" || latest.type === "ModelCallProgress";
+  const stagePhase: ModelStreamState["phase"] | undefined = stage === "reasoning"
+    ? "reasoning"
+    : stage === "content"
+      ? "answering"
+      : stage === "tool_arguments"
+        ? "tool"
+        : undefined;
   const phase: ModelStreamState["phase"] = !isStreaming
     ? "complete"
-    : latestKinds.includes("content") || contentFullText
+    : stagePhase ?? (latestKinds.includes("content") || contentFullText
       ? "answering"
       : latestKinds.includes("tool_arguments") || toolArgumentsFullText
         ? "tool"
         : latestKinds.includes("reasoning") || reasoningFullText
           ? "reasoning"
-          : "waiting";
+          : "waiting");
   return {
     title: lastTitle,
     text,
@@ -916,9 +935,12 @@ export function deriveLatestModelStream(events: AgentEvent[], locale?: Sidepanel
     contentText: contentText || undefined,
     toolArgumentsText: toolArgumentsText || undefined,
     phase,
+    stage,
     isStreaming,
     role,
     model,
+    protocol,
+    elapsedMs,
     chunkCount: chunkCount || undefined,
     receivedChars,
     toolNames: toolNames.length > 0 ? [...new Set(toolNames)] : undefined,

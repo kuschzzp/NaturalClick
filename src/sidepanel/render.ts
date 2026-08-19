@@ -3,7 +3,7 @@ import type { FileAttachmentContext, GeneratedTextArtifactSummary } from "../cor
 import type { ScratchpadFieldValue, ScratchpadRecord } from "../core/capabilities/scratchpad";
 import type { ScheduledTaskRecord, ScheduleTrigger } from "../core/capabilities/schedule";
 import type { SkillPackageSummary } from "../core/capabilities/skills";
-import type { ModelRuntimeConfig } from "../core/model/model-instance";
+import type { ModelApiProtocol, ModelRuntimeConfig } from "../core/model/model-instance";
 import { standardRuntimeSettings, type ExecutionPreset, type RuntimeSettings } from "../core/runtime/execution-budget";
 import { createTranslator, normalizeLocale, type SidepanelLocale, type TranslationKey } from "./i18n";
 import { renderWorkbenchComposerMeta } from "./components/workbench";
@@ -28,6 +28,7 @@ import {
   defaultModelSettings,
   plannerModelChoices,
   visionModelChoices,
+  type ModelSettingField,
   type SearchProviderMode
 } from "./settings";
 import { buildWorkbenchViewModel } from "./view-model";
@@ -66,7 +67,7 @@ export interface SidepanelHandlers {
   onOpenModelConfigEditor?: (instanceId?: string) => void;
   onCloseModelConfigEditor?: () => void;
   onThemeModeChange?: (mode: ThemeMode | string) => void;
-  onModelSettingChange?: (field: "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel", value: string) => void;
+  onModelSettingChange?: (field: ModelSettingField, value: string) => void;
   onPickPlannerModel?: (model: string) => void;
   onModelPickerQueryChange?: (query: string) => void;
   onDetectModels?: () => void;
@@ -324,10 +325,36 @@ function renderInlineModelStream(stream: ModelStreamState, t: Translator): HTMLE
   panel.setAttribute("aria-live", "polite");
   const meta = el("div", "nc-run-model-stream__meta");
   if (stream.model) meta.append(el("span", "nc-run-model-stream__model", stream.model));
+  if (stream.protocol) meta.append(el("span", "nc-run-model-stream__protocol", stream.protocol));
+  if (stream.elapsedMs !== undefined) {
+    meta.append(el("span", "nc-run-model-stream__elapsed", t("modelStream.elapsed", { seconds: Math.max(0, Math.floor(stream.elapsedMs / 1000)) })));
+  }
   if (stream.receivedChars !== undefined) {
     meta.append(el("span", "nc-run-model-stream__count", t("modelStream.characters", { count: stream.receivedChars })));
   }
   panel.append(meta);
+
+  const stageLabel = (() => {
+    switch (stream.stage) {
+      case "connecting": return t("modelStream.stage.connecting");
+      case "waiting_model_output": return t("modelStream.stage.waitingOutput");
+      case "receiving_response": return t("modelStream.stage.receiving");
+      case "reasoning": return t("modelStream.stage.reasoning");
+      case "content": return t("modelStream.stage.content");
+      case "tool_arguments": return t("modelStream.stage.tools");
+      case "protocol_fallback": return t("modelStream.stage.protocolFallback");
+      case "contract_repair": return t("modelStream.stage.contractRepair");
+      case "retrying_truncated_output": return t("modelStream.stage.truncatedRetry");
+      case "retrying_empty_output": return t("modelStream.stage.emptyRetry");
+      case "retrying_without_tools": return t("modelStream.stage.toolsRetry");
+      default: return stream.isStreaming ? t("modelStream.waiting") : undefined;
+    }
+  })();
+  if (stream.isStreaming && stageLabel) {
+    const stage = el("div", "nc-run-model-stream__stage", stageLabel);
+    stage.prepend(el("span", "nc-run-model-stream__status-dot"));
+    panel.append(stage);
+  }
 
   if (stream.toolNames?.length) {
     panel.append(el("div", "nc-run-model-stream__tools", t("modelStream.tools", { tools: stream.toolNames.join(", ") })));
@@ -382,9 +409,11 @@ function renderInlineModelStream(stream: ModelStreamState, t: Translator): HTMLE
   }
 
   if (!reasoningText && !answerText && !stream.toolArgumentsText) {
-    const waiting = el("div", "nc-run-model-stream__waiting", stream.text || t("modelStream.waiting"));
-    if (stream.isStreaming) waiting.append(cursor());
-    panel.append(waiting);
+    if (!stream.isStreaming || !stageLabel) {
+      const waiting = el("div", "nc-run-model-stream__waiting", stream.text || t("modelStream.waiting"));
+      if (stream.isStreaming) waiting.append(cursor());
+      panel.append(waiting);
+    }
   }
   if (stream.truncated) panel.append(el("div", "nc-run-model-stream__notice", t("modelStream.truncated")));
   return panel;
@@ -987,13 +1016,14 @@ function renderModelChoiceField(
   placeholder: string,
   countLabel: string,
   allowEmpty = false,
-  searchLabels?: { label: string; placeholder: string; noResults: string }
+  searchLabels?: { label: string; placeholder: string; noResults: string },
+  formatValue: (value: string) => string = (value) => value
 ): HTMLElement {
   const wrapper = el("fieldset", "nc-field nc-model-choice-field");
   wrapper.append(el("legend", "nc-field__label", label));
 
   const selectedValue = value.trim();
-  const selectedLabel = selectedValue || placeholder;
+  const selectedLabel = selectedValue ? formatValue(selectedValue) : placeholder;
   const details = el("details", "nc-model-select");
   const trigger = el("summary", "nc-model-select__trigger");
   trigger.setAttribute("aria-haspopup", "listbox");
@@ -1110,11 +1140,11 @@ function renderModelChoiceField(
       list.append(el("p", "nc-model-choice-empty", placeholder));
     } else {
       selectableModels.forEach((model) => {
-        const option = button(`nc-model-choice nc-model-select__option${selectedValue === model ? " nc-model-choice--active" : ""}`, model);
+        const option = button(`nc-model-choice nc-model-select__option${selectedValue === model ? " nc-model-choice--active" : ""}`, formatValue(model));
         option.setAttribute("role", "option");
         option.setAttribute("aria-selected", String(selectedValue === model));
         option.dataset.modelValue = model;
-        option.title = model;
+        option.title = formatValue(model);
         option.addEventListener("click", () => {
           onChange(model);
           closeSelect();
@@ -1328,7 +1358,27 @@ function renderModelConfigWizard(state: SidepanelState, handlers: SidepanelHandl
 
   const apiSection = el("section", "nc-config-section nc-config-section--api");
   apiSection.append(el("span", "nc-config-section__label", t("settings.myConfigs.apiSection")));
+  const protocolOptions: ModelApiProtocol[] = ["auto", "responses", "chat_completions", "completions"];
+  const protocolLabels: Record<ModelApiProtocol, string> = {
+    auto: t("settings.model.protocol.auto"),
+    responses: t("settings.model.protocol.responses"),
+    chat_completions: t("settings.model.protocol.chatCompletions"),
+    completions: t("settings.model.protocol.completions")
+  };
+  const protocolField = renderModelChoiceField(
+    t("settings.model.protocol"),
+    settings.protocol ?? "auto",
+    protocolOptions,
+    (value) => handlers.onModelSettingChange?.("protocol", value),
+    t("settings.model.protocol.auto"),
+    t("settings.model.protocol.detail"),
+    false,
+    undefined,
+    (value) => protocolLabels[value as ModelApiProtocol] ?? value
+  );
+  protocolField.classList.add("nc-protocol-choice-field");
   apiSection.append(
+    protocolField,
     renderInputField(t("settings.model.api"), settings.providerBaseUrl, (value) => handlers.onModelSettingChange?.("providerBaseUrl", value), {
       placeholder: "https://api.openai.com/v1",
       autocomplete: "url",

@@ -1,4 +1,5 @@
 import {
+  extractOpenAICompatibleCompletionText,
   extractOpenAICompatibleContentText,
   extractOpenAICompatibleReasoningText,
   extractOpenAICompatibleToolCallDeltas,
@@ -22,6 +23,19 @@ export interface OpenAICompatibleStreamTurn {
   text: string;
   toolCalls: OpenAICompatibleToolCall[];
   toolArgumentsText: string;
+  responseId?: string;
+  finishReason?: string;
+  refusal?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    reasoningTokens?: number;
+  };
+}
+
+export interface OpenAICompatibleStreamOptions {
+  protocol?: "chat_completions" | "completions";
+  onActivity?: () => void | Promise<void>;
 }
 
 interface PendingToolCall {
@@ -49,7 +63,8 @@ export async function readOpenAICompatibleStream(
 
 export async function readOpenAICompatibleStreamTurn(
   stream: ReadableStream<Uint8Array>,
-  onProgress?: (progress: StreamProgress) => void | Promise<void>
+  onProgress?: (progress: StreamProgress) => void | Promise<void>,
+  options: OpenAICompatibleStreamOptions = {}
 ): Promise<OpenAICompatibleStreamTurn> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -58,10 +73,40 @@ export async function readOpenAICompatibleStreamTurn(
   let visibleReceivedChars = 0;
   let chunkIndex = 0;
   const pendingToolCalls = new Map<string, PendingToolCall>();
+  let responseId: string | undefined;
+  let finishReason: string | undefined;
+  let refusal: string | undefined;
+  let usage: OpenAICompatibleStreamTurn["usage"];
+
+  const updateMetadata = (payload: unknown): void => {
+    if (!payload || typeof payload !== "object") return;
+    const record = payload as Record<string, unknown>;
+    if (typeof record.id === "string") responseId = record.id;
+    const choice = Array.isArray(record.choices) && record.choices[0] && typeof record.choices[0] === "object"
+      ? record.choices[0] as Record<string, unknown>
+      : undefined;
+    if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+    const message = choice?.delta && typeof choice.delta === "object" ? choice.delta as Record<string, unknown>
+      : choice?.message && typeof choice.message === "object" ? choice.message as Record<string, unknown>
+      : undefined;
+    if (typeof message?.refusal === "string") refusal = `${refusal ?? ""}${message.refusal}`;
+    const rawUsage = record.usage && typeof record.usage === "object" ? record.usage as Record<string, unknown> : undefined;
+    if (rawUsage) {
+      const details = rawUsage.completion_tokens_details && typeof rawUsage.completion_tokens_details === "object"
+        ? rawUsage.completion_tokens_details as Record<string, unknown>
+        : undefined;
+      usage = {
+        inputTokens: typeof rawUsage.prompt_tokens === "number" ? rawUsage.prompt_tokens : undefined,
+        outputTokens: typeof rawUsage.completion_tokens === "number" ? rawUsage.completion_tokens : undefined,
+        reasoningTokens: typeof details?.reasoning_tokens === "number" ? details.reasoning_tokens : undefined
+      };
+    }
+  };
 
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
+    if (value.byteLength > 0) await options.onActivity?.();
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() ?? "";
@@ -69,11 +114,14 @@ export async function readOpenAICompatibleStreamTurn(
     for (const line of lines) {
       const data = parseDataLine(line);
       if (!data) continue;
-      if (data === "[DONE]") return finishedStreamTurn(text, pendingToolCalls);
+      if (data === "[DONE]") return finishedStreamTurn(text, pendingToolCalls, { responseId, finishReason, refusal, usage });
       try {
         const payload = JSON.parse(data);
+        updateMetadata(payload);
         const toolProgress = mergeToolCallDeltas(pendingToolCalls, payload);
-        const chunk = extractOpenAICompatibleContentText(payload);
+        const chunk = options.protocol === "completions"
+          ? extractOpenAICompatibleCompletionText(payload)
+          : extractOpenAICompatibleContentText(payload);
         const reasoningChunk = extractOpenAICompatibleReasoningText(payload);
         const visibleChunk = `${chunk}${reasoningChunk}${toolProgress.argumentsChunk}`;
         if (chunk) {
@@ -105,13 +153,16 @@ export async function readOpenAICompatibleStreamTurn(
   if (remaining && remaining !== "[DONE]") {
     try {
       const payload = JSON.parse(remaining);
+      updateMetadata(payload);
       mergeToolCallDeltas(pendingToolCalls, payload);
-      text += extractOpenAICompatibleContentText(payload);
+      text += options.protocol === "completions"
+        ? extractOpenAICompatibleCompletionText(payload)
+        : extractOpenAICompatibleContentText(payload);
     } catch {
       // Ignore malformed trailing data.
     }
   }
-  return finishedStreamTurn(text, pendingToolCalls);
+  return finishedStreamTurn(text, pendingToolCalls, { responseId, finishReason, refusal, usage });
 }
 
 function mergeToolCallDeltas(pending: Map<string, PendingToolCall>, payload: unknown): { changed: boolean; argumentsChunk: string } {
@@ -160,13 +211,21 @@ function finishedToolCalls(pending: Map<string, PendingToolCall>): OpenAICompati
     });
 }
 
-function finishedStreamTurn(text: string, pending: Map<string, PendingToolCall>): OpenAICompatibleStreamTurn {
+function finishedStreamTurn(
+  text: string,
+  pending: Map<string, PendingToolCall>,
+  metadata: Pick<OpenAICompatibleStreamTurn, "responseId" | "finishReason" | "refusal" | "usage"> = {}
+): OpenAICompatibleStreamTurn {
   return {
     text,
     toolCalls: finishedToolCalls(pending),
     toolArgumentsText: [...pending.values()]
       .sort((left, right) => left.order - right.order)
       .map((call) => call.argumentsText)
-      .join("")
+      .join(""),
+    ...(metadata.responseId ? { responseId: metadata.responseId } : {}),
+    ...(metadata.finishReason ? { finishReason: metadata.finishReason } : {}),
+    ...(metadata.refusal ? { refusal: metadata.refusal } : {}),
+    ...(metadata.usage ? { usage: metadata.usage } : {})
   };
 }

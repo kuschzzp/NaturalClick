@@ -871,7 +871,7 @@ describe("sidepanel render", () => {
       "gpt-4.1-mini",
       "gpt-4.1"
     ]);
-    const selectors = Array.from(root.querySelectorAll<HTMLDetailsElement>(".nc-model-select"));
+    const selectors = Array.from(root.querySelectorAll<HTMLDetailsElement>(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select"));
     expect(selectors).toHaveLength(2);
     expect(selectors[0]?.querySelector(".nc-model-select__trigger")?.textContent).toContain("gpt-4.1-mini");
     expect(root.querySelector(".nc-model-choice-list")).toBeNull();
@@ -1067,13 +1067,13 @@ describe("sidepanel render", () => {
       })
     );
 
-    expect(root.querySelectorAll(".nc-model-select")).toHaveLength(2);
-    expect(root.querySelector(".nc-model-select__trigger")?.textContent).toContain("provider-model-1");
+    expect(root.querySelectorAll(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select")).toHaveLength(2);
+    expect(root.querySelector(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select__trigger")?.textContent).toContain("provider-model-1");
     expect(root.querySelectorAll(".nc-config-wizard .nc-config-model-row__id")).toHaveLength(1);
     expect(root.querySelector(".nc-model-pool-header")?.textContent).toContain("77 models");
     expect(root.textContent).not.toContain("provider-model-77");
     expect(root.querySelectorAll(".nc-model-select__option")).toHaveLength(0);
-    const selectors = Array.from(root.querySelectorAll<HTMLDetailsElement>(".nc-model-select"));
+    const selectors = Array.from(root.querySelectorAll<HTMLDetailsElement>(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select"));
     selectors[0].open = true;
     selectors[0].dispatchEvent(new Event("toggle"));
     selectors[1].open = true;
@@ -1118,7 +1118,7 @@ describe("sidepanel render", () => {
       })
     );
 
-    const selectors = Array.from(root.querySelectorAll<HTMLDetailsElement>(".nc-model-select"));
+    const selectors = Array.from(root.querySelectorAll<HTMLDetailsElement>(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select"));
     expect(selectors).toHaveLength(2);
     expect(selectors[0]?.querySelector(".nc-model-select__trigger")?.textContent).toContain("4 models");
     expect(selectors[1]?.querySelector(".nc-model-select__trigger")?.textContent).toContain("2 models");
@@ -1165,7 +1165,7 @@ describe("sidepanel render", () => {
     expect(root.querySelector(".nc-config-wizard .nc-config-model-list")?.textContent).toContain(
       "Detected models are ready. Choose the active Planner from the dropdown above."
     );
-    expect(root.querySelectorAll(".nc-model-select")).toHaveLength(2);
+    expect(root.querySelectorAll(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select")).toHaveLength(2);
     expect(root.querySelectorAll(".nc-model-select__option")).toHaveLength(0);
   });
 
@@ -1191,7 +1191,7 @@ describe("sidepanel render", () => {
       })
     );
 
-    const selector = root.querySelector<HTMLDetailsElement>(".nc-model-select");
+    const selector = root.querySelector<HTMLDetailsElement>(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select");
     const trigger = selector?.querySelector<HTMLElement>(".nc-model-select__trigger");
     if (!selector || !trigger) throw new Error("expected model selector");
 
@@ -1365,6 +1365,9 @@ describe("sidepanel render", () => {
           text: '{"type":"FinishTask","summary":"南京今天多云"}',
           isStreaming: true,
           model: "qwen3.7-max",
+          protocol: "chat_completions",
+          stage: "content",
+          elapsedMs: 12_000,
           chunkCount: 2,
           receivedChars: 33
         }
@@ -1375,11 +1378,38 @@ describe("sidepanel render", () => {
     expect(root.textContent).toContain("南京今天多云");
     expect(root.querySelectorAll(".nc-run-model-stream")).toHaveLength(1);
     expect(root.querySelector(".nc-run-model-stream__model")?.textContent).toBe("qwen3.7-max");
+    expect(root.querySelector(".nc-run-model-stream__protocol")?.textContent).toBe("chat_completions");
+    expect(root.querySelector(".nc-run-model-stream__elapsed")?.textContent).toBe("已等待 12 秒");
+    expect(root.querySelector(".nc-run-model-stream__stage")?.textContent).toContain("正在生成 Planner 结果");
     expect(root.querySelector(".nc-run-model-stream__body")?.textContent).toContain('"summary":"南京今天多云"');
     expect(root.querySelector(".nc-run-step:nth-child(2) .nc-run-model-stream")).not.toBeNull();
     expect(root.querySelector(".nc-run-model-stream__cursor")).not.toBeNull();
     expect((root.querySelector(".nc-run-trace") as HTMLDetailsElement)?.open).toBe(true);
     expect(root.querySelector(".nc-message")).toBeNull();
+  });
+
+  it("shows contract repair as a live execution stage before output resumes", () => {
+    const root = document.createElement("main");
+    renderSidepanel(root, baseState({
+      locale: "zh-CN",
+      activeTask: { taskId: "task-1", status: "running" },
+      timeline: [
+        { id: "start", title: "任务开始", detail: "检查页面", eventType: "TaskStarted" },
+        { id: "model", title: "模型调用开始", eventType: "ModelCallStarted" }
+      ],
+      modelStream: {
+        title: "模型正在输出",
+        text: "",
+        stage: "contract_repair",
+        protocol: "responses",
+        elapsedMs: 34_000,
+        isStreaming: true
+      }
+    }));
+
+    expect(root.querySelector(".nc-run-model-stream__stage")?.textContent).toContain("正在修复 Planner 输出格式");
+    expect(root.querySelector(".nc-run-model-stream__elapsed")?.textContent).toBe("已等待 34 秒");
+    expect(root.querySelector(".nc-run-model-stream__waiting")).toBeNull();
   });
 
   it("shows tool-call activity when the planner stream has no text", () => {
@@ -1738,6 +1768,7 @@ describe("sidepanel render", () => {
 
   it("renders settings as a full sidepanel page", () => {
     const root = document.createElement("main");
+    const onModelSettingChange = vi.fn();
 
     renderSidepanel(
       root,
@@ -1758,7 +1789,8 @@ describe("sidepanel render", () => {
         modelConfigWizardOpen: true,
         modelSettingsDirty: true,
         settingsDirty: true
-      })
+      }),
+      { onModelSettingChange }
     );
 
     expect(root.textContent).toContain("Settings");
@@ -1771,16 +1803,28 @@ describe("sidepanel render", () => {
     expect(root.querySelector(".nc-config-dialog-backdrop")).not.toBeNull();
     expect(root.querySelector('button[aria-label="Cancel"]')).not.toBeNull();
     const labels = Array.from(root.querySelectorAll(".nc-field__label")).map((node) => node.textContent);
-    expect(labels).toEqual(expect.arrayContaining(["API", "API Key", "Planner model", "Vision model"]));
+    expect(labels).toEqual(expect.arrayContaining(["API protocol", "API", "API Key", "Planner model", "Vision model"]));
     expect(labels).toEqual(expect.arrayContaining(["Max steps", "Observation rounds", "Hard candidate limit"]));
     expect(root.querySelector('button[aria-label="Detect models"]')).not.toBeNull();
     expect(root.querySelector('button[aria-label="Save configuration"]')).not.toBeNull();
     expect(root.querySelector(".nc-config-dialog__footer button[aria-label='Save configuration']")).not.toBeNull();
     expect(root.textContent).toContain("Unsaved changes");
     expect(root.querySelector("select")).toBeNull();
-    expect(root.querySelectorAll(".nc-model-select")).toHaveLength(2);
-    expect(root.querySelector(".nc-model-select__trigger")?.textContent).toContain("gpt-4.1-mini");
-    const plannerSelect = root.querySelector<HTMLDetailsElement>(".nc-model-select");
+    expect(root.querySelectorAll(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select")).toHaveLength(2);
+    expect(root.querySelector(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select__trigger")?.textContent).toContain("gpt-4.1-mini");
+    const protocolSelect = root.querySelector<HTMLDetailsElement>(".nc-protocol-choice-field .nc-model-select");
+    expect(protocolSelect?.querySelector(".nc-model-select__trigger")?.textContent).toContain("Auto detect");
+    protocolSelect!.open = true;
+    protocolSelect!.dispatchEvent(new Event("toggle"));
+    expect(Array.from(protocolSelect!.querySelectorAll(".nc-model-choice")).map((node) => node.textContent)).toEqual([
+      "Auto detect",
+      "Responses API",
+      "Chat Completions",
+      "Legacy Completions"
+    ]);
+    Array.from(protocolSelect!.querySelectorAll<HTMLButtonElement>(".nc-model-choice")).find((node) => node.textContent === "Responses API")?.click();
+    expect(onModelSettingChange).toHaveBeenCalledWith("protocol", "responses");
+    const plannerSelect = root.querySelector<HTMLDetailsElement>(".nc-model-choice-field:not(.nc-protocol-choice-field) .nc-model-select");
     if (!plannerSelect) throw new Error("expected planner select");
     expect(plannerSelect.querySelector(".nc-model-choice")).toBeNull();
     plannerSelect.open = true;

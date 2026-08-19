@@ -1,4 +1,4 @@
-import type { ModelInstance, ModelSelection } from "../core/model/model-instance";
+import type { ModelApiProtocol, ModelInstance, ModelSelection } from "../core/model/model-instance";
 import type { ModelConfigProtocolRequest } from "../shared/protocol";
 export {
   defaultCapabilitySettings,
@@ -14,7 +14,10 @@ export interface ModelSettingsState {
   plannerModel: string;
   visionModel?: string;
   apiKeyRef: string;
+  protocol?: ModelApiProtocol;
 }
+
+export type ModelSettingField = "providerBaseUrl" | "apiKey" | "plannerModel" | "visionModel" | "protocol";
 
 export interface ModelConfigPanelState {
   instances: ModelInstance[];
@@ -31,7 +34,11 @@ export interface SettingsValidationResult {
 
 export const LEGACY_MODEL_INSTANCE_ID = "legacy_openai_compatible";
 
-export type ExistingModelInstanceDraft = Pick<ModelInstance, "id" | "provider" | "label" | "endpointVariant" | "createdAt">;
+export type ExistingModelInstanceDraft = Pick<ModelInstance, "id" | "provider" | "label" | "endpointVariant" | "protocol" | "createdAt">;
+
+export function isModelApiProtocol(value: unknown): value is ModelApiProtocol {
+  return value === "auto" || value === "responses" || value === "chat_completions" || value === "completions";
+}
 
 export function defaultModelSettings(): ModelSettingsState {
   return {
@@ -39,7 +46,8 @@ export function defaultModelSettings(): ModelSettingsState {
     apiKey: "",
     plannerModel: "",
     visionModel: "",
-    apiKeyRef: "naturalclick:model-api-key"
+    apiKeyRef: "naturalclick:model-api-key",
+    protocol: "auto"
   };
 }
 
@@ -76,6 +84,7 @@ export function legacySettingsToModelInstance(
     baseUrl: providerBaseUrl,
     apiKeyRef,
     endpointVariant: existingInstance?.endpointVariant ?? "openai_compatible",
+    protocol: settings.protocol ?? existingInstance?.protocol ?? "auto",
     createdAt: existingInstance?.createdAt,
     models: models.map((id) => ({
       id,
