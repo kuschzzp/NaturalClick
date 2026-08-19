@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent, AgentEventType } from "../../../src/core/events/events";
 import {
+  deriveSessionTitle,
   applyModelDetectionSuccessState,
   applyModelSettingChangeState,
   applyPlannerQuickPickState,
@@ -50,6 +51,12 @@ function makeEvent(type: AgentEventType, payload: Record<string, unknown> = {}, 
 }
 
 describe("sidepanel state", () => {
+  it("derives a stable 15-character title from the first user prompt", () => {
+    expect(deriveSessionTitle("  帮我   打开设置页面并修改默认语言，然后保存  ", "新对话")).toBe("帮我 打开设置页面并修改默认语...");
+    expect(deriveSessionTitle("\n打开设置\n", "新对话")).toBe("打开设置");
+    expect(deriveSessionTitle("", "新对话")).toBe("新对话");
+  });
+
   it("uses conversation mode when no task is active", () => {
     expect(deriveSidepanelMode(base)).toBe("conversation");
   });
@@ -506,6 +513,42 @@ describe("sidepanel state", () => {
     expect(stream?.model).toBe("qwen3.7-max");
   });
 
+  it("keeps reasoning, answer content, and tool arguments in separate model streams", () => {
+    const stream = deriveLatestModelStream([
+      makeEvent("ModelCallStarted", { role: "planner", model: "deepseek-reasoner" }),
+      makeEvent("ModelCallProgress", {
+        role: "planner",
+        reasoningChunk: "先理解用户目标。",
+        contentChunk: "",
+        toolArgumentsChunk: "",
+        chunk: "先理解用户目标。",
+        streamKinds: ["reasoning"],
+        chunkIndex: 1,
+        receivedChars: 8
+      }),
+      makeEvent("ModelCallProgress", {
+        role: "planner",
+        reasoningChunk: "",
+        contentChunk: "我会先检查页面。",
+        toolArgumentsChunk: '{"mode":"atlas"}',
+        chunk: '我会先检查页面。{"mode":"atlas"}',
+        streamKinds: ["content", "tool_arguments"],
+        chunkIndex: 2,
+        receivedChars: 32,
+        toolCallNames: ["read_page"]
+      })
+    ]);
+
+    expect(stream).toMatchObject({
+      reasoningText: "先理解用户目标。",
+      contentText: "我会先检查页面。",
+      toolArgumentsText: '{"mode":"atlas"}',
+      text: "我会先检查页面。",
+      phase: "answering",
+      toolNames: ["read_page"]
+    });
+  });
+
   it("uses completion preview when a provider does not stream progress chunks", () => {
     const stream = deriveLatestModelStream([makeEvent("ModelCallCompleted", { outputPreview: '{"type":"FinishTask"}', outputChars: 21 })], "en");
 
@@ -513,12 +556,51 @@ describe("sidepanel state", () => {
     expect(stream?.isStreaming).toBe(false);
   });
 
+  it("caps long streamed output and keeps streamed tool names", () => {
+    const stream = deriveLatestModelStream([
+      makeEvent("ModelCallStarted", { role: "planner", model: "qwen3.7-max" }),
+      makeEvent("ModelCallProgress", {
+        role: "planner",
+        model: "qwen3.7-max",
+        chunk: `prefix-${"x".repeat(12_100)}`,
+        chunkIndex: 1,
+        receivedChars: 12_107,
+        toolCallNames: ["read_page"]
+      })
+    ], "en");
+
+    expect(stream?.text.length).toBe(12_000);
+    expect(stream?.text.startsWith("x")).toBe(true);
+    expect(stream?.truncated).toBe(true);
+    expect(stream?.toolNames).toEqual(["read_page"]);
+    expect(stream?.receivedChars).toBe(12_107);
+  });
+
   it("derives active task projection from events", () => {
     const activeTask = deriveActiveTaskFromEvents([makeEvent("TaskStarted", { taskText: "打开设置" })]);
 
     expect(activeTask?.activeNodeId).toBe("start");
     expect(activeTask?.currentAction).toBe("打开设置");
-    expect(activeTask?.status).toBe("running");
+    expect(activeTask?.status).toBe("interpreting");
+  });
+
+  it("keeps the latest meaningful phase across noisy model and evidence events", () => {
+    const observing = deriveActiveTaskFromEvents([
+      makeEvent("TaskStarted", { taskText: "打开设置" }, { id: "start" }),
+      makeEvent("ObservationRequested", { instruction: "检查当前页面" }, { id: "observe" }),
+      makeEvent("ModelCallProgress", { chunk: "{", chunkIndex: 1 }, { id: "chunk" })
+    ]);
+    const executing = deriveActiveTaskFromEvents([
+      makeEvent("TaskStarted", { taskText: "打开设置" }, { id: "start" }),
+      makeEvent("CommandIssued", { commandName: "点击设置" }, { id: "command" }),
+      makeEvent("EvidenceAdded", { evidence: { kind: "control_presence" } }, { id: "evidence" }),
+      makeEvent("ModelCallCompleted", { outputChars: 42 }, { id: "model-done" })
+    ]);
+
+    expect(observing?.status).toBe("observing");
+    expect(observing?.currentAction).toBe("检查当前页面");
+    expect(executing?.status).toBe("executing");
+    expect(executing?.currentAction).toBe("点击设置");
   });
 
   it("shows recovered background interruptions as paused instead of running", () => {
@@ -639,7 +721,7 @@ describe("sidepanel state", () => {
   });
 
   it("preserves explicitly saved page marker settings across reloads", () => {
-    const defaults = { overlayMode: "Off" as const, safetyMode: "experimental_full_auto" as const, themeMode: "system" as const };
+    const defaults = { overlayMode: "Focus" as const, safetyMode: "experimental_full_auto" as const, themeMode: "light" as const };
     const serialized = serializeGeneralSettings({ overlayMode: "All Targets", safetyMode: "balanced", themeMode: "dark" });
 
     expect(resolveStoredGeneralSettings(JSON.parse(serialized), defaults)).toEqual({
@@ -649,11 +731,19 @@ describe("sidepanel state", () => {
     });
   });
 
+  it("uses the light theme only when no valid theme preference is stored", () => {
+    const defaults = { overlayMode: "Focus" as const, safetyMode: "experimental_full_auto" as const, themeMode: "light" as const };
+
+    expect(resolveStoredGeneralSettings(undefined, defaults).themeMode).toBe("light");
+    expect(resolveStoredGeneralSettings({ themeMode: "dark" }, defaults).themeMode).toBe("dark");
+    expect(resolveStoredGeneralSettings({ themeMode: "system" }, defaults).themeMode).toBe("system");
+  });
+
   it("migrates only legacy all-target marker settings back to the safe default", () => {
-    const defaults = { overlayMode: "Off" as const, safetyMode: "experimental_full_auto" as const, themeMode: "system" as const };
+    const defaults = { overlayMode: "Focus" as const, safetyMode: "experimental_full_auto" as const, themeMode: "system" as const };
 
     expect(resolveStoredGeneralSettings({ overlayMode: "All Targets", safetyMode: "balanced" }, defaults)).toEqual({
-      overlayMode: "Off",
+      overlayMode: "Focus",
       safetyMode: "balanced",
       themeMode: "system"
     });

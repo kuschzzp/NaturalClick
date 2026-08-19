@@ -46,6 +46,14 @@ export interface TimelineItem {
   title: string;
   detail?: string;
   tone?: "info" | "success" | "warning" | "error";
+  eventType?: AgentEventType;
+}
+
+export function deriveSessionTitle(prompt: string | undefined, fallback: string, limit = 15): string {
+  const normalized = String(prompt ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) return fallback;
+  const characters = Array.from(normalized);
+  return characters.length > limit ? `${characters.slice(0, limit).join("")}...` : normalized;
 }
 
 export interface RunDigestMetric {
@@ -67,11 +75,28 @@ export interface RunDigest {
 export interface ModelStreamState {
   title: string;
   text: string;
+  reasoningText?: string;
+  contentText?: string;
+  toolArgumentsText?: string;
+  phase?: "waiting" | "reasoning" | "tool" | "answering" | "complete";
   isStreaming: boolean;
   role?: string;
   model?: string;
   chunkCount?: number;
   receivedChars?: number;
+  toolNames?: string[];
+  truncated?: boolean;
+}
+
+export interface ConversationTurnState {
+  taskId: string;
+  taskText: string;
+  status: string;
+  timeline: TimelineItem[];
+  events?: AgentEvent[];
+  activeTask?: ActiveTaskState;
+  modelStream?: ModelStreamState;
+  updatedAt: string;
 }
 
 export interface DiagnosticEvent {
@@ -97,6 +122,7 @@ export interface SessionSummary {
 export interface SessionRecord extends SessionSummary {
   timeline: TimelineItem[];
   events?: AgentEvent[];
+  turns?: ConversationTurnState[];
   activityText?: string;
   decisionSummary?: string;
   evidenceSummary?: string[];
@@ -106,6 +132,8 @@ export interface SessionRecord extends SessionSummary {
 export interface PendingConfirmationState {
   id: string;
   message: string;
+  detail?: string;
+  subject?: string;
   confirmLabel: string;
   cancelLabel: string;
   action: "delete-session" | "clear-history";
@@ -130,6 +158,7 @@ export interface SidepanelState {
   traceOpen: boolean;
   settingsOpen?: boolean;
   timeline?: TimelineItem[];
+  conversationTurns?: ConversationTurnState[];
   sessions?: SessionSummary[];
   sessionRecords?: Record<string, SessionRecord>;
   selectedSessionId?: string;
@@ -655,7 +684,8 @@ export function mapEventToTimelineItem(event: AgentEvent, locale?: SidepanelLoca
     id: event.id,
     title: eventTitle(event.type, locale),
     detail,
-    tone: eventTone(event.type, event.payload)
+    tone: eventTone(event.type, event.payload),
+    eventType: event.type
   };
 }
 
@@ -698,7 +728,8 @@ export function buildTimelineItems(events: AgentEvent[], locale?: SidepanelLocal
       id: `${first.id}-group-${bufferedEvents.length}`,
       title: eventTitle(bufferedType, locale),
       detail: eventCountDetail(bufferedType, bufferedEvents, locale),
-      tone: eventTone(bufferedType)
+      tone: eventTone(bufferedType),
+      eventType: bufferedType
     });
     bufferedType = undefined;
     bufferedEvents = [];
@@ -793,6 +824,7 @@ export function buildRunDigest(events: AgentEvent[], timeline: TimelineItem[], l
 }
 
 export function deriveLatestModelStream(events: AgentEvent[], locale?: SidepanelLocale): ModelStreamState | undefined {
+  const maxVisibleChars = 12_000;
   let latestIndex = -1;
   for (let index = events.length - 1; index >= 0; index -= 1) {
     if (isModelEvent(events[index].type)) {
@@ -811,74 +843,154 @@ export function deriveLatestModelStream(events: AgentEvent[], locale?: Sidepanel
     return !role || !eventRole || eventRole === role;
   });
 
-  const chunks: string[] = [];
+  const legacyChunks: string[] = [];
+  const reasoningChunks: string[] = [];
+  const contentChunks: string[] = [];
+  const toolArgumentsChunks: string[] = [];
   let chunkCount = 0;
   let receivedChars: number | undefined;
   let accumulatedText: string | undefined;
   let outputPreview: string | undefined;
+  let toolNames: string[] = [];
   let lastTitle = eventTitle(latest.type, locale);
+  let latestKinds: string[] = [];
 
   for (const event of relevant) {
     lastTitle = eventTitle(event.type, locale);
     if (event.type === "ModelCallProgress") {
       const chunk = modelRawString(event.payload, "chunk");
-      if (chunk) chunks.push(chunk);
+      const reasoningChunk = modelRawString(event.payload, "reasoningChunk");
+      const contentChunk = modelRawString(event.payload, "contentChunk");
+      const toolArgumentsChunk = modelRawString(event.payload, "toolArgumentsChunk");
+      const hasSeparatedChunks = ["reasoningChunk", "contentChunk", "toolArgumentsChunk"].some((key) => key in event.payload);
+      if (!hasSeparatedChunks && chunk) legacyChunks.push(chunk);
+      if (reasoningChunk) reasoningChunks.push(reasoningChunk);
+      if (contentChunk) contentChunks.push(contentChunk);
+      if (toolArgumentsChunk) toolArgumentsChunks.push(toolArgumentsChunk);
+      if (Array.isArray(event.payload.streamKinds)) {
+        latestKinds = event.payload.streamKinds.filter((kind): kind is string => typeof kind === "string");
+      }
       const accumulated = modelRawString(event.payload, "accumulatedText");
       if (accumulated) accumulatedText = accumulated;
       if (typeof event.payload.chunkIndex === "number") chunkCount = Math.max(chunkCount, event.payload.chunkIndex);
       else chunkCount += 1;
       if (typeof event.payload.receivedChars === "number") receivedChars = event.payload.receivedChars;
+      if (Array.isArray(event.payload.toolCallNames)) {
+        toolNames = event.payload.toolCallNames.filter((name): name is string => typeof name === "string" && Boolean(name.trim()));
+      }
     }
     if (event.type === "ModelCallCompleted") {
       outputPreview = modelString(event.payload, "outputPreview");
-      if (typeof event.payload.outputChars === "number") receivedChars = event.payload.outputChars;
+      if (typeof event.payload.outputChars === "number") receivedChars = Math.max(receivedChars ?? 0, event.payload.outputChars);
+      if (Array.isArray(event.payload.nativeToolCalls)) {
+        toolNames = event.payload.nativeToolCalls.filter((name): name is string => typeof name === "string" && Boolean(name.trim()));
+      }
     }
   }
 
-  const text = accumulatedText ?? (chunks.length > 0 ? chunks.join("") : outputPreview ?? "");
+  const reasoningFullText = reasoningChunks.join("");
+  const contentFullText = contentChunks.join("");
+  const toolArgumentsFullText = toolArgumentsChunks.join("");
+  const legacyText = accumulatedText ?? legacyChunks.join("");
+  const answerFullText = contentFullText || outputPreview || legacyText;
+  const truncate = (value: string): string => value.length > maxVisibleChars ? value.slice(-maxVisibleChars) : value;
+  const reasoningText = truncate(reasoningFullText);
+  const contentText = truncate(answerFullText);
+  const toolArgumentsText = truncate(toolArgumentsFullText);
+  const text = contentText || reasoningText || toolArgumentsText;
+  const truncated = [reasoningFullText, answerFullText, toolArgumentsFullText].some((value) => value.length > maxVisibleChars);
+  const isStreaming = latest.type === "ModelCallStarted" || latest.type === "ModelCallProgress";
+  const phase: ModelStreamState["phase"] = !isStreaming
+    ? "complete"
+    : latestKinds.includes("content") || contentFullText
+      ? "answering"
+      : latestKinds.includes("tool_arguments") || toolArgumentsFullText
+        ? "tool"
+        : latestKinds.includes("reasoning") || reasoningFullText
+          ? "reasoning"
+          : "waiting";
   return {
     title: lastTitle,
     text,
-    isStreaming: latest.type === "ModelCallStarted" || latest.type === "ModelCallProgress",
+    reasoningText: reasoningText || undefined,
+    contentText: contentText || undefined,
+    toolArgumentsText: toolArgumentsText || undefined,
+    phase,
+    isStreaming,
     role,
     model,
     chunkCount: chunkCount || undefined,
-    receivedChars
+    receivedChars,
+    toolNames: toolNames.length > 0 ? [...new Set(toolNames)] : undefined,
+    truncated
   };
 }
 
-function activeStatusForEvent(event: AgentEvent): string {
+function terminalStatusForEvent(event: AgentEvent): string | undefined {
   const type = event.type;
   if (type === "TaskCompleted") return "completed";
   if (type === "TaskFailed") return "failed";
   if (type === "TaskStopped") return "stopped";
   if (type === "RuntimeSuspended") return "paused";
-  if (type === "RuntimeResumed") return "running";
   if (type === "UserConsentRequested") return "awaiting_confirmation";
-  if (type === "ObservationRequested" || type === "ObservationReceived" || type === "VisionRequested") return "observing";
   if (type === "CommandResultReceived" && commandResultStatus(event.payload) === "failed") return "failed";
-  if (type === "CommandIssued" || type === "CommandResultReceived") return "executing";
   if (type === "VerificationProduced" && eventPayloadStatus(event.payload) === "failed") return "failed";
-  if (type === "VerificationProduced") return "verifying";
-  if (type === "TaskInterpreted" || type === "ModelCallStarted") return "interpreting";
-  return "running";
+  return undefined;
+}
+
+function progressStatusForEvent(event: AgentEvent): string | undefined {
+  switch (event.type) {
+    case "TaskStarted":
+    case "TaskInterpreted":
+      return "interpreting";
+    case "ObservationRequested":
+    case "ObservationReceived":
+    case "ScreenshotCaptured":
+    case "VisionRequested":
+    case "VisionCompleted":
+    case "VisualEvidenceAdded":
+      return "observing";
+    case "CommandBound":
+    case "CommandIssued":
+    case "CommandResultReceived":
+    case "ToolCallStarted":
+    case "ToolCallCompleted":
+    case "ToolCallFailed":
+      return "executing";
+    case "VerificationProduced":
+    case "MemoryUpdated":
+      return "verifying";
+    default:
+      return undefined;
+  }
+}
+
+function latestProgressEvent(events: AgentEvent[]): AgentEvent | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (progressStatusForEvent(event)) return event;
+  }
+  return undefined;
 }
 
 export function deriveActiveTaskFromEvents(events: AgentEvent[], locale?: SidepanelLocale): ActiveTaskState | undefined {
   const latest = events.at(-1);
   if (!latest) return undefined;
+  const terminalStatus = terminalStatusForEvent(latest);
+  const progressEvent = terminalStatus ? latest : latestProgressEvent(events) ?? latest;
+  const status = terminalStatus ?? progressStatusForEvent(progressEvent) ?? "running";
 
   return {
     taskId: latest.taskId,
-    status: activeStatusForEvent(latest),
-    activeNodeId: flowNodeForEventType(latest.type),
+    status,
+    activeNodeId: flowNodeForEventType(terminalStatus ? latest.type : progressEvent.type),
     currentAction:
-      stringPayload(latest.payload, ["currentAction", "taskText", "command", "commandName", "summary", "instruction", "message", "reason"], locale) ??
-      eventTitle(latest.type, locale),
-    targetLabel: stringPayload(latest.payload, ["targetLabel", "label", "semanticLabel", "elementLabel"], locale),
-    expectedOutcome: stringPayload(latest.payload, ["expectedOutcome", "successCriteria", "outcome"], locale),
-    semanticTargetId: stringPayload(latest.payload, ["semanticTargetId", "targetId", "targetRef", "id"], locale),
-    bindingSource: latest.type.startsWith("Vision") || latest.type === "VisualEvidenceAdded" ? "Vision" : undefined,
+      stringPayload(progressEvent.payload, ["currentAction", "taskText", "command", "commandName", "summary", "instruction", "message", "reason"], locale) ??
+      eventTitle(progressEvent.type, locale),
+    targetLabel: stringPayload(progressEvent.payload, ["targetLabel", "label", "semanticLabel", "elementLabel"], locale),
+    expectedOutcome: stringPayload(progressEvent.payload, ["expectedOutcome", "successCriteria", "outcome"], locale),
+    semanticTargetId: stringPayload(progressEvent.payload, ["semanticTargetId", "targetId", "targetRef", "id"], locale),
+    bindingSource: progressEvent.type.startsWith("Vision") || progressEvent.type === "VisualEvidenceAdded" ? "Vision" : undefined,
     riskLevel: latest.type === "UserConsentRequested" ? "medium" : latest.type === "TaskFailed" ? "blocked" : undefined
   };
 }

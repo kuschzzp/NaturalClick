@@ -8,18 +8,18 @@ import { standardRuntimeSettings, type ExecutionPreset, type RuntimeSettings } f
 import { createTranslator, normalizeLocale, type SidepanelLocale, type TranslationKey } from "./i18n";
 import { renderWorkbenchComposerMeta } from "./components/workbench";
 import {
-  buildRunDigest,
+  deriveSessionTitle,
   needsModelGuidance,
   withDerivedMode,
   type OverlayMode,
-  type RunDigest,
   type SettingsTabId,
   type SessionRecord,
   type SessionSummary,
+  type ConversationTurnState,
+  type ModelStreamState,
   type SidepanelSafetyMode,
   type SidepanelState,
   type ThemeMode,
-  type ModelStreamState,
   type TimelineItem
 } from "./state";
 import {
@@ -34,6 +34,7 @@ import { buildWorkbenchViewModel } from "./view-model";
 
 export interface SidepanelHandlers {
   onSubmitTask?: (text: string) => void;
+  onComposerInput?: (text: string) => void;
   onOpenSettings?: () => void;
   onCloseSettings?: () => void;
   onOverlayModeChange?: (mode: string) => void;
@@ -56,6 +57,7 @@ export interface SidepanelHandlers {
   onSettingsTabChange?: (tab: SettingsTabId | string) => void;
   onToggleToolMenu?: () => void;
   onToggleModelPicker?: () => void;
+  onDismissComposerMenus?: () => void;
   onAttachFiles?: (files: File[]) => void;
   onRemoveAttachment?: (attachmentId: string) => void;
   onDownloadArtifact?: (artifactId: string) => void;
@@ -83,10 +85,30 @@ export interface SidepanelHandlers {
   onRunSchedule?: (scheduleId: string) => void;
   onResolveConsent?: (approved: boolean, scope?: "once" | "task") => void;
   onResumeTask?: () => void;
+  onRetryTask?: (taskId: string) => void;
   onResolvePendingConfirmation?: (approved: boolean) => void;
 }
 
 type Translator = ReturnType<typeof createTranslator>;
+const transientDocumentListeners = new WeakMap<HTMLElement, () => void>();
+const renderedRoots = new WeakSet<HTMLElement>();
+
+function restoreScrollAfterLayout(root: HTMLElement, element: HTMLElement | null, pinned: boolean, previousScrollTop: number): void {
+  if (!element) return;
+  const apply = (): void => {
+    if (!root.contains(element)) return;
+    element.scrollTop = pinned ? element.scrollHeight : Math.min(previousScrollTop, element.scrollHeight);
+  };
+  apply();
+  if (typeof window.requestAnimationFrame !== "function") {
+    queueMicrotask(apply);
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    apply();
+    window.requestAnimationFrame(apply);
+  });
+}
 
 function formatSafetyMode(mode: SidepanelSafetyMode, t: Translator): string {
   const labels: Record<SidepanelSafetyMode, TranslationKey> = {
@@ -181,6 +203,18 @@ function viewTitle(state: SidepanelState, t: Translator): string {
   return t("view.chat");
 }
 
+function conversationTitle(state: SidepanelState, t: Translator): string {
+  if ((state.view ?? "chat") !== "chat") return viewTitle(state, t);
+  const activeId = state.activeSessionId;
+  const storedTitle = activeId
+    ? state.sessionRecords?.[activeId]?.title ?? state.sessions?.find((session) => session.id === activeId)?.title
+    : undefined;
+  if (storedTitle) return storedTitle;
+  const started = state.lastSessionEvents?.find((event) => event.type === "TaskStarted");
+  const taskText = typeof started?.payload.taskText === "string" ? started.payload.taskText : visibleTimelineItems(state.timeline)[0]?.detail;
+  return deriveSessionTitle(taskText, t("toolbar.newSession"));
+}
+
 function nextThemeMode(mode: ThemeMode | undefined): ThemeMode {
   if (mode === "light") return "dark";
   if (mode === "dark") return "system";
@@ -208,8 +242,9 @@ function renderTopBar(state: SidepanelState, handlers: SidepanelHandlers, t: Tra
   const logo = el("img", "nc-session-title__logo") as HTMLImageElement;
   logo.src = "icons/icon-48.png";
   logo.alt = "";
-  const text = el("span", "nc-session-title__text", state.activeTask?.currentAction || viewTitle(state, t));
-  text.title = state.activeTask?.currentAction || viewTitle(state, t);
+  const currentTitle = conversationTitle(state, t);
+  const text = el("span", "nc-session-title__text", currentTitle);
+  text.title = currentTitle;
   title.append(logo, text);
 
   const status = el("span", `nc-status-pill nc-status-pill--${statusTone(state.activeTask?.status)}`);
@@ -268,51 +303,8 @@ function renderTimelineItem(item: TimelineItem): HTMLElement {
   return row;
 }
 
-function runReportTone(state: SidepanelState, items: TimelineItem[]): TimelineItem["tone"] {
-  if (state.activeTask?.status === "completed") return "success";
-  if (state.activeTask?.status === "failed" || state.activeTask?.status === "blocked") return "error";
-  if (state.activeTask?.status === "stopped" || state.activeTask?.status === "awaiting_confirmation" || state.activeTask?.status === "paused") return "warning";
-  const lastError = [...items].reverse().find((item) => item.tone === "error" || item.tone === "warning");
-  return lastError?.tone ?? "info";
-}
-
-function latestNotice(items: TimelineItem[]): TimelineItem | undefined {
-  return [...items].reverse().find((item) => item.tone === "error" || item.tone === "warning" || item.tone === "success");
-}
-
 function latestMeaningfulItem(items: TimelineItem[]): TimelineItem | undefined {
   return [...items].reverse().find((item) => item.detail || item.title);
-}
-
-function renderRunFact(label: string, value: string): HTMLElement {
-  const item = el("div", "nc-run-fact");
-  item.append(el("span", "nc-run-fact__label", label));
-  item.append(el("span", "nc-run-fact__value", value));
-  return item;
-}
-
-function renderModelOutput(stream: ModelStreamState, t: Translator): HTMLElement {
-  const section = el("section", "nc-run-model-output");
-  const head = el("div", "nc-run-model-output__head");
-  const title = el("div", "nc-run-model-output__title");
-  title.append(el("span", "nc-run-model-output__label", t("task.modelOutput")));
-  title.append(el("strong", undefined, stream.title));
-  head.append(title);
-
-  const metaParts = [
-    stream.isStreaming ? t("task.modelOutputStreaming") : t("task.modelOutputLatest"),
-    stream.chunkCount ? t("task.modelOutputChunks", { count: stream.chunkCount }) : undefined,
-    stream.receivedChars ? t("task.modelOutputChars", { count: stream.receivedChars }) : undefined,
-    stream.model
-  ].filter(Boolean);
-  if (metaParts.length > 0) head.append(el("span", "nc-run-model-output__meta", metaParts.join(" · ")));
-  section.append(head);
-
-  const body = el("pre", "nc-run-model-output__body", stream.text || t("task.modelOutputWaiting"));
-  body.setAttribute("aria-live", stream.isStreaming ? "polite" : "off");
-  if (stream.isStreaming) body.dataset.streaming = "true";
-  section.append(body);
-  return section;
 }
 
 function renderConsentActions(handlers: SidepanelHandlers, t: Translator): HTMLElement {
@@ -327,8 +319,90 @@ function renderConsentActions(handlers: SidepanelHandlers, t: Translator): HTMLE
   return actions;
 }
 
-function renderRunTrace(items: TimelineItem[], t: Translator): HTMLElement {
+function renderInlineModelStream(stream: ModelStreamState, t: Translator): HTMLElement {
+  const panel = el("section", "nc-run-model-stream");
+  panel.setAttribute("aria-live", "polite");
+  const meta = el("div", "nc-run-model-stream__meta");
+  if (stream.model) meta.append(el("span", "nc-run-model-stream__model", stream.model));
+  if (stream.receivedChars !== undefined) {
+    meta.append(el("span", "nc-run-model-stream__count", t("modelStream.characters", { count: stream.receivedChars })));
+  }
+  panel.append(meta);
+
+  if (stream.toolNames?.length) {
+    panel.append(el("div", "nc-run-model-stream__tools", t("modelStream.tools", { tools: stream.toolNames.join(", ") })));
+  }
+
+  const cursor = (): HTMLElement => {
+    const cursor = el("span", "nc-run-model-stream__cursor");
+    cursor.setAttribute("aria-hidden", "true");
+    return cursor;
+  };
+  const reasoningText = stream.reasoningText;
+  const answerText = stream.contentText ?? (!reasoningText && !stream.toolArgumentsText ? stream.text : undefined);
+  const phase = stream.phase ?? (stream.isStreaming ? answerText ? "answering" : stream.toolArgumentsText ? "tool" : reasoningText ? "reasoning" : "waiting" : "complete");
+  panel.dataset.phase = phase;
+
+  if (reasoningText) {
+    const reasoning = el("details", "nc-run-model-stream__reasoning") as HTMLDetailsElement;
+    reasoning.open = phase === "reasoning";
+    const summary = el("summary", "nc-run-model-stream__section-heading");
+    summary.append(el("span", "nc-run-model-stream__status-dot"));
+    summary.append(el("span", undefined, t("modelStream.reasoning")));
+    summary.append(el("span", "nc-run-model-stream__section-state", t(phase === "reasoning" ? "modelStream.thinking" : "modelStream.thought")));
+    const body = el("div", "nc-run-model-stream__body nc-run-model-stream__body--reasoning");
+    if (phase === "reasoning") body.dataset.streamActive = "true";
+    body.append(el("div", "nc-run-model-stream__reasoning-text", reasoningText));
+    if (stream.isStreaming && phase === "reasoning") body.append(cursor());
+    reasoning.append(summary, body);
+    panel.append(reasoning);
+  }
+
+  if (answerText) {
+    const answer = el("section", "nc-run-model-stream__answer");
+    answer.append(el("div", "nc-run-model-stream__section-heading", t(stream.isStreaming && phase === "answering" ? "modelStream.answering" : "modelStream.answer")));
+    const body = el("div", "nc-run-model-stream__body nc-run-model-stream__body--answer");
+    if (phase === "answering") body.dataset.streamActive = "true";
+    body.append(el("div", "nc-run-model-stream__answer-text", answerText));
+    if (stream.isStreaming && phase === "answering") body.append(cursor());
+    answer.append(body);
+    panel.append(answer);
+  }
+
+  if (stream.toolArgumentsText) {
+    const toolDetail = el("details", "nc-run-model-stream__tool-detail") as HTMLDetailsElement;
+    toolDetail.open = phase === "tool";
+    toolDetail.append(el("summary", "nc-run-model-stream__section-heading", t("modelStream.toolDetails")));
+    const body = el("div", "nc-run-model-stream__body nc-run-model-stream__body--tool");
+    if (phase === "tool") body.dataset.streamActive = "true";
+    body.append(el("code", "nc-run-model-stream__tool-text", stream.toolArgumentsText));
+    if (stream.isStreaming && phase === "tool") body.append(cursor());
+    toolDetail.append(body);
+    panel.append(toolDetail);
+  }
+
+  if (!reasoningText && !answerText && !stream.toolArgumentsText) {
+    const waiting = el("div", "nc-run-model-stream__waiting", stream.text || t("modelStream.waiting"));
+    if (stream.isStreaming) waiting.append(cursor());
+    panel.append(waiting);
+  }
+  if (stream.truncated) panel.append(el("div", "nc-run-model-stream__notice", t("modelStream.truncated")));
+  return panel;
+}
+
+function latestModelStepIndex(items: TimelineItem[]): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index]?.eventType === "ModelCallStarted") return index;
+  }
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index]?.eventType === "ModelCallProgress") return index;
+  }
+  return items.length - 1;
+}
+
+function renderRunTrace(items: TimelineItem[], t: Translator, modelStream?: ModelStreamState, keepOpen = false): HTMLElement {
   const details = el("details", "nc-run-trace") as HTMLDetailsElement;
+  details.open = keepOpen;
   const summary = el("summary", "nc-run-trace__summary");
   summary.append(el("span", undefined, t("task.trace")));
   summary.append(el("span", "nc-run-trace__count", t("task.traceCount", { count: items.length })));
@@ -336,13 +410,15 @@ function renderRunTrace(items: TimelineItem[], t: Translator): HTMLElement {
 
   const body = el("div", "nc-run-trace__body");
   const steps = el("ol", "nc-run-report__steps");
-  for (const item of items) {
+  const modelStartIndex = modelStream ? latestModelStepIndex(items) : -1;
+  for (const [index, item] of items.entries()) {
     const step = el("li", `nc-run-step nc-run-step--${item.tone ?? "info"}`);
     step.append(el("span", "nc-run-step__dot"));
     const body = el("div", "nc-run-step__body");
     body.append(el("strong", undefined, item.title));
     if (item.detail) body.append(el("p", undefined, item.detail));
     step.append(body);
+    if (modelStream && index === modelStartIndex) body.append(renderInlineModelStream(modelStream, t));
     steps.append(step);
   }
   body.append(steps);
@@ -350,161 +426,159 @@ function renderRunTrace(items: TimelineItem[], t: Translator): HTMLElement {
   return details;
 }
 
-function renderRunDigest(digest: RunDigest, t: Translator): HTMLElement {
-  const section = el("section", "nc-run-digest");
-  const head = el("div", "nc-run-digest__head");
-  const copy = el("div", "nc-run-digest__copy");
-  copy.append(el("span", "nc-run-digest__eyebrow", t("runDigest.title")));
-  copy.append(el("p", undefined, digest.summary));
-  head.append(copy);
-  section.append(head);
-
-  const metrics = el("dl", "nc-run-digest__metrics");
-  for (const metric of digest.metrics) {
-    const item = el("div", `nc-run-digest__metric${metric.tone ? ` nc-run-digest__metric--${metric.tone}` : ""}`);
-    item.append(el("dt", undefined, metric.label), el("dd", undefined, metric.value));
-    metrics.append(item);
-  }
-  section.append(metrics);
-
-  if (digest.recentSteps.length > 0) {
-    const steps = el("div", "nc-run-digest__steps");
-    steps.append(el("span", "nc-run-digest__steps-label", t("runDigest.recentSteps")));
-    const list = el("ol", "nc-run-digest__step-list");
-    for (const item of digest.recentSteps) {
-      const step = el("li", `nc-run-digest__step nc-run-digest__step--${item.tone ?? "info"}`);
-      step.append(el("strong", undefined, item.title));
-      if (item.detail) step.append(el("span", undefined, item.detail));
-      list.append(step);
-    }
-    steps.append(list);
-    section.append(steps);
-  }
-
-  if (digest.hiddenNoiseCount > 0) {
-    section.append(el("p", "nc-run-digest__hint", t("runDigest.debugHint", { count: digest.hiddenNoiseCount })));
-  }
-
-  return section;
+function isTerminalTaskStatus(status?: string): boolean {
+  return Boolean(status && ["completed", "failed", "stopped"].includes(status));
 }
 
-function renderRunReport(state: SidepanelState, handlers: SidepanelHandlers, t: Translator, items: TimelineItem[]): HTMLElement {
-  const tone = runReportTone(state, items);
+function taskPrompt(state: SidepanelState, items: TimelineItem[]): string | undefined {
+  const started = state.lastSessionEvents?.find((event) => event.type === "TaskStarted");
+  if (typeof started?.payload.taskText === "string" && started.payload.taskText.trim()) return started.payload.taskText.trim();
+  return items[0]?.detail?.trim();
+}
+
+function progressLabel(status: string | undefined, t: Translator): string {
+  if (status === "completed") return t("conversation.progress.completed");
+  if (status === "failed") return t("conversation.progress.failed");
+  if (status === "stopped") return t("conversation.progress.stopped");
+  if (status === "awaiting_confirmation") return t("conversation.progress.confirmation");
+  if (status === "paused") return t("conversation.progress.paused");
+  if (status === "observing") return t("conversation.progress.observing");
+  if (status === "executing") return t("conversation.progress.executing");
+  if (status === "verifying") return t("conversation.progress.verifying");
+  if (status === "interpreting") return t("conversation.progress.interpreting");
+  return t("conversation.progress.working");
+}
+
+function progressText(state: SidepanelState, items: TimelineItem[], t: Translator): string {
   const task = state.activeTask;
   const latest = latestMeaningfulItem(items);
-  const digest = buildRunDigest(state.lastSessionEvents ?? [], items, state.locale);
-  const report = el("article", `nc-run-report nc-run-report--${tone ?? "info"}`);
-  const head = el("header", "nc-run-report__head");
-  const identity = el("div", "nc-run-report__identity");
-  const avatar = el("img", "nc-run-report__avatar") as HTMLImageElement;
+  if (task?.status === "completed") return latest?.detail ?? task.currentAction ?? t("conversation.progress.completedDetail");
+  if (task?.status === "failed") return latest?.detail ?? task.currentAction ?? t("conversation.progress.failedDetail");
+  if (task?.status === "stopped") return latest?.detail ?? t("conversation.progress.stoppedDetail");
+  if (task?.status === "awaiting_confirmation") return task.currentAction ?? latest?.detail ?? t("conversation.progress.confirmationDetail");
+  if (task?.status === "paused") return task.currentAction ?? latest?.detail ?? t("conversation.progress.pausedDetail");
+  if (task?.status === "observing") return t("conversation.progress.observing");
+  if (task?.status === "executing") return task.currentAction ?? t("conversation.progress.executing");
+  if (task?.status === "verifying") return t("conversation.progress.verifying");
+  if (task?.status === "interpreting") return t("conversation.progress.interpreting");
+  return latest?.title ?? t("conversation.progress.interpreting");
+}
+
+function formalReplyText(state: SidepanelState, items: TimelineItem[], t: Translator): string {
+  const terminal = [...(state.lastSessionEvents ?? [])]
+    .reverse()
+    .find((event) => event.type === "TaskCompleted" || event.type === "TaskFailed" || event.type === "TaskStopped");
+  if (terminal) {
+    for (const key of ["summary", "message", "detail", "reason", "error"]) {
+      const value = terminal.payload[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return progressText(state, items, t);
+}
+
+function renderUserMessage(prompt: string): HTMLElement {
+  const message = el("article", "nc-conversation-message nc-conversation-message--user");
+  message.append(el("p", undefined, prompt));
+  return message;
+}
+
+function renderAssistantResponse(
+  state: SidepanelState,
+  handlers: SidepanelHandlers,
+  t: Translator,
+  items: TimelineItem[],
+  allowActions = true
+): HTMLElement {
+  const task = state.activeTask;
+  const terminal = isTerminalTaskStatus(task?.status);
+  const response = el("article", `nc-assistant-response nc-assistant-response--${statusTone(task?.status)}`);
+  response.setAttribute("aria-live", terminal ? "polite" : "assertive");
+
+  const head = el("header", "nc-assistant-response__head");
+  const avatar = el("img", "nc-assistant-response__avatar") as HTMLImageElement;
   avatar.src = "icons/icon-32.png";
   avatar.alt = "";
-  const copy = el("div", "nc-run-report__copy");
-  copy.append(el("span", "nc-run-report__eyebrow", t("task.agentWorking")));
-  copy.append(el("h2", undefined, formatTaskStatus(task?.status, t)));
-  const current = task?.currentAction ?? latest?.detail ?? latest?.title ?? t("task.pending");
-  copy.append(el("p", undefined, current));
-  identity.append(avatar, copy);
-  head.append(identity);
-  const runActions = el("div", "nc-run-report__actions");
-  const copyLog = iconButton("nc-inline-icon-button", "copy", t("toolbar.copyLog"));
-  copyLog.addEventListener("click", () => handlers.onCopyLog?.());
-  const downloadLog = iconButton("nc-inline-icon-button", "download", t("toolbar.downloadLog"));
-  downloadLog.addEventListener("click", () => handlers.onDownloadLog?.());
-  runActions.append(copyLog, downloadLog);
-  if (task?.semanticTargetId) {
+  const identity = el("div", "nc-assistant-response__identity");
+  identity.append(el("strong", undefined, "NaturalClick"));
+  if (task?.status !== "completed") {
+    const status = el("span", "nc-assistant-response__status", progressLabel(task?.status, t));
+    if (!terminal && task?.status !== "paused" && task?.status !== "awaiting_confirmation") {
+      const dots = el("span", "nc-thinking-dots");
+      dots.setAttribute("aria-hidden", "true");
+      dots.append(el("i"), el("i"), el("i"));
+      status.append(dots);
+    }
+    identity.append(status);
+  }
+  head.append(avatar, identity);
+  response.append(head);
+
+  if (!terminal) response.append(el("p", "nc-assistant-response__current", progressText(state, items, t)));
+
+  const recentSteps = items.filter((item) => item.id !== items[0]?.id).slice(-3);
+  if (!terminal && recentSteps.length > 0) {
+    const steps = el("ol", "nc-assistant-response__steps");
+    for (const item of recentSteps) {
+      const step = el("li", `nc-assistant-response__step nc-assistant-response__step--${item.tone ?? "info"}`);
+      step.append(el("span", "nc-assistant-response__step-dot"), el("span", undefined, item.title));
+      steps.append(step);
+    }
+    response.append(steps);
+  }
+
+  if (allowActions && task?.semanticTargetId && !terminal) {
     const highlight = button("nc-quiet-button", t("task.highlightTarget"));
     highlight.addEventListener("click", () => handlers.onHighlightTarget?.(task.semanticTargetId!));
-    runActions.append(highlight);
-  }
-  head.append(runActions);
-  report.append(head);
-
-  const facts = el("section", "nc-run-facts");
-  facts.append(renderRunFact(t("task.currentStep"), latest?.title ?? formatTaskStatus(task?.status, t)));
-  if (task?.targetLabel || task?.semanticTargetId) facts.append(renderRunFact(t("task.target"), task.targetLabel ?? task.semanticTargetId!));
-  if (task?.expectedOutcome) facts.append(renderRunFact(t("task.expected"), task.expectedOutcome));
-  report.append(facts);
-  report.append(renderRunDigest(digest, t));
-
-  const showModelStream = state.runtimeSettings?.streaming.showPlannerRawStream ?? standardRuntimeSettings.streaming.showPlannerRawStream;
-  if (showModelStream && state.modelStream) {
-    report.append(renderModelOutput(state.modelStream, t));
+    response.append(highlight);
   }
 
-  const notice = latestNotice(items);
-  if (notice?.detail) {
-    const note = el("div", `nc-run-report__notice nc-run-report__notice--${notice.tone ?? "info"}`);
-    note.append(el("strong", undefined, notice.title));
-    note.append(el("p", undefined, notice.detail));
-    report.append(note);
-  }
+  const visibleModelStream = state.runtimeSettings?.streaming.showPlannerRawStream === false ? undefined : state.modelStream;
+  if (items.length > 1) response.append(renderRunTrace(items, t, visibleModelStream, Boolean(visibleModelStream && !terminal)));
+  if (terminal) response.append(el("div", "nc-assistant-response__reply", formalReplyText(state, items, t)));
 
-  report.append(renderRunTrace(items, t));
-
-  if (task?.status === "awaiting_confirmation") {
-    report.append(renderConsentActions(handlers, t));
+  if (allowActions && task?.status === "failed") {
+    const actions = el("div", "nc-assistant-response__actions");
+    const retry = button("nc-primary-button", t("conversation.retry"));
+    retry.addEventListener("click", () => handlers.onRetryTask?.(task.taskId));
+    actions.append(retry);
+    response.append(actions);
   }
-  if (task?.status === "paused") {
+  if (allowActions && task?.status === "awaiting_confirmation") response.append(renderConsentActions(handlers, t));
+  if (allowActions && task?.status === "paused") {
     const actions = el("div", "nc-consent-actions");
     const resume = button("nc-primary-button", t("composer.resume"));
     resume.addEventListener("click", () => handlers.onResumeTask?.());
     const stop = button("nc-danger-button", t("composer.stop"));
     stop.addEventListener("click", () => handlers.onStopTask?.());
     actions.append(resume, stop);
-    report.append(actions);
+    response.append(actions);
   }
 
-  return report;
+  return response;
 }
 
-function renderChatSurfaceHeader(state: SidepanelState, items: TimelineItem[], t: Translator): HTMLElement {
-  const header = el("header", "nc-chat-surface__header");
-  const copy = el("div", "nc-chat-surface__copy");
-  copy.append(el("span", "nc-chat-surface__eyebrow", t("chat.surface.eyebrow")));
-  copy.append(el("strong", undefined, state.activeTask?.currentAction ?? t("view.chat")));
-  copy.append(el("span", undefined, items.length > 0 ? t("chat.surface.events", { count: items.length }) : t("chat.surface.ready")));
-
-  const status = el("span", `nc-chat-surface__status nc-chat-surface__status--${statusTone(state.activeTask?.status)}`);
-  status.append(el("span", "nc-chat-surface__dot"));
-  status.append(el("span", undefined, formatTaskStatus(state.activeTask?.status, t)));
-  header.append(copy, status);
-  return header;
+function turnState(state: SidepanelState, turn: ConversationTurnState): SidepanelState {
+  return {
+    ...state,
+    activeTask: turn.activeTask,
+    timeline: turn.timeline,
+    lastSessionEvents: turn.events,
+    modelStream: turn.modelStream
+  };
 }
 
-function renderTaskSummary(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement | undefined {
-  const task = state.activeTask;
-  if (!task) return undefined;
-
-  const card = el("article", "nc-task-summary");
-  const top = el("div", "nc-task-summary__top");
-  top.append(el("span", "nc-task-summary__label", t("task.current")));
-  if (task.semanticTargetId) {
-    const highlight = button("nc-quiet-button", t("task.highlightTarget"));
-    highlight.addEventListener("click", () => handlers.onHighlightTarget?.(task.semanticTargetId!));
-    top.append(highlight);
-  }
-  card.append(top);
-  card.append(el("p", "nc-task-summary__text", task.currentAction ?? t("task.pending")));
-  if (task.targetLabel || task.expectedOutcome) {
-    const meta = el("dl", "nc-task-summary__meta");
-    if (task.targetLabel) meta.append(el("dt", undefined, t("task.target")), el("dd", undefined, task.targetLabel));
-    if (task.expectedOutcome) meta.append(el("dt", undefined, t("task.expected")), el("dd", undefined, task.expectedOutcome));
-    card.append(meta);
-  }
-  if (task.status === "awaiting_confirmation") {
-    card.append(renderConsentActions(handlers, t));
-  }
-  if (task.status === "paused") {
-    const actions = el("div", "nc-consent-actions");
-    const resume = button("nc-primary-button", t("composer.resume"));
-    resume.addEventListener("click", () => handlers.onResumeTask?.());
-    const stop = button("nc-danger-button", t("composer.stop"));
-    stop.addEventListener("click", () => handlers.onStopTask?.());
-    actions.append(resume, stop);
-    card.append(actions);
-  }
-  return card;
+function renderConversationTurn(
+  state: SidepanelState,
+  turn: ConversationTurnState,
+  handlers: SidepanelHandlers,
+  t: Translator,
+  allowActions: boolean
+): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  if (turn.taskText) fragment.append(renderUserMessage(turn.taskText));
+  fragment.append(renderAssistantResponse(turnState(state, turn), handlers, t, visibleTimelineItems(turn.timeline), allowActions));
+  return fragment;
 }
 
 function renderChatView(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
@@ -513,17 +587,17 @@ function renderChatView(state: SidepanelState, handlers: SidepanelHandlers, t: T
 
   const stream = el("section", "nc-chat-stream");
   stream.setAttribute("aria-live", "polite");
+  const turns = state.conversationTurns ?? [];
   const items = visibleTimelineItems(state.timeline);
-  const surface = el("section", "nc-chat-surface");
-  surface.append(renderChatSurfaceHeader(state, items, t));
-  const body = el("div", "nc-chat-surface__body");
-  if (items.length === 0) {
-    body.append(renderEmptyState(t));
+  if (turns.length === 0 && items.length === 0) {
+    stream.append(renderEmptyState(t));
+  } else if (turns.length > 0) {
+    turns.forEach((turn, index) => stream.append(renderConversationTurn(state, turn, handlers, t, index === turns.length - 1)));
   } else {
-    body.append(renderRunReport(state, handlers, t, items));
+    const prompt = taskPrompt(state, items);
+    if (prompt) stream.append(renderUserMessage(prompt));
+    stream.append(renderAssistantResponse(state, handlers, t, items));
   }
-  surface.append(body);
-  stream.append(surface);
 
   view.append(stream);
   return view;
@@ -546,8 +620,6 @@ function renderHistoryView(state: SidepanelState, handlers: SidepanelHandlers, t
   count.setAttribute("aria-label", t("history.sessionCount", { count: sessions.length }));
   head.append(back, mark, title, count);
   view.append(head);
-
-  if (state.pendingConfirmation) view.append(renderPendingConfirmation(state, handlers));
 
   const list = el("section", "nc-session-list");
   list.setAttribute("role", "list");
@@ -622,8 +694,6 @@ function renderHistoryDetailView(state: SidepanelState, handlers: SidepanelHandl
   back.addEventListener("click", () => handlers.onBackToHistory?.());
   header.append(back, el("h2", undefined, t("history.detailTitle")));
   view.append(header);
-  if (state.pendingConfirmation) view.append(renderPendingConfirmation(state, handlers));
-
   const sessionId = state.selectedSessionId ?? "";
   const summary = (state.sessions ?? []).find((item) => item.id === sessionId);
   const record = sessionId ? state.sessionRecords?.[sessionId] : undefined;
@@ -639,12 +709,15 @@ function renderHistoryDetailView(state: SidepanelState, handlers: SidepanelHandl
 
   view.append(renderHistoryDetailSummary(session, record, handlers, t));
 
+  const turns = record?.turns ?? [];
   const timeline = record?.timeline ?? [];
   const list = el("section", "nc-session-detail-list");
   const timelineHead = el("div", "nc-history-detail-timeline-head");
   timelineHead.append(el("span", undefined, t("history.timeline")), el("span", undefined, t("history.eventCount", { count: timeline.length })));
   list.append(timelineHead);
-  if (timeline.length === 0) {
+  if (turns.length > 0) {
+    turns.forEach((turn) => list.append(renderConversationTurn(state, turn, handlers, t, false)));
+  } else if (timeline.length === 0) {
     const empty = el("article", "nc-page-empty");
     empty.append(el("h2", undefined, t("history.summaryOnlyTitle")));
     empty.append(el("p", undefined, t("history.summaryOnlyDetail")));
@@ -701,21 +774,39 @@ function renderHistoryDetailSummary(
   return card;
 }
 
-function renderPendingConfirmation(state: SidepanelState, handlers: SidepanelHandlers): HTMLElement {
+function renderPendingConfirmation(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
   const pending = state.pendingConfirmation;
-  const card = el("section", "nc-inline-alert nc-inline-alert--danger nc-pending-confirmation");
-  const copy = el("div", "nc-inline-alert__copy");
-  copy.append(el("strong", undefined, pending?.message ?? ""));
-  card.append(copy);
+  const backdrop = el("div", "nc-confirmation-backdrop");
+  const dialog = el("section", "nc-confirmation-dialog");
+  const titleId = `nc-confirmation-title-${String(pending?.id ?? "pending").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", titleId);
 
-  const actions = el("div", "nc-pending-confirmation__actions");
-  const cancel = button("nc-quiet-button", pending?.cancelLabel ?? "Cancel");
+  const copy = el("div", "nc-confirmation-dialog__copy");
+  const title = el("h2", undefined, pending?.message ?? "");
+  title.id = titleId;
+  copy.append(title);
+  if (pending?.subject) {
+    const subject = el("div", "nc-confirmation-dialog__subject");
+    subject.append(el("span", undefined, t("history.confirmationSubject")), el("strong", undefined, pending.subject));
+    copy.append(subject);
+  }
+  if (pending?.detail) copy.append(el("p", undefined, pending.detail));
+  dialog.append(copy);
+
+  const actions = el("div", "nc-confirmation-dialog__actions");
+  const cancel = button("nc-quiet-button nc-confirmation-dialog__cancel", pending?.cancelLabel ?? "Cancel");
   cancel.addEventListener("click", () => handlers.onResolvePendingConfirmation?.(false));
   const confirm = button("nc-danger-button", pending?.confirmLabel ?? "Confirm");
   confirm.addEventListener("click", () => handlers.onResolvePendingConfirmation?.(true));
   actions.append(cancel, confirm);
-  card.append(actions);
-  return card;
+  dialog.append(actions);
+  backdrop.append(dialog);
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) handlers.onResolvePendingConfirmation?.(false);
+  });
+  return backdrop;
 }
 
 function renderLanguageControls(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
@@ -1409,15 +1500,11 @@ function settingsTabDetail(tab: SettingsTabId, t: Translator): string {
 function renderSettingsCenterHeader(activeTab: SettingsTabId, state: SidepanelState, t: Translator): HTMLElement {
   const header = el("header", "nc-settings-center-header");
   const copy = el("div", "nc-settings-center-header__copy");
-  copy.append(el("span", "nc-settings-center-header__eyebrow", t("settings.center.eyebrow")));
   copy.append(el("h2", undefined, settingsTabLabel(activeTab, t)));
-  copy.append(el("p", undefined, settingsTabDetail(activeTab, t)));
 
   const statusTone = state.settingsDirty ? "dirty" : state.settingsSaveStatus === "saved" ? "saved" : "idle";
   const status = el("aside", `nc-settings-center-status nc-settings-center-status--${statusTone}`);
-  status.append(el("span", "nc-settings-center-status__label", t("settings.center.status")));
   status.append(el("strong", undefined, settingsSaveMessage(state, t)));
-  status.append(el("span", "nc-settings-center-status__meta", t("settings.center.sections", { count: 4 })));
   header.append(copy, status);
   return header;
 }
@@ -1675,7 +1762,7 @@ function searchProviderLabel(mode: SearchProviderMode, t: Translator): string {
 }
 
 function renderSettingsView(state: SidepanelState, handlers: SidepanelHandlers, t: Translator): HTMLElement {
-  const view = el("main", "nc-page-view");
+  const view = el("main", "nc-page-view nc-settings-page");
   view.append(renderPageHeader(t("view.settings"), handlers, t));
 
   const activeTab = state.settingsTab ?? "configs";
@@ -2116,7 +2203,7 @@ function renderComposer(state: SidepanelState, handlers: SidepanelHandlers, t: T
   const label = el("label", "nc-composer__field");
   label.append(el("span", "nc-sr-only", t("composer.descriptionLabel")));
   const textarea = el("textarea", "nc-textarea") as HTMLTextAreaElement;
-  textarea.rows = 3;
+  textarea.rows = 5;
   textarea.value = state.composerInput ?? "";
   textarea.placeholder = t("composer.placeholder");
   label.append(textarea);
@@ -2137,10 +2224,6 @@ function renderComposer(state: SidepanelState, handlers: SidepanelHandlers, t: T
   composerMeta.querySelector("button")?.setAttribute("aria-expanded", String(Boolean(state.modelPickerOpen)));
   modelWrap.append(composerMeta);
   if (state.modelPickerOpen) modelWrap.append(renderModelPickerPopover(state, handlers, t));
-  const context = el("div", "nc-context-ring");
-  const contextText = `${visibleTimelineItems(state.timeline).length}`;
-  context.append(el("span", "nc-context-ring__value", contextText), el("span", "nc-context-ring__label", "ctx"));
-
   const submit = iconButton("nc-send-button", "send", running ? t("composer.queue") : paused ? t("composer.resume") : t("composer.send"));
   submit.type = "submit";
   submit.disabled = !paused && !initialHasText;
@@ -2152,7 +2235,7 @@ function renderComposer(state: SidepanelState, handlers: SidepanelHandlers, t: T
   const leftControls = el("div", "nc-composer__controls-left");
   leftControls.append(toolsWrap);
   const rightControls = el("div", "nc-composer__controls-right");
-  rightControls.append(modelWrap, context);
+  rightControls.append(modelWrap);
 
   const row = el("div", "nc-composer__actions");
   row.append(leftControls, rightControls);
@@ -2167,16 +2250,21 @@ function renderComposer(state: SidepanelState, handlers: SidepanelHandlers, t: T
   frame.append(label, row);
   form.append(frame);
 
-  const syncSubmitState = () => {
+  const syncComposerState = () => {
     const hasText = Boolean(textarea.value.trim());
     submit.disabled = !paused && !hasText;
+    handlers.onComposerInput?.(textarea.value);
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(240, Math.max(108, textarea.scrollHeight));
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 240 ? "auto" : "hidden";
     if (running) {
       queueWrap.classList.toggle("nc-queue-button-wrap--visible", hasText);
       queueWrap.setAttribute("aria-hidden", String(!hasText));
     }
   };
-  textarea.addEventListener("input", syncSubmitState);
-  syncSubmitState();
+  textarea.addEventListener("input", syncComposerState);
+  syncComposerState();
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2186,9 +2274,9 @@ function renderComposer(state: SidepanelState, handlers: SidepanelHandlers, t: T
     }
     const text = textarea.value.trim();
     if (!text) return;
-    handlers.onSubmitTask?.(text);
     textarea.value = "";
-    syncSubmitState();
+    syncComposerState();
+    handlers.onSubmitTask?.(text);
   });
 
   textarea.addEventListener("keydown", (event) => {
@@ -2201,22 +2289,38 @@ function renderComposer(state: SidepanelState, handlers: SidepanelHandlers, t: T
 }
 
 export function renderSidepanel(root: HTMLElement, input: SidepanelState, handlers: SidepanelHandlers = {}): void {
+  transientDocumentListeners.get(root)?.();
+  transientDocumentListeners.delete(root);
   const state = withDerivedMode(input);
   const t = createTranslator(state.locale);
   const viewName = state.view ?? "chat";
   const previousPageView = root.querySelector<HTMLElement>(".nc-page-view");
   const previousPageScrollTop = previousPageView?.scrollTop ?? 0;
+  const previousChatStream = root.querySelector<HTMLElement>(".nc-chat-stream");
+  const previousChatScrollTop = previousChatStream?.scrollTop ?? 0;
+  const keepChatPinned = !previousChatStream || previousChatStream.scrollHeight - previousChatStream.clientHeight - previousChatScrollTop < 40;
+  const previousModelStream = root.querySelector<HTMLElement>(".nc-run-model-stream__body");
+  const previousModelPhase = root.querySelector<HTMLElement>(".nc-run-model-stream")?.dataset.phase;
+  const previousReasoningOpen = root.querySelector<HTMLDetailsElement>(".nc-run-model-stream__reasoning")?.open;
+  const previousModelScrollTop = previousModelStream?.scrollTop ?? 0;
+  const keepModelPinned = !previousModelStream || previousModelStream.scrollHeight - previousModelStream.clientHeight - previousModelScrollTop < 20;
+  const previousTraceBody = root.querySelector<HTMLElement>(".nc-run-trace[open] .nc-run-trace__body");
+  const previousTraceScrollTop = previousTraceBody?.scrollTop ?? 0;
+  const keepTracePinned = !previousTraceBody || previousTraceBody.scrollHeight - previousTraceBody.clientHeight - previousTraceScrollTop < 24;
   const activeElement = root.contains(document.activeElement) ? document.activeElement : undefined;
   const activeFieldKey = activeElement instanceof HTMLInputElement ? activeElement.dataset.ncFieldKey : undefined;
+  const activeComposer = activeElement instanceof HTMLTextAreaElement && activeElement.classList.contains("nc-textarea");
+  const activeTextControl = activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement ? activeElement : undefined;
   const activeSelection =
-    activeElement instanceof HTMLInputElement
+    activeTextControl
       ? {
-          start: activeElement.selectionStart,
-          end: activeElement.selectionEnd,
-          direction: activeElement.selectionDirection
+          start: activeTextControl.selectionStart,
+          end: activeTextControl.selectionEnd,
+          direction: activeTextControl.selectionDirection
         }
       : undefined;
-  const shell = el("section", `nc-shell nc-shell--${state.mode} nc-shell--view-${viewName}`);
+  const rerenderClass = renderedRoots.has(root) ? " nc-shell--rerender" : "";
+  const shell = el("section", `nc-shell nc-shell--${state.mode} nc-shell--view-${viewName}${rerenderClass}`);
   shell.append(renderTopBar(state, handlers, t));
 
   if (viewName === "history") {
@@ -2230,14 +2334,84 @@ export function renderSidepanel(root: HTMLElement, input: SidepanelState, handle
   } else {
     shell.append(renderChatView(state, handlers, t), renderComposer(state, handlers, t));
   }
+  if (state.pendingConfirmation) shell.append(renderPendingConfirmation(state, handlers, t));
 
   root.replaceChildren(shell);
+  renderedRoots.add(root);
+  const listenerCleanups: Array<() => void> = [];
+  if (state.toolMenuOpen || state.modelPickerOpen) {
+    const ownerDocument = root.ownerDocument;
+    const onPointerDown = (event: PointerEvent): void => {
+      const composerControl = event.target instanceof Node ? event.target.parentElement?.closest(".nc-composer-toolbox, .nc-model-picker-wrap") : undefined;
+      if (composerControl && root.contains(composerControl)) return;
+      handlers.onDismissComposerMenus?.();
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      handlers.onDismissComposerMenus?.();
+    };
+    ownerDocument.addEventListener("pointerdown", onPointerDown, true);
+    ownerDocument.addEventListener("keydown", onKeyDown, true);
+    listenerCleanups.push(() => {
+      ownerDocument.removeEventListener("pointerdown", onPointerDown, true);
+      ownerDocument.removeEventListener("keydown", onKeyDown, true);
+    });
+  }
+  if (state.pendingConfirmation) {
+    const ownerDocument = root.ownerDocument;
+    const dialog = root.querySelector<HTMLElement>(".nc-confirmation-dialog");
+    const focusable = Array.from(dialog?.querySelectorAll<HTMLElement>("button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])") ?? []);
+    const cancel = dialog?.querySelector<HTMLButtonElement>(".nc-confirmation-dialog__cancel");
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        handlers.onResolvePendingConfirmation?.(false);
+        return;
+      }
+      if (event.key !== "Tab" || focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && ownerDocument.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && ownerDocument.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!dialog?.contains(ownerDocument.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    ownerDocument.addEventListener("keydown", onKeyDown, true);
+    listenerCleanups.push(() => ownerDocument.removeEventListener("keydown", onKeyDown, true));
+    queueMicrotask(() => {
+      if (root.contains(dialog)) cancel?.focus({ preventScroll: true });
+    });
+  }
+  if (listenerCleanups.length > 0) {
+    transientDocumentListeners.set(root, () => listenerCleanups.forEach((cleanup) => cleanup()));
+  }
   const nextPageView = root.querySelector<HTMLElement>(".nc-page-view");
   if (nextPageView && previousPageScrollTop > 0) nextPageView.scrollTop = previousPageScrollTop;
-  if (activeFieldKey) {
-    const nextActive = Array.from(root.querySelectorAll<HTMLInputElement>("[data-nc-field-key]")).find((node) => node.dataset.ncFieldKey === activeFieldKey);
+  const nextChatStream = root.querySelector<HTMLElement>(".nc-chat-stream");
+  if (nextChatStream) nextChatStream.scrollTop = keepChatPinned ? nextChatStream.scrollHeight : previousChatScrollTop;
+  const nextModelPanel = root.querySelector<HTMLElement>(".nc-run-model-stream");
+  const nextReasoning = root.querySelector<HTMLDetailsElement>(".nc-run-model-stream__reasoning");
+  if (nextReasoning && previousReasoningOpen !== undefined && previousModelPhase === nextModelPanel?.dataset.phase) {
+    nextReasoning.open = previousReasoningOpen;
+  }
+  const nextModelStream = root.querySelector<HTMLElement>(".nc-run-model-stream__body[data-stream-active='true']")
+    ?? root.querySelector<HTMLElement>(".nc-run-model-stream__body");
+  const nextTraceBody = root.querySelector<HTMLElement>(".nc-run-trace[open] .nc-run-trace__body");
+  restoreScrollAfterLayout(root, nextTraceBody, keepTracePinned, previousTraceScrollTop);
+  restoreScrollAfterLayout(root, nextModelStream, keepModelPinned, previousModelScrollTop);
+  if (activeFieldKey || activeComposer) {
+    const nextActive: HTMLInputElement | HTMLTextAreaElement | undefined = activeFieldKey
+      ? Array.from(root.querySelectorAll<HTMLInputElement>("[data-nc-field-key]")).find((node) => node.dataset.ncFieldKey === activeFieldKey)
+      : root.querySelector<HTMLTextAreaElement>(".nc-textarea") ?? undefined;
     nextActive?.focus({ preventScroll: true });
-    if (nextActive && activeSelection && nextActive.type !== "number") {
+    if (nextActive && activeSelection && (!(nextActive instanceof HTMLInputElement) || nextActive.type !== "number")) {
       try {
         nextActive.setSelectionRange(activeSelection.start, activeSelection.end, activeSelection.direction ?? "none");
       } catch {
@@ -2245,7 +2419,4 @@ export function renderSidepanel(root: HTMLElement, input: SidepanelState, handle
       }
     }
   }
-  root.querySelectorAll<HTMLElement>(".nc-run-model-output__body[data-streaming='true']").forEach((node) => {
-    node.scrollTop = node.scrollHeight;
-  });
 }

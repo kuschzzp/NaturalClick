@@ -88,4 +88,19 @@ export class ChromeStorageEventStore {
     const index = events.findIndex((event) => event.id === eventId);
     return index === -1 ? events : events.slice(index + 1);
   }
+
+  async loadSession(sessionId: string): Promise<Array<{ taskId: string; events: AgentEvent[] }>> {
+    const stored = await chrome.storage.local.get(null);
+    return Object.entries(stored)
+      .filter(([key, value]) => key.startsWith(EVENT_LOG_KEY_PREFIX) && Array.isArray(value))
+      .map(([, value]) => value as AgentEvent[])
+      .filter((events) => events.some((event) => event.sessionId === sessionId))
+      .map((events) => ({ taskId: events[0]?.taskId ?? "", events: [...events] }))
+      .filter((turn) => Boolean(turn.taskId))
+      .sort((left, right) => (left.events[0]?.timestamp ?? 0) - (right.events[0]?.timestamp ?? 0));
+  }
+
+  async clear(sessionId: string, taskId: string): Promise<void> {
+    await chrome.storage.local.remove(keyFor(sessionId, taskId));
+  }
 }

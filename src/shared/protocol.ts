@@ -42,6 +42,16 @@ export type StartTaskRequest = {
   runtimeSettings?: RuntimeSettingsInput;
 };
 
+export type RetryTaskRequest = {
+  type: "RETRY_TASK";
+  sessionId: string;
+  taskId: string;
+  modelSettings?: RuntimeModelSettings;
+  capabilitySettings?: CapabilitySettingsState;
+  safetyMode?: "conservative" | "balanced" | "autonomous" | "experimental_full_auto";
+  runtimeSettings?: RuntimeSettingsInput;
+};
+
 export type StopTaskRequest = {
   type: "STOP_TASK";
   reason?: RuntimeAbortReason | (string & {});
@@ -115,7 +125,7 @@ export const SCHEDULE_MESSAGE_TYPES = ["GET_SCHEDULES"] as const;
 export const SCRATCHPAD_MESSAGE_TYPES = ["GET_SCRATCHPAD"] as const;
 export const ARTIFACT_MESSAGE_TYPES = ["GET_ARTIFACTS", "GET_ARTIFACT_DETAIL"] as const;
 
-export const SESSION_LIFECYCLE_MESSAGE_TYPES = ["GET_SESSION_STATE", "NEW_SESSION", "RESUME_TASK", "STOP_TASK"] as const;
+export const SESSION_LIFECYCLE_MESSAGE_TYPES = ["GET_SESSION_STATE", "NEW_SESSION", "RETRY_TASK", "RESUME_TASK", "STOP_TASK"] as const;
 
 export type ModelConfigProtocolRequest =
   | { type: "GET_MODEL_CONFIG" }
@@ -206,6 +216,7 @@ export type ResolveUserConsentRequest = {
 
 export type NaturalClickRequest =
   | StartTaskRequest
+  | RetryTaskRequest
   | StopTaskRequest
   | AppendInstructionRequest
   | ResumeTaskRequest
@@ -227,10 +238,16 @@ export type NaturalClickRequest =
   | ResolveUserConsentRequest
   | { type: "NATURALCLICK_PING" };
 
+export type SessionTurnState = {
+  taskId: string;
+  events: AgentEvent[];
+};
+
 export type SessionStateResponse = {
   sessionId?: string;
   taskId?: string;
   events: AgentEvent[];
+  turns?: SessionTurnState[];
 };
 
 export type NaturalClickResponse<T = unknown> =

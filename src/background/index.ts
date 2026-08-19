@@ -23,7 +23,7 @@ import { readOpenAICompatibleStreamTurn } from "../core/model/streaming-client";
 import type { PageModel } from "../core/observation/page-model";
 import type { ConsentScope } from "../core/policy/consent";
 import type { SafetyMode } from "../core/policy/policy";
-import { AgentRuntime, type ActionMemoryItem, type ObservePageRuntimeOptions, type PlannerInput, type PlannerPortMetrics, type PlannerPortResult } from "../core/runtime/agent-runtime";
+import { AgentRuntime, type ActionMemoryItem, type ConversationHistoryItem, type ObservePageRuntimeOptions, type PlannerInput, type PlannerPortMetrics, type PlannerPortResult } from "../core/runtime/agent-runtime";
 import { ExecutionController } from "../core/runtime/execution-controller";
 import type { ObservationBudget } from "../core/runtime/execution-budget";
 import { restoreExecutionCounters } from "../core/runtime/execution-recovery";
@@ -188,8 +188,8 @@ async function sessionState(
     sessionId = restored?.sessionId;
     taskId = restored?.taskId;
   }
-  if (!sessionId || !taskId) return { events: [] };
-  const events = await eventStore.loadAfter(sessionId, taskId);
+  if (!sessionId || !taskId) return { events: [], turns: [] };
+  let events = await eventStore.loadAfter(sessionId, taskId);
   if (activeController === undefined && activeSession?.sessionId === sessionId && activeSession.taskId === taskId && shouldSuspendRecoveredSession(events)) {
     const latest = events.at(-1);
     const recoveryEvent = makeStepEvent(
@@ -203,16 +203,14 @@ async function sessionState(
       "user"
     );
     await appendEvent(recoveryEvent);
-    return {
-      sessionId,
-      taskId,
-      events: [...events, recoveryEvent]
-    };
+    events = [...events, recoveryEvent];
   }
+  const turns = await eventStore.loadSession(sessionId);
   return {
     sessionId,
     taskId,
-    events
+    events,
+    turns: turns.map((turn) => (turn.taskId === taskId ? { ...turn, events } : turn))
   };
 }
 
@@ -804,16 +802,60 @@ async function requestPlannerModelTurn(input: {
   let text = "";
   let toolCalls: OpenAICompatibleToolCall[] = [];
   if (response.body && contentType.includes("text/event-stream")) {
-    const turn = await readOpenAICompatibleStreamTurn(response.body, async (progress) => {
+    let pendingChunk = "";
+    let pendingContentChunk = "";
+    let pendingReasoningChunk = "";
+    let pendingToolArgumentsChunk = "";
+    let pendingStreamKinds = new Set<string>();
+    let progressEventIndex = 0;
+    let latestReceivedChars = 0;
+    let latestToolArgumentsChars = 0;
+    let latestToolCallNames: string[] = [];
+    let lastToolFingerprint = "";
+    let lastProgressAt = Date.now();
+    const flushProgress = async (force = false): Promise<void> => {
+      const now = Date.now();
+      const toolFingerprint = latestToolCallNames.join("|");
+      const hasVisibleProgress = pendingChunk.length > 0 || toolFingerprint !== lastToolFingerprint;
+      if (!hasVisibleProgress) return;
+      if (!force && now - lastProgressAt < 80 && pendingChunk.length < 96 && toolFingerprint === lastToolFingerprint) return;
+      progressEventIndex += 1;
       await appendBackgroundStepEvent(input.stepId, "ModelCallProgress", {
         role: "planner",
         model: input.settings.plannerModel,
-        chunk: progress.chunk,
-        chunkIndex: progress.chunkIndex,
-        receivedChars: progress.receivedChars,
+        chunk: pendingChunk,
+        contentChunk: pendingContentChunk,
+        reasoningChunk: pendingReasoningChunk,
+        toolArgumentsChunk: pendingToolArgumentsChunk,
+        chunkIndex: progressEventIndex,
+        receivedChars: latestReceivedChars,
+        toolCallNames: latestToolCallNames,
+        toolArgumentsChars: latestToolArgumentsChars,
+        streamKinds: [...pendingStreamKinds],
         nativeToolRound: input.nativeToolRound
       });
+      pendingChunk = "";
+      pendingContentChunk = "";
+      pendingReasoningChunk = "";
+      pendingToolArgumentsChunk = "";
+      pendingStreamKinds = new Set<string>();
+      lastToolFingerprint = toolFingerprint;
+      lastProgressAt = now;
+    };
+    const turn = await readOpenAICompatibleStreamTurn(response.body, async (progress) => {
+      pendingChunk += progress.visibleChunk;
+      pendingContentChunk += progress.chunk;
+      pendingReasoningChunk += progress.reasoningChunk ?? "";
+      pendingToolArgumentsChunk += progress.toolArgumentsChunk ?? "";
+      latestReceivedChars = progress.visibleReceivedChars;
+      latestToolArgumentsChars = progress.toolArgumentsChars ?? latestToolArgumentsChars;
+      latestToolCallNames = progress.toolCallNames ?? latestToolCallNames;
+      if (progress.chunk) pendingStreamKinds.add("content");
+      if (progress.reasoningChunk) pendingStreamKinds.add("reasoning");
+      if (progress.toolArgumentsChunk) pendingStreamKinds.add("tool_arguments");
+      await flushProgress(false);
     });
+    await flushProgress(true);
     text = turn.text;
     toolCalls = turn.toolCalls;
   } else {
@@ -822,10 +864,11 @@ async function requestPlannerModelTurn(input: {
     text = toolCalls.length ? "" : extractOpenAICompatibleText(payload);
   }
 
+  const outputChars = text.length || toolCalls.reduce((count, call) => count + call.argumentsText.length, 0);
   await appendBackgroundStepEvent(input.stepId, "ModelCallCompleted", {
     role: "planner",
     model: input.settings.plannerModel,
-    outputChars: text.length,
+    outputChars,
     outputPreview: text.slice(0, 12000),
     nativeToolCalls: toolCalls.map((call) => call.name),
     nativeToolRound: input.nativeToolRound,
@@ -959,6 +1002,7 @@ async function callPlanner(settings: RuntimeModelSettings, input: PlannerInput, 
           page: plannerPageContext(input),
           evidence: input.evidence,
           attachments: input.attachments ?? [],
+          conversationHistory: input.conversationHistory ?? [],
           recentActions: input.recentActions ?? [],
           stepId: input.stepId,
           observationRound: input.observationRound ?? 1,
@@ -1219,6 +1263,30 @@ function taskTextFromEvents(events: AgentEvent[]): string | undefined {
   const started = events.find((event) => event.type === "TaskStarted");
   const taskText = started?.payload.taskText;
   return typeof taskText === "string" && taskText.trim() ? taskText : undefined;
+}
+
+function terminalSummaryFromEvents(events: AgentEvent[]): string | undefined {
+  const completed = [...events].reverse().find((event) => event.type === "TaskCompleted");
+  if (!completed) return undefined;
+  for (const key of ["summary", "message", "detail"]) {
+    const value = completed.payload[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function boundedConversationHistory(turns: Array<{ taskId: string; events: AgentEvent[] }>): ConversationHistoryItem[] {
+  return turns
+    .flatMap((turn) => {
+      const prompt = taskTextFromEvents(turn.events);
+      const summary = terminalSummaryFromEvents(turn.events);
+      if (!prompt || !summary) return [];
+      return [
+        { taskId: turn.taskId, role: "user" as const, content: prompt.slice(0, 1200) },
+        { taskId: turn.taskId, role: "assistant" as const, content: summary.slice(0, 1200) }
+      ];
+    })
+    .slice(-16);
 }
 
 function semanticCommandFromPayload(payload: Record<string, unknown>): SemanticCommand | undefined {
@@ -1496,7 +1564,17 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
   }
 
   if (message.type === "START_TASK") {
-    activeSession = { sessionId: createSessionId(), taskId: createTaskId() };
+    const restored = await restoreActiveSession();
+    const previousTurns = restored ? await eventStore.loadSession(restored.sessionId) : [];
+    const currentEvents = restored ? previousTurns.find((turn) => turn.taskId === restored.taskId)?.events ?? [] : [];
+    if (currentEvents.length > 0 && deriveSessionExecutionHealth(currentEvents) !== "terminal") {
+      return errorResponse("active_task_not_terminal");
+    }
+    const conversationHistory = boundedConversationHistory(previousTurns);
+    activeSession = {
+      sessionId: restored?.sessionId ?? createSessionId(),
+      taskId: createTaskId()
+    };
     detachedSessionIds.delete(activeSession.sessionId);
     stoppedSessionIds.delete(activeSession.sessionId);
     await persistActiveSession(activeSession);
@@ -1522,7 +1600,57 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
       settings: message.runtimeSettings
     });
     try {
-      await activeController.startTask(message.taskText, { attachments: activeTaskAttachments });
+      await activeController.startTask(message.taskText, { attachments: activeTaskAttachments, conversationHistory });
+    } catch (error) {
+      await appendTaskFailure(error);
+    }
+    return okResponse(await sessionState());
+  }
+
+  if (message.type === "RETRY_TASK") {
+    const restored = await restoreActiveSession();
+    if (!restored || restored.sessionId !== message.sessionId || restored.taskId !== message.taskId) {
+      return errorResponse("retry_task_not_active");
+    }
+    const events = await eventStore.loadAfter(restored.sessionId, restored.taskId);
+    if (events.at(-1)?.type !== "TaskFailed") return errorResponse("retry_task_not_failed");
+    const taskText = taskTextFromEvents(events);
+    if (!taskText) return errorResponse("retry_task_text_missing");
+
+    const turns = await eventStore.loadSession(restored.sessionId);
+    const conversationHistory = boundedConversationHistory(turns.filter((turn) => turn.taskId !== restored.taskId));
+    const startedAttachments = events.find((event) => event.type === "TaskStarted")?.payload.attachments;
+    const attachments = activeTaskAttachments.length > 0
+      ? activeTaskAttachments
+      : sanitizeFileAttachmentContexts(Array.isArray(startedAttachments) ? startedAttachments as FileAttachmentContext[] : []);
+
+    activeRunAbortController?.abort();
+    activeController?.stop("retry_requested");
+    cancelActiveContentPrimitive("retry_requested");
+    await eventStore.clear(restored.sessionId, restored.taskId);
+    activeConsentScope = undefined;
+    currentOverlayTargetId = undefined;
+    activeCapabilitySettings = resolveCapabilitySettings(message.capabilitySettings ?? activeCapabilitySettings);
+    activeToolGroups = defaultCapabilityToolGroups();
+    activeTaskAttachments = attachments;
+    reconcileActiveToolGroups(activeCapabilitySettings);
+    activeRunAbortController = new AbortController();
+    const runtime = buildRuntime(
+      message.modelSettings,
+      runtimeSafetyMode(message.safetyMode),
+      message.runtimeSettings?.observationBudget,
+      undefined,
+      activeRunAbortController.signal
+    );
+    activeController = new ExecutionController({
+      sessionId: restored.sessionId,
+      taskId: restored.taskId,
+      runtime,
+      appendEvent,
+      settings: message.runtimeSettings
+    });
+    try {
+      await activeController.startTask(taskText, { attachments, conversationHistory });
     } catch (error) {
       await appendTaskFailure(error);
     }

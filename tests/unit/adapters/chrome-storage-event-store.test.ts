@@ -59,6 +59,23 @@ describe("ChromeStorageEventStore", () => {
     expect(events.map((item) => item.id)).toEqual(["evt_1", "evt_2"]);
   });
 
+  it("loads ordered task logs for one session and clears only the selected task", async () => {
+    const store = new ChromeStorageEventStore();
+    await store.append(event("task-2-start", { taskId: "task-2", timestamp: 20 }));
+    await store.append(event("other-session", { sessionId: "session-2", taskId: "task-x", timestamp: 5 }));
+    await store.append(event("task-1-start", { taskId: "task-1", timestamp: 10 }));
+    await store.append(event("task-1-done", { taskId: "task-1", type: "TaskCompleted", timestamp: 15 }));
+
+    const turns = await store.loadSession("session-1");
+    expect(turns.map((turn) => turn.taskId)).toEqual(["task-1", "task-2"]);
+    expect(turns[0].events.map((item) => item.id)).toEqual(["task-1-start", "task-1-done"]);
+
+    await store.clear("session-1", "task-1");
+    expect(await store.loadAfter("session-1", "task-1")).toEqual([]);
+    expect((await store.loadAfter("session-1", "task-2")).map((item) => item.id)).toEqual(["task-2-start"]);
+    expect((await store.loadAfter("session-2", "task-x")).map((item) => item.id)).toEqual(["other-session"]);
+  });
+
   it("compacts long task logs before persisting", async () => {
     const store = new ChromeStorageEventStore();
 

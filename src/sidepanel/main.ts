@@ -44,6 +44,7 @@ import {
   applyPlannerQuickPickState,
   currentProjectionSessionIds,
   deriveActiveTaskFromEvents,
+  deriveSessionTitle,
   deriveLatestModelStream,
   mapEventToTimelineItem,
   mergeSuppressedSessionIds,
@@ -58,6 +59,7 @@ import {
   shouldSuppressIncomingSession,
   withDerivedMode,
   type DiagnosticEvent,
+  type ConversationTurnState,
   type OverlayMode,
   type SettingsTabId,
   type SessionRecord,
@@ -80,9 +82,9 @@ const STORAGE_KEY_RUNTIME_SETTINGS = "naturalclick.sidepanel.runtimeSettings.v1"
 const STORAGE_KEY_RUNTIME_STREAM_DEFAULT_MIGRATED = "naturalclick.sidepanel.runtimeSettings.rawPlannerStreamDefaultMigrated.v1";
 const STORAGE_KEY_LOCALE = "naturalclick.sidepanel.locale.v1";
 const STORAGE_KEY_GENERAL_SETTINGS = "naturalclick.sidepanel.generalSettings.v1";
-const DEFAULT_OVERLAY_MODE: OverlayMode = "Off";
+const DEFAULT_OVERLAY_MODE: OverlayMode = "Focus";
 const DEFAULT_SAFETY_MODE: SidepanelState["safetyMode"] = "experimental_full_auto";
-const DEFAULT_THEME_MODE: ThemeMode = "dark";
+const DEFAULT_THEME_MODE: ThemeMode = "light";
 
 const initialLocale = loadStoredLocale();
 const initialT = createTranslator(initialLocale);
@@ -222,6 +224,20 @@ function isSessionRecord(item: unknown): item is SessionRecord {
     typeof record.status === "string" &&
     typeof record.updatedAt === "string" &&
     typeof record.eventCount === "number" &&
+    Array.isArray(record.timeline) &&
+    record.timeline.every(isTimelineItem) &&
+    (record.turns === undefined || (Array.isArray(record.turns) && record.turns.every(isConversationTurnState)))
+  );
+}
+
+function isConversationTurnState(item: unknown): item is ConversationTurnState {
+  if (!item || typeof item !== "object") return false;
+  const record = item as Record<string, unknown>;
+  return (
+    typeof record.taskId === "string" &&
+    typeof record.taskText === "string" &&
+    typeof record.status === "string" &&
+    typeof record.updatedAt === "string" &&
     Array.isArray(record.timeline) &&
     record.timeline.every(isTimelineItem)
   );
@@ -462,8 +478,7 @@ function extractTaskText(session: SessionStateResponse, timeline: TimelineItem[]
 
 function buildSessionTitle(timeline: TimelineItem[], taskText?: string): string {
   const firstTask = taskText || timeline.find((item) => item.detail)?.detail;
-  if (!firstTask) return currentT()("session.untitled");
-  return firstTask.length > 28 ? `${firstTask.slice(0, 28)}...` : firstTask;
+  return deriveSessionTitle(firstTask, currentT()("session.untitled"));
 }
 
 function toSessionSummary(record: SessionRecord): SessionSummary {
@@ -479,24 +494,42 @@ function toSessionSummary(record: SessionRecord): SessionSummary {
 }
 
 function buildSessionRecord(
-  session: SessionStateResponse,
-  timeline: TimelineItem[],
-  activeTask: SidepanelState["activeTask"],
+  sessionId: string,
+  turns: ConversationTurnState[],
   extras: Pick<SessionRecord, "activityText" | "decisionSummary" | "evidenceSummary" | "traceSummary">
 ): SessionRecord | undefined {
-  if (timeline.length === 0) return undefined;
-  const taskText = extractTaskText(session, timeline);
+  if (turns.length === 0) return undefined;
+  const firstTurn = turns[0];
+  const latestTurn = turns.at(-1)!;
   return {
-    id: sessionIdForResponse(session),
-    title: buildSessionTitle(timeline, taskText),
-    status: activeTask?.status ?? "running",
+    id: sessionId,
+    title: buildSessionTitle(firstTurn.timeline, firstTurn.taskText),
+    status: latestTurn.status,
     updatedAt: formatNow(),
-    eventCount: timeline.length,
-    taskText,
+    eventCount: turns.reduce((count, turn) => count + (turn.events?.length ?? turn.timeline.length), 0),
+    taskText: firstTurn.taskText,
     hasDetail: true,
-    timeline,
-    events: session.events,
+    timeline: turns.flatMap((turn) => turn.timeline),
+    events: turns.flatMap((turn) => turn.events ?? []),
+    turns,
     ...extras
+  };
+}
+
+function buildConversationTurn(taskId: string, events: AgentEvent[]): ConversationTurnState | undefined {
+  if (events.length === 0) return undefined;
+  const timeline = buildTimelineItems(events, state.locale);
+  const taskText = extractTaskText({ taskId, events }, timeline) ?? "";
+  const activeTask = deriveActiveTaskFromEvents(events, state.locale);
+  return {
+    taskId,
+    taskText,
+    status: activeTask?.status ?? "running",
+    timeline,
+    events,
+    activeTask,
+    modelStream: deriveLatestModelStream(events, state.locale),
+    updatedAt: formatNow()
   };
 }
 
@@ -699,9 +732,18 @@ function applySession(session: SessionStateResponse): void {
   if (session.events.length === 0) return;
   const incomingSessionId = sessionIdForResponse(session);
   if (shouldSuppressIncomingSession(state, incomingSessionId)) return;
-  const timeline = buildTimelineItems(session.events, state.locale);
-  const activeTask = deriveActiveTaskFromEvents(session.events, state.locale);
-  const modelStream = deriveLatestModelStream(session.events, state.locale);
+  const incomingTurns = session.turns?.length
+    ? session.turns
+    : (state.activeSessionId === incomingSessionId && state.conversationTurns?.length
+        ? state.conversationTurns.map((turn) => ({ taskId: turn.taskId, events: turn.events ?? [] }))
+        : []).filter((turn) => turn.taskId !== session.taskId).concat([{ taskId: session.taskId ?? session.events.at(-1)?.taskId ?? "pending-task", events: session.events }]);
+  const conversationTurns = incomingTurns
+    .map((turn) => buildConversationTurn(turn.taskId, turn.events))
+    .filter((turn): turn is ConversationTurnState => Boolean(turn));
+  const latestTurn = conversationTurns.find((turn) => turn.taskId === session.taskId) ?? conversationTurns.at(-1);
+  const timeline = latestTurn?.timeline ?? [];
+  const activeTask = latestTurn?.activeTask;
+  const modelStream = latestTurn?.modelStream;
   const latestItem = timeline.at(-1);
   const evidenceSummary = session.events
     .filter((event) => ["ObservationReceived", "EvidenceAdded", "VisualEvidenceAdded", "VisionCompleted"].includes(event.type))
@@ -711,7 +753,7 @@ function applySession(session: SessionStateResponse): void {
       return item.detail ?? item.title;
     });
   const traceSummary = session.events.slice(-6).map((event) => `${event.type} · ${event.stepId}`);
-  const record = buildSessionRecord(session, timeline, activeTask, {
+  const record = buildSessionRecord(incomingSessionId, conversationTurns, {
     activityText: latestItem?.detail ?? latestItem?.title ?? currentT()("activity.waiting"),
     decisionSummary: latestItem?.title,
     evidenceSummary,
@@ -726,6 +768,7 @@ function applySession(session: SessionStateResponse): void {
     activeTask,
     modelStream,
     timeline,
+    conversationTurns,
     sessions,
     sessionRecords,
     activeSessionId: record?.id ?? incomingSessionId,
@@ -739,8 +782,14 @@ function applySession(session: SessionStateResponse): void {
 
 function applyRuntimeEvent(event: AgentEvent): void {
   if (blankSessionResetInFlight) return;
-  const events = mergeRuntimeEventForSession(state.lastSessionEvents ?? [], event);
-  applySession({ sessionId: event.sessionId, taskId: event.taskId, events });
+  const priorTurns = state.activeSessionId === event.sessionId ? state.conversationTurns ?? [] : [];
+  const priorEvents = priorTurns.find((turn) => turn.taskId === event.taskId)?.events ?? [];
+  const events = mergeRuntimeEventForSession(priorEvents, event);
+  const turns = [
+    ...priorTurns.filter((turn) => turn.taskId !== event.taskId).map((turn) => ({ taskId: turn.taskId, events: turn.events ?? [] })),
+    { taskId: event.taskId, events }
+  ];
+  applySession({ sessionId: event.sessionId, taskId: event.taskId, events, turns });
   paint();
   if (event.type === "ToolCallCompleted" && event.payload.toolName === "save_artifact") {
     void refreshArtifacts();
@@ -753,6 +802,7 @@ function clearConversationProjection(patch: Partial<SidepanelState> = {}): Sidep
     activeSessionId: undefined,
     lastSessionEvents: [],
     activeTask: undefined,
+    conversationTurns: [],
     modelStream: undefined,
     timeline: [],
     decisionSummary: undefined,
@@ -881,6 +931,9 @@ function paint(): void {
     onResumeTask: () => {
       void resumeTask();
     },
+    onRetryTask: (taskId) => {
+      void retryTask(taskId);
+    },
     onOverlayModeChange: (mode) => {
       updateOverlayMode(mode as OverlayMode);
     },
@@ -947,6 +1000,14 @@ function paint(): void {
     onToggleModelPicker: () => {
       state = { ...state, modelPickerOpen: !state.modelPickerOpen, modelPickerQuery: "", toolMenuOpen: false };
       paint();
+    },
+    onDismissComposerMenus: () => {
+      if (!state.toolMenuOpen && !state.modelPickerOpen) return;
+      state = { ...state, toolMenuOpen: false, modelPickerOpen: false, modelPickerQuery: "" };
+      paint();
+    },
+    onComposerInput: (text) => {
+      state = { ...state, composerInput: text };
     },
     onAttachFiles: (files) => {
       void addPendingAttachments(files);
@@ -1274,8 +1335,9 @@ function openHistorySession(sessionId: string): void {
 
 function deleteHistorySession(sessionId: string): void {
   const t = currentT();
-  const exists = (state.sessions ?? []).some((item) => item.id === sessionId) || Boolean(state.sessionRecords?.[sessionId]);
-  if (!exists) return;
+  const summary = (state.sessions ?? []).find((item) => item.id === sessionId);
+  const record = state.sessionRecords?.[sessionId];
+  if (!summary && !record) return;
   if (state.pendingConfirmation?.action !== "delete-session" || state.pendingConfirmation.sessionId !== sessionId) {
     state = {
       ...state,
@@ -1284,6 +1346,8 @@ function deleteHistorySession(sessionId: string): void {
         action: "delete-session",
         sessionId,
         message: t("history.deleteConfirm"),
+        detail: t("history.deleteWarning"),
+        subject: summary?.title ?? record?.title,
         confirmLabel: t("history.confirmDelete"),
         cancelLabel: t("history.cancel")
       }
@@ -1315,12 +1379,14 @@ function clearHistory(): void {
   const t = currentT();
   if (!(state.sessions?.length || Object.keys(state.sessionRecords ?? {}).length)) return;
   if (state.pendingConfirmation?.action !== "clear-history") {
+    const sessionCount = new Set([...(state.sessions ?? []).map((session) => session.id), ...Object.keys(state.sessionRecords ?? {})]).size;
     state = {
       ...state,
       pendingConfirmation: {
         id: "clear-history",
         action: "clear-history",
         message: t("history.clearConfirm"),
+        detail: t("history.clearWarning", { count: sessionCount }),
         confirmLabel: t("history.confirmClear"),
         cancelLabel: t("history.cancel")
       }
@@ -1434,6 +1500,7 @@ async function submitText(text: string): Promise<void> {
     state = {
       ...state,
       view: "chat",
+      composerInput: "",
       suppressedSessionIds: [],
       activityText: t("runtime.unavailable.title"),
       timeline: [{ id: "runtime-unavailable", title: t("runtime.unavailable.title"), detail: text, tone: "warning" }]
@@ -1444,20 +1511,29 @@ async function submitText(text: string): Promise<void> {
 
   const appendToRunningTask = Boolean(state.activeTask && !["completed", "failed", "stopped"].includes(state.activeTask.status));
   const attachmentsForTask = appendToRunningTask ? [] : sanitizeFileAttachmentContexts(state.pendingAttachments ?? []);
+  const localTaskId = appendToRunningTask ? state.activeTask?.taskId ?? "pending-task" : `pending-task-${Date.now()}`;
+  const localTimeline = appendToRunningTask
+    ? [...(state.timeline ?? []), { id: `local-submit-${Date.now()}`, title: t("event.TaskInterpreted"), detail: text, tone: "info" as const }]
+    : [{ id: `local-start-${Date.now()}`, title: t("event.TaskStarted"), detail: text, tone: "info" as const }];
+  const localTask = {
+    taskId: localTaskId,
+    status: "running",
+    activeNodeId: appendToRunningTask ? "intent" as const : "start" as const,
+    currentAction: text
+  };
+  const previousTurns = state.conversationTurns ?? [];
+  const conversationTurns = appendToRunningTask
+    ? previousTurns.map((turn) => turn.taskId === localTaskId ? { ...turn, status: "running", timeline: localTimeline, activeTask: localTask, updatedAt: formatNow() } : turn)
+    : [...previousTurns, { taskId: localTaskId, taskText: text, status: "running", timeline: localTimeline, activeTask: localTask, updatedAt: formatNow() }];
   state = withDerivedMode({
     ...state,
     view: "chat",
+    composerInput: "",
     selectedSessionId: undefined,
     suppressedSessionIds: [],
-    activeTask: {
-      taskId: state.activeTask?.taskId ?? "pending-task",
-      status: "running",
-      activeNodeId: appendToRunningTask ? "intent" : "start",
-      currentAction: text
-    },
-    timeline: appendToRunningTask
-      ? [...(state.timeline ?? []), { id: `local-submit-${Date.now()}`, title: t("event.TaskInterpreted"), detail: text, tone: "info" }]
-      : [{ id: `local-start-${Date.now()}`, title: t("event.TaskStarted"), detail: text, tone: "info" }],
+    activeTask: localTask,
+    timeline: localTimeline,
+    conversationTurns,
     activityText: text
   });
   paint();
@@ -1488,11 +1564,63 @@ async function submitText(text: string): Promise<void> {
       state = { ...state, pendingAttachments: [] };
     }
   } else {
+    const failedTimeline: TimelineItem[] = [{ id: "send-error", title: t("runtime.sendFailed"), detail: response.error, tone: "error" }];
+    const failedTask = { ...localTask, status: "failed", currentAction: response.error };
     state = {
       ...state,
+      activeTask: failedTask,
       activityText: t("runtime.sendFailed"),
-      timeline: [{ id: "send-error", title: t("runtime.sendFailed"), detail: response.error, tone: "error" }]
+      timeline: failedTimeline,
+      conversationTurns: conversationTurns.map((turn) => turn.taskId === localTaskId
+        ? { ...turn, status: "failed", timeline: failedTimeline, activeTask: failedTask, updatedAt: formatNow() }
+        : turn)
     };
+  }
+  paint();
+}
+
+async function retryTask(taskId: string): Promise<void> {
+  const t = currentT();
+  const sessionId = state.activeSessionId;
+  const current = state.conversationTurns?.find((turn) => turn.taskId === taskId);
+  if (!sessionId || !current || current.status !== "failed") return;
+
+  const localTimeline: TimelineItem[] = [{
+    id: `local-retry-${Date.now()}`,
+    title: t("event.TaskStarted"),
+    detail: current.taskText,
+    tone: "info"
+  }];
+  const activeTask = { taskId, status: "interpreting", activeNodeId: "intent" as const, currentAction: t("conversation.progress.interpreting") };
+  const conversationTurns = (state.conversationTurns ?? []).map((turn) =>
+    turn.taskId === taskId
+      ? { ...turn, status: "interpreting", timeline: localTimeline, events: undefined, activeTask, modelStream: undefined, updatedAt: formatNow() }
+      : turn
+  );
+  state = withDerivedMode({ ...state, activeTask, timeline: localTimeline, lastSessionEvents: [], modelStream: undefined, conversationTurns });
+  paint();
+
+  if (!hasChromeRuntime()) return;
+  const response = await sendRuntimeMessage<SessionStateResponse>({
+    type: "RETRY_TASK",
+    sessionId,
+    taskId,
+    modelSettings: runtimeModelSettings(state.modelSettings),
+    capabilitySettings: capabilitySettingsForMessage(),
+    safetyMode: state.safetyMode,
+    runtimeSettings: runtimeSettingsForMessage()
+  });
+  if (response.ok) {
+    applySession(response.data);
+  } else {
+    const failedTask = { ...activeTask, status: "failed", currentAction: response.error };
+    const failedTimeline: TimelineItem[] = [{ id: `retry-error-${Date.now()}`, title: t("runtime.sendFailed"), detail: response.error, tone: "error" }];
+    state = withDerivedMode({
+      ...state,
+      activeTask: failedTask,
+      timeline: failedTimeline,
+      conversationTurns: conversationTurns.map((turn) => turn.taskId === taskId ? { ...turn, status: "failed", timeline: failedTimeline, activeTask: failedTask } : turn)
+    });
   }
   paint();
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  extractOpenAICompatibleReasoningText,
   extractOpenAICompatibleText,
   extractOpenAICompatibleToolCallDeltas,
   extractOpenAICompatibleToolCalls,
@@ -7,6 +8,20 @@ import {
 } from "../../../src/core/model/openai-compatible";
 
 describe("OpenAI-compatible response helpers", () => {
+  it("extracts provider-compatible reasoning deltas", () => {
+    expect(
+      extractOpenAICompatibleReasoningText({
+        choices: [{ delta: { reasoning_content: "正在分析页面" } }]
+      })
+    ).toBe("正在分析页面");
+
+    expect(
+      extractOpenAICompatibleReasoningText({
+        choices: [{ delta: { reasoningContent: [{ text: "并确认目标" }] } }]
+      })
+    ).toBe("并确认目标");
+  });
+
   it("extracts plain message content", () => {
     expect(
       extractOpenAICompatibleText({

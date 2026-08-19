@@ -37,6 +37,13 @@ export interface AgentRuntimePorts {
 
 export interface StartTaskContext {
   attachments?: FileAttachmentContext[];
+  conversationHistory?: ConversationHistoryItem[];
+}
+
+export interface ConversationHistoryItem {
+  taskId: string;
+  role: "user" | "assistant";
+  content: string;
 }
 
 export interface ObservePageRuntimeOptions {
@@ -53,6 +60,7 @@ export interface PlannerInput {
   observationRound?: number;
   observationRequests?: NeedMoreObservationRequest[];
   recentActions?: ActionMemoryItem[];
+  conversationHistory?: ConversationHistoryItem[];
   contractRepair?: PlannerContractRepair;
 }
 
@@ -393,6 +401,7 @@ export class AgentRuntime {
   private readonly actionMemory: ActionMemoryItem[];
   private taskFrame: TaskFrame | undefined;
   private taskAttachments: FileAttachmentContext[] = [];
+  private conversationHistory: ConversationHistoryItem[] = [];
   private reusablePage: { page: PageModel; candidateLimit: number } | undefined;
 
   constructor(ports: AgentRuntimePorts) {
@@ -405,6 +414,7 @@ export class AgentRuntime {
     const stepId = createStepId();
     this.taskFrame = interpretTask(taskText);
     this.taskAttachments = sanitizeFileAttachmentContexts(context.attachments);
+    this.conversationHistory = [...(context.conversationHistory ?? [])];
     this.reusablePage = undefined;
     const attachments = stripFileArtifactPreviews(this.taskAttachments);
     await this.append(stepId, "TaskStarted", attachments.length > 0 ? { taskText, attachments } : { taskText }, "user");
@@ -661,7 +671,8 @@ export class AgentRuntime {
           stepId,
           observationRound: observationRound + 1,
           observationRequests,
-          recentActions: this.actionMemory.slice(-8)
+          recentActions: this.actionMemory.slice(-8),
+          conversationHistory: this.conversationHistory
         });
         rawDecision = unwrapPlannerPortResult(plannerResult, metrics);
       } catch (error) {
@@ -704,6 +715,7 @@ export class AgentRuntime {
             observationRound: observationRound + 1,
             observationRequests,
             recentActions: this.actionMemory.slice(-8),
+            conversationHistory: this.conversationHistory,
             contractRepair: {
               attempt: 1,
               error: validTurn.error,

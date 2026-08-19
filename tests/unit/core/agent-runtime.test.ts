@@ -37,6 +37,31 @@ const page: PageModel = {
 };
 
 describe("AgentRuntime", () => {
+  it("passes current-session conversation history to every planner call", async () => {
+    const store = new MemoryEventStore();
+    const plannerHistory: unknown[] = [];
+    const runtime = new AgentRuntime({
+      sessionId: "session-history",
+      taskId: "task-current",
+      appendEvent: (event) => store.append(event),
+      observePage: async () => page,
+      plan: async (input) => {
+        plannerHistory.push(input.conversationHistory);
+        return { type: "FinishTask", summary: "Continued from the earlier result.", evidenceRefs: [] };
+      },
+      execute: async () => ({ status: "success", details: {} })
+    });
+
+    const history = [
+      { taskId: "task-previous", role: "user" as const, content: "Open the customer list" },
+      { taskId: "task-previous", role: "assistant" as const, content: "The customer list is open." }
+    ];
+    await runtime.startTask("Continue with the first customer", { conversationHistory: history });
+    await runtime.runNextStep();
+
+    expect(plannerHistory).toEqual([history]);
+  });
+
   it("records attached file metadata on task start without reading file contents", async () => {
     const store = new MemoryEventStore();
     const runtime = new AgentRuntime({

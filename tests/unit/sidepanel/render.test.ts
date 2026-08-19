@@ -36,19 +36,17 @@ describe("sidepanel render", () => {
 
     renderSidepanel(root, baseState({ modelConfigured: false, activityText: "Waiting for a task..." }));
 
-    expect(root.textContent).toContain("Task Chat");
+    expect(root.textContent).toContain("New session");
     expect(root.textContent).toContain("Idle");
     expect(root.textContent).toContain("Ready for a browser task");
     expect(root.textContent).toContain("Model setup required");
     expect(root.querySelector(".nc-activity-bar")).toBeNull();
     expect(root.querySelector(".nc-app-header")).not.toBeNull();
     expect(root.querySelector(".nc-session-title__logo")).not.toBeNull();
-    expect(root.querySelector(".nc-session-title__text")?.textContent).toBe("Task Chat");
+    expect(root.querySelector(".nc-session-title__text")?.textContent).toBe("New session");
     expect(root.querySelector(".nc-status-pill")).not.toBeNull();
-    expect(root.querySelector(".nc-chat-surface")).not.toBeNull();
-    expect(root.querySelector(".nc-chat-surface__header")?.textContent).toContain("Current session");
-    expect(root.querySelector(".nc-chat-surface__header")?.textContent).toContain("Ready");
-    expect(root.querySelector(".nc-chat-surface__status")?.textContent).toBe("Idle");
+    expect(root.querySelector(".nc-chat-surface")).toBeNull();
+    expect(root.querySelector(".nc-chat-surface__header")).toBeNull();
     expect(root.querySelector(".nc-empty-state h1")?.textContent).toBe("Ready for a browser task");
     expect(root.querySelector(".nc-empty-state p")?.textContent).toBe("Current page context, actions, and extracted results stay together in this session.");
     expect(root.querySelector(".nc-empty-state__logo")).toBeNull();
@@ -72,8 +70,103 @@ describe("sidepanel render", () => {
     expect(root.querySelector(".nc-composer-meta")).not.toBeNull();
     expect(root.querySelector('button[aria-label="Open model settings"]')).not.toBeNull();
     expect(root.querySelector('button[aria-label="Tools"]')).not.toBeNull();
-    expect(root.querySelector(".nc-composer__controls-right .nc-context-ring")).not.toBeNull();
+    expect(root.querySelector(".nc-composer__controls-right .nc-context-ring")).toBeNull();
     expect(root.querySelector("textarea")?.getAttribute("placeholder")).toBe("Tell NaturalClick what to do, or type / for skills...");
+  });
+
+  it("keeps the header title on the first 15 characters of the user prompt", () => {
+    const root = document.createElement("main");
+    renderSidepanel(
+      root,
+      baseState({
+        locale: "zh-CN",
+        activeTask: { taskId: "task-1", status: "executing", currentAction: "点击页面上的保存按钮" },
+        lastSessionEvents: [event("TaskStarted", { taskText: "帮我打开设置页面并修改默认语言然后保存" })],
+        timeline: [
+          { id: "start", title: "任务开始", detail: "帮我打开设置页面并修改默认语言然后保存" },
+          { id: "action", title: "正在执行动作", detail: "点击页面上的保存按钮" }
+        ]
+      })
+    );
+
+    expect(root.querySelector(".nc-session-title__text")?.textContent).toBe("帮我打开设置页面并修改默认语言...");
+    expect(root.querySelector(".nc-session-title__text")?.textContent).not.toContain("保存按钮");
+    expect(root.querySelector(".nc-task-summary")).toBeNull();
+    expect(root.querySelector(".nc-run-report")).toBeNull();
+  });
+
+  it("keeps earlier turns visible when a later task is added to the same session", () => {
+    const root = document.createElement("main");
+    const firstEvents = [
+      event("TaskStarted", { taskText: "打开客户列表" }, { taskId: "task-1", timestamp: 1 }),
+      event("TaskCompleted", { summary: "客户列表已打开。" }, { taskId: "task-1", timestamp: 2 })
+    ];
+    const secondEvents = [
+      event("TaskStarted", { taskText: "查看第一位客户" }, { taskId: "task-2", timestamp: 3 }),
+      event("TaskCompleted", { summary: "第一位客户是林女士。" }, { taskId: "task-2", timestamp: 4 })
+    ];
+
+    renderSidepanel(root, baseState({
+      locale: "zh-CN",
+      activeSessionId: "session-1",
+      activeTask: { taskId: "task-2", status: "completed" },
+      conversationTurns: [
+        {
+          taskId: "task-1",
+          taskText: "打开客户列表",
+          status: "completed",
+          timeline: [{ id: "first", title: "已完成", detail: "客户列表已打开。", tone: "success" }],
+          events: firstEvents,
+          activeTask: { taskId: "task-1", status: "completed" },
+          updatedAt: "10:00"
+        },
+        {
+          taskId: "task-2",
+          taskText: "查看第一位客户",
+          status: "completed",
+          timeline: [{ id: "second", title: "已完成", detail: "第一位客户是林女士。", tone: "success" }],
+          events: secondEvents,
+          activeTask: { taskId: "task-2", status: "completed" },
+          updatedAt: "10:01"
+        }
+      ]
+    }));
+
+    expect(Array.from(root.querySelectorAll(".nc-conversation-message--user")).map((node) => node.textContent)).toEqual([
+      "打开客户列表",
+      "查看第一位客户"
+    ]);
+    expect(root.textContent).toContain("客户列表已打开。");
+    expect(root.textContent).toContain("第一位客户是林女士。");
+  });
+
+  it("offers retry only for the latest failed turn and keeps the same task id", () => {
+    const root = document.createElement("main");
+    const onRetryTask = vi.fn();
+    const firstEvents = [
+      event("TaskStarted", { taskText: "打开客户列表" }, { taskId: "task-1", timestamp: 1 }),
+      event("TaskCompleted", { summary: "客户列表已打开。" }, { taskId: "task-1", timestamp: 2 })
+    ];
+    const failedEvents = [
+      event("TaskStarted", { taskText: "查看第一位客户" }, { taskId: "task-2", timestamp: 3 }),
+      event("TaskFailed", { reason: "页面暂时不可用" }, { taskId: "task-2", timestamp: 4 })
+    ];
+
+    renderSidepanel(root, baseState({
+      locale: "zh-CN",
+      activeSessionId: "session-1",
+      activeTask: { taskId: "task-2", status: "failed" },
+      conversationTurns: [
+        { taskId: "task-1", taskText: "打开客户列表", status: "completed", timeline: [{ id: "done", title: "已完成" }], events: firstEvents, activeTask: { taskId: "task-1", status: "completed" }, updatedAt: "10:00" },
+        { taskId: "task-2", taskText: "查看第一位客户", status: "failed", timeline: [{ id: "failed", title: "执行失败", detail: "页面暂时不可用", tone: "error" }], events: failedEvents, activeTask: { taskId: "task-2", status: "failed" }, updatedAt: "10:01" }
+      ]
+    }), { onRetryTask });
+
+    const retry = Array.from(root.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "重新执行");
+    expect(retry).not.toBeUndefined();
+    retry?.click();
+    expect(onRetryTask).toHaveBeenCalledWith("task-2");
+    expect(root.querySelectorAll(".nc-conversation-message--user")).toHaveLength(2);
   });
 
   it("renders Pie-like composer popovers when opened", () => {
@@ -107,6 +200,75 @@ describe("sidepanel render", () => {
     expect(root.textContent).toContain("SELECT MODEL");
     expect(root.textContent).toContain("Model picker");
     expect(Array.from(root.querySelectorAll(".nc-model-popover__item")).map((node) => node.textContent)).toEqual(["gpt-4.1-mini", "gpt-4.1"]);
+  });
+
+  it("dismisses either composer popover from outside pointer input or Escape", () => {
+    const root = document.createElement("main");
+    document.body.append(root);
+    const onDismissComposerMenus = vi.fn();
+
+    renderSidepanel(root, baseState({ toolMenuOpen: true }), { onDismissComposerMenus });
+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(onDismissComposerMenus).toHaveBeenCalledTimes(1);
+
+    renderSidepanel(root, baseState({ modelPickerOpen: true }), { onDismissComposerMenus });
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(onDismissComposerMenus).toHaveBeenCalledTimes(2);
+    renderSidepanel(root, baseState());
+    root.remove();
+  });
+
+  it("switches composer popovers without an intermediate outside dismissal", () => {
+    const root = document.createElement("main");
+    document.body.append(root);
+    const onDismissComposerMenus = vi.fn();
+    const onToggleToolMenu = vi.fn();
+
+    renderSidepanel(root, baseState({ modelPickerOpen: true }), { onDismissComposerMenus, onToggleToolMenu });
+    const tools = root.querySelector<HTMLButtonElement>('button[aria-label="Tools"]');
+    tools?.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    tools?.click();
+
+    expect(onDismissComposerMenus).not.toHaveBeenCalled();
+    expect(onToggleToolMenu).toHaveBeenCalledTimes(1);
+    renderSidepanel(root, baseState());
+    root.remove();
+  });
+
+  it("marks repeated renders so existing conversation entrance animations do not replay", () => {
+    const root = document.createElement("main");
+    const state = baseState({
+      activeTask: { taskId: "task-1", status: "interpreting" },
+      timeline: [{ id: "start", title: "Task started", detail: "Open settings" }]
+    });
+
+    renderSidepanel(root, state);
+    expect(root.querySelector(".nc-shell")?.classList.contains("nc-shell--rerender")).toBe(false);
+
+    renderSidepanel(root, { ...state, toolMenuOpen: true });
+    expect(root.querySelector(".nc-shell")?.classList.contains("nc-shell--rerender")).toBe(true);
+  });
+
+  it("preserves composer focus and selection while runtime progress rerenders", () => {
+    const root = document.createElement("main");
+    document.body.append(root);
+    const state = baseState({ composerInput: "继续执行这一步" });
+    renderSidepanel(root, state);
+    const textarea = root.querySelector<HTMLTextAreaElement>(".nc-textarea");
+    textarea?.focus();
+    textarea?.setSelectionRange(2, 5);
+
+    renderSidepanel(root, {
+      ...state,
+      activeTask: { taskId: "task-1", status: "observing", currentAction: "正在查看页面" },
+      timeline: [{ id: "start", title: "任务开始", detail: "继续执行这一步" }]
+    });
+
+    const nextTextarea = root.querySelector<HTMLTextAreaElement>(".nc-textarea");
+    expect(document.activeElement).toBe(nextTextarea);
+    expect(nextTextarea?.value).toBe("继续执行这一步");
+    expect([nextTextarea?.selectionStart, nextTextarea?.selectionEnd]).toEqual([2, 5]);
+    root.remove();
   });
 
   it("routes model picker management directly to the model config editor", () => {
@@ -588,6 +750,23 @@ describe("sidepanel render", () => {
     ]);
   });
 
+  it("clears the controlled composer state before submitting the task", () => {
+    const root = document.createElement("main");
+    const onComposerInput = vi.fn();
+    const onSubmitTask = vi.fn();
+
+    renderSidepanel(root, baseState({ composerInput: "Open the account settings" }), { onComposerInput, onSubmitTask });
+    onComposerInput.mockClear();
+
+    const textarea = root.querySelector("textarea") as HTMLTextAreaElement;
+    root.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    expect(textarea.value).toBe("");
+    expect(onComposerInput).toHaveBeenCalledWith("");
+    expect(onSubmitTask).toHaveBeenCalledWith("Open the account settings");
+    expect(onComposerInput.mock.invocationCallOrder[0]).toBeLessThan(onSubmitTask.mock.invocationCallOrder[0]);
+  });
+
   it("keeps Pie-like stop and queue composer actions separate while a task is running", () => {
     const root = document.createElement("main");
     const onSubmitTask = vi.fn();
@@ -1067,21 +1246,17 @@ describe("sidepanel render", () => {
     renderSidepanel(root, state);
 
     expect(root.textContent).toContain("Running");
-    expect(root.textContent).toContain("Agent is working");
-    expect(root.textContent).toContain("Current step");
-    expect(root.textContent).toContain("View execution details");
+    expect(root.textContent).toContain("NaturalClick");
+    expect(root.textContent).toContain("Working");
+    expect(root.textContent).toContain("Execution details");
     expect(root.textContent).toContain("点击个人版继续");
     expect(root.textContent).toContain("Highlight target");
-    expect(root.querySelector(".nc-chat-surface")).not.toBeNull();
-    expect(root.querySelector(".nc-chat-surface__status")?.textContent).toBe("Running");
-    expect(root.querySelector(".nc-chat-surface__header")?.textContent).toContain("2 events");
-    expect(root.querySelector(".nc-run-report")).not.toBeNull();
-    expect(root.querySelector(".nc-run-report__identity")).not.toBeNull();
-    expect(root.querySelector(".nc-run-report__avatar")).not.toBeNull();
-    expect(root.querySelector(".nc-run-digest")).not.toBeNull();
-    expect(root.querySelector(".nc-run-digest")?.textContent).toContain("Run summary");
-    expect(root.querySelector(".nc-run-digest")?.textContent).toContain("Recent steps");
-    expect(root.querySelector(".nc-run-digest")?.textContent).toContain("计划已生成");
+    expect(root.querySelector(".nc-chat-surface")).toBeNull();
+    expect(root.querySelector(".nc-run-report")).toBeNull();
+    expect(root.querySelector(".nc-run-digest")).toBeNull();
+    expect(root.querySelector(".nc-assistant-response")).not.toBeNull();
+    expect(root.querySelector(".nc-thinking-dots")).not.toBeNull();
+    expect(root.querySelector(".nc-assistant-response__steps")?.textContent).toContain("计划已生成");
     expect(root.querySelector(".nc-agent-step-group")).toBeNull();
     expect(root.querySelector(".nc-run-trace")).not.toBeNull();
     expect(root.querySelector(".nc-run-trace__body")).not.toBeNull();
@@ -1119,13 +1294,9 @@ describe("sidepanel render", () => {
       })
     );
 
-    const digest = root.querySelector(".nc-run-digest");
-    expect(digest).not.toBeNull();
-    expect(digest?.textContent).toContain("执行摘要");
-    expect(digest?.textContent).toContain("模型调用");
-    expect(digest?.textContent).toContain("慢调用");
-    expect(digest?.textContent).toContain("调试噪声");
-    expect(digest?.textContent).toContain("已从主对话隐藏 3 条调试噪声");
+    expect(root.querySelector(".nc-run-digest")).toBeNull();
+    expect(root.querySelector(".nc-run-report")).toBeNull();
+    expect(root.querySelector(".nc-assistant-response")?.textContent).toContain("已停止");
     expect(root.querySelector(".nc-run-trace")).not.toBeNull();
     expect((root.querySelector(".nc-run-trace") as HTMLDetailsElement)?.open).toBe(false);
   });
@@ -1172,7 +1343,7 @@ describe("sidepanel render", () => {
     expect(root.querySelector('button[aria-label="拒绝"]')).not.toBeNull();
   });
 
-  it("renders streamed model output inside the running task card", () => {
+  it("keeps streamed model output inside execution details instead of a separate model-output region", () => {
     const root = document.createElement("main");
 
     renderSidepanel(
@@ -1184,7 +1355,11 @@ describe("sidepanel render", () => {
           status: "running",
           currentAction: "模型正在输出"
         },
-        timeline: [{ id: "event-1", title: "模型正在输出", detail: "2 个片段 · 33 字符" }],
+        timeline: [
+          { id: "event-0", title: "任务开始", detail: "查询南京天气", eventType: "TaskStarted" },
+          { id: "event-start", title: "模型调用开始", eventType: "ModelCallStarted" },
+          { id: "event-1", title: "模型正在输出", detail: "2 个片段 · 33 字符", eventType: "ModelCallProgress" }
+        ],
         modelStream: {
           title: "模型正在输出",
           text: '{"type":"FinishTask","summary":"南京今天多云"}',
@@ -1196,12 +1371,154 @@ describe("sidepanel render", () => {
       })
     );
 
-    expect(root.textContent).toContain("模型输出");
+    expect(root.textContent).toContain("执行明细");
     expect(root.textContent).toContain("南京今天多云");
-    expect(root.textContent).toContain("实时输出中");
-    expect(root.querySelector(".nc-run-model-output__body")?.textContent).toContain('"summary"');
-    expect(root.querySelectorAll(".nc-run-model-output")).toHaveLength(1);
+    expect(root.querySelectorAll(".nc-run-model-stream")).toHaveLength(1);
+    expect(root.querySelector(".nc-run-model-stream__model")?.textContent).toBe("qwen3.7-max");
+    expect(root.querySelector(".nc-run-model-stream__body")?.textContent).toContain('"summary":"南京今天多云"');
+    expect(root.querySelector(".nc-run-step:nth-child(2) .nc-run-model-stream")).not.toBeNull();
+    expect(root.querySelector(".nc-run-model-stream__cursor")).not.toBeNull();
+    expect((root.querySelector(".nc-run-trace") as HTMLDetailsElement)?.open).toBe(true);
     expect(root.querySelector(".nc-message")).toBeNull();
+  });
+
+  it("shows tool-call activity when the planner stream has no text", () => {
+    const root = document.createElement("main");
+
+    renderSidepanel(root, baseState({
+      activeTask: { taskId: "task-1", status: "running", currentAction: "Model streaming" },
+      timeline: [
+        { id: "start", title: "Task started", detail: "Read the page" },
+        { id: "model", title: "Model call started", eventType: "ModelCallStarted" }
+      ],
+      modelStream: {
+        title: "Model streaming",
+        text: "",
+        isStreaming: true,
+        model: "qwen3.7-max",
+        toolNames: ["read_page"],
+        receivedChars: 24
+      }
+    }));
+
+    expect(root.querySelector(".nc-run-model-stream__tools")?.textContent).toContain("read_page");
+    expect((root.querySelector(".nc-run-trace") as HTMLDetailsElement)?.open).toBe(true);
+  });
+
+  it("separates reasoning from streamed answer and collapses reasoning once the answer starts", () => {
+    const root = document.createElement("main");
+
+    renderSidepanel(root, baseState({
+      locale: "zh-CN",
+      activeTask: { taskId: "task-1", status: "running", currentAction: "模型正在输出" },
+      timeline: [
+        { id: "task", title: "任务开始", eventType: "TaskStarted" },
+        { id: "model", title: "模型调用开始", eventType: "ModelCallStarted" }
+      ],
+      modelStream: {
+        title: "模型正在输出",
+        text: "这是正式回复",
+        reasoningText: "正在分析页面结构",
+        contentText: "这是正式回复",
+        toolArgumentsText: '{"target":"button"}',
+        phase: "answering",
+        isStreaming: true,
+        model: "deepseek-reasoner"
+      }
+    }));
+
+    const reasoning = root.querySelector<HTMLDetailsElement>(".nc-run-model-stream__reasoning");
+    expect(reasoning?.open).toBe(false);
+    expect(reasoning?.textContent).toContain("思考过程");
+    expect(root.querySelector(".nc-run-model-stream__answer")?.textContent).toContain("这是正式回复");
+    expect(root.querySelector(".nc-run-model-stream__answer .nc-run-model-stream__cursor")).not.toBeNull();
+    expect((root.querySelector(".nc-run-model-stream__tool-detail") as HTMLDetailsElement)?.open).toBe(false);
+  });
+
+  it("keeps completed model output open until the task itself reaches a terminal state", () => {
+    const root = document.createElement("main");
+    const modelStream = { title: "Model call completed", text: '{"type":"commandTurn"}', isStreaming: false, model: "qwen3.7-max" };
+    const timeline = [
+      { id: "task", title: "Task started", detail: "Open settings", eventType: "TaskStarted" as const },
+      { id: "model", title: "Model call started", eventType: "ModelCallStarted" as const },
+      { id: "done", title: "Model call completed", eventType: "ModelCallCompleted" as const }
+    ];
+
+    renderSidepanel(root, baseState({ activeTask: { taskId: "task-1", status: "executing" }, timeline, modelStream }));
+    expect((root.querySelector(".nc-run-trace") as HTMLDetailsElement)?.open).toBe(true);
+
+    renderSidepanel(root, baseState({ activeTask: { taskId: "task-1", status: "completed" }, timeline, modelStream }));
+    expect((root.querySelector(".nc-run-trace") as HTMLDetailsElement)?.open).toBe(false);
+  });
+
+  it("scrolls both execution details and model output after streamed content finishes layout", () => {
+    const root = document.createElement("main");
+    document.body.append(root);
+    const frames: FrameRequestCallback[] = [];
+    const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const state = baseState({
+      activeTask: { taskId: "task-1", status: "executing" },
+      timeline: [
+        { id: "task", title: "Task started", eventType: "TaskStarted" },
+        { id: "model", title: "Model call started", eventType: "ModelCallStarted" }
+      ],
+      modelStream: { title: "Model streaming", text: "first", isStreaming: true, model: "qwen3.7-max" }
+    });
+
+    renderSidepanel(root, state);
+    while (frames.length) frames.shift()?.(0);
+    const previousTrace = root.querySelector<HTMLElement>(".nc-run-trace__body")!;
+    const previousModel = root.querySelector<HTMLElement>(".nc-run-model-stream__body")!;
+    Object.defineProperties(previousTrace, { scrollHeight: { value: 500 }, clientHeight: { value: 200 } });
+    Object.defineProperties(previousModel, { scrollHeight: { value: 400 }, clientHeight: { value: 120 } });
+    previousTrace.scrollTop = 300;
+    previousModel.scrollTop = 280;
+
+    renderSidepanel(root, { ...state, modelStream: { ...state.modelStream!, text: "first\nsecond\nthird" } });
+    const nextTrace = root.querySelector<HTMLElement>(".nc-run-trace__body")!;
+    const nextModel = root.querySelector<HTMLElement>(".nc-run-model-stream__body")!;
+    Object.defineProperties(nextTrace, { scrollHeight: { value: 720 }, clientHeight: { value: 200 } });
+    Object.defineProperties(nextModel, { scrollHeight: { value: 640 }, clientHeight: { value: 120 } });
+    while (frames.length) frames.shift()?.(16);
+
+    expect(nextTrace.scrollTop).toBe(720);
+    expect(nextModel.scrollTop).toBe(640);
+    requestAnimationFrame.mockRestore();
+    root.remove();
+  });
+
+  it("collapses completed progress and places execution details above the formal reply", () => {
+    const root = document.createElement("main");
+
+    renderSidepanel(
+      root,
+      baseState({
+        locale: "zh-CN",
+        activeTask: { taskId: "task-1", status: "completed", currentAction: "南京今天多云" },
+        lastSessionEvents: [
+          event("TaskStarted", { taskText: "查询南京天气" }, { id: "start", timestamp: 1 }),
+          event("ObservationReceived", { summary: "天气页面已加载" }, { id: "observe", timestamp: 2 }),
+          event("TaskCompleted", { summary: "南京今天多云" }, { id: "done", timestamp: 3 })
+        ],
+        timeline: [
+          { id: "start", title: "任务开始", detail: "查询南京天气" },
+          { id: "observe", title: "页面观察完成", detail: "天气页面已加载" },
+          { id: "done", title: "任务完成", detail: "南京今天多云", tone: "success" }
+        ]
+      })
+    );
+
+    const trace = root.querySelector(".nc-run-trace");
+    const reply = root.querySelector(".nc-assistant-response__reply");
+    expect(trace?.textContent).toContain("执行明细");
+    expect(reply?.textContent).toBe("南京今天多云");
+    const replyPosition = trace && reply ? trace.compareDocumentPosition(reply) : 0;
+    expect(replyPosition & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(root.querySelector(".nc-assistant-response__current")).toBeNull();
+    expect(root.querySelector(".nc-thinking-dots")).toBeNull();
   });
 
   it("renders a failed run as one useful report instead of separate event cards", () => {
@@ -1224,14 +1541,13 @@ describe("sidepanel render", () => {
       })
     );
 
-    expect(root.textContent).toContain("Agent 正在执行");
-    expect(root.textContent).toContain("查看执行细节");
+    expect(root.textContent).toContain("NaturalClick");
+    expect(root.textContent).toContain("执行明细");
     expect(root.textContent).toContain("失败");
-    expect(root.textContent).toContain("Planner decision requires nextCommand.type");
-    expect(root.querySelectorAll(".nc-run-report")).toHaveLength(1);
-    expect(root.querySelector(".nc-run-digest")?.textContent).toContain("执行摘要");
-    expect(root.querySelector(".nc-run-digest")?.textContent).toContain("最近步骤");
-    expect(root.querySelector(".nc-run-digest")?.textContent).toContain("任务失败");
+    expect(root.textContent).toContain("invalid_contract");
+    expect(root.querySelectorAll(".nc-run-report")).toHaveLength(0);
+    expect(root.querySelector(".nc-run-digest")).toBeNull();
+    expect(root.querySelectorAll(".nc-assistant-response")).toHaveLength(1);
     expect(root.querySelector(".nc-agent-step-group")).toBeNull();
     expect(root.querySelectorAll(".nc-run-step")).toHaveLength(4);
     expect((root.querySelector(".nc-run-trace") as HTMLDetailsElement)?.open).toBe(false);
@@ -1282,8 +1598,61 @@ describe("sidepanel render", () => {
     expect(root.querySelector(".nc-history-footer")?.textContent).toContain("Local history");
   });
 
-  it("renders history confirmation inline instead of relying on browser dialogs", () => {
+  it("renders history confirmation in an accessible modal", async () => {
     const root = document.createElement("main");
+    document.body.append(root);
+    const onResolvePendingConfirmation = vi.fn();
+    renderSidepanel(
+      root,
+      baseState({
+        view: "history",
+        pendingConfirmation: {
+          id: "delete-s1",
+          action: "delete-session",
+          sessionId: "s1",
+          message: "Delete this history session?",
+          detail: "This action cannot be undone.",
+          subject: "Open pricing page",
+          confirmLabel: "Delete",
+          cancelLabel: "Cancel"
+        }
+      }),
+      { onResolvePendingConfirmation }
+    );
+
+    const backdrop = root.querySelector<HTMLElement>(".nc-confirmation-backdrop");
+    const dialog = root.querySelector<HTMLElement>(".nc-confirmation-dialog");
+    const cancel = root.querySelector<HTMLButtonElement>('button[aria-label="Cancel"]');
+    const confirm = root.querySelector<HTMLButtonElement>('button[aria-label="Delete"]');
+    expect(backdrop).not.toBeNull();
+    expect(dialog?.getAttribute("role")).toBe("dialog");
+    expect(dialog?.getAttribute("aria-modal")).toBe("true");
+    expect(dialog?.getAttribute("aria-labelledby")).toBe("nc-confirmation-title-delete-s1");
+    expect(dialog?.textContent).toContain("Open pricing page");
+    expect(dialog?.textContent).toContain("This action cannot be undone.");
+    await Promise.resolve();
+    expect(document.activeElement).toBe(cancel);
+
+    confirm?.click();
+    expect(onResolvePendingConfirmation).toHaveBeenLastCalledWith(true);
+    cancel?.click();
+    expect(onResolvePendingConfirmation).toHaveBeenLastCalledWith(false);
+
+    backdrop?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onResolvePendingConfirmation).toHaveBeenLastCalledWith(false);
+    dialog?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onResolvePendingConfirmation).toHaveBeenCalledTimes(3);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(onResolvePendingConfirmation).toHaveBeenCalledTimes(4);
+    expect(onResolvePendingConfirmation).toHaveBeenLastCalledWith(false);
+    renderSidepanel(root, baseState());
+    root.remove();
+  });
+
+  it("keeps keyboard focus inside the history confirmation modal", async () => {
+    const root = document.createElement("main");
+    document.body.append(root);
     renderSidepanel(
       root,
       baseState({
@@ -1292,15 +1661,27 @@ describe("sidepanel render", () => {
           id: "clear-history",
           action: "clear-history",
           message: "Clear all history sessions?",
+          detail: "All 3 history sessions will be permanently deleted.",
           confirmLabel: "Clear all",
           cancelLabel: "Cancel"
         }
       })
     );
 
-    expect(root.querySelector(".nc-pending-confirmation")).not.toBeNull();
-    expect(root.querySelector('button[aria-label="Clear all"]')).not.toBeNull();
-    expect(root.querySelector('button[aria-label="Cancel"]')).not.toBeNull();
+    const cancel = root.querySelector<HTMLButtonElement>('button[aria-label="Cancel"]');
+    const confirm = root.querySelector<HTMLButtonElement>('button[aria-label="Clear all"]');
+    await Promise.resolve();
+    expect(document.activeElement).toBe(cancel);
+
+    confirm?.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    expect(document.activeElement).toBe(cancel);
+
+    cancel?.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
+    expect(document.activeElement).toBe(confirm);
+    renderSidepanel(root, baseState());
+    root.remove();
   });
 
   it("renders a history detail page with exported-session actions", () => {
@@ -1417,7 +1798,7 @@ describe("sidepanel render", () => {
     expect(root.querySelector(".nc-settings-tabs")?.parentElement?.classList.contains("nc-settings-panel")).toBe(true);
     expect(root.querySelector(".nc-settings-center-header h2")?.textContent).toBe("Configs");
     expect(root.querySelector(".nc-settings-center-status strong")?.textContent).toBe("Unsaved changes");
-    expect(root.querySelector(".nc-settings-center-status__meta")?.textContent).toBe("4 sections");
+    expect(root.querySelector(".nc-settings-center-status__meta")).toBeNull();
     expect(root.querySelector(".nc-settings-tabs")?.getAttribute("role")).toBe("tablist");
     expect(Array.from(root.querySelectorAll(".nc-settings-tab__label")).map((node) => node.textContent)).toEqual(["Configs", "Skills", "Search", "General"]);
     expect(Array.from(root.querySelectorAll(".nc-settings-tab__detail")).map((node) => node.textContent)).toEqual([

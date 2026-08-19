@@ -9,6 +9,9 @@ interface ChatCompletionLike {
 
 interface ChatMessageLike {
   content?: string | Array<{ text?: string }>;
+  reasoning?: string | Array<{ text?: string }>;
+  reasoning_content?: string | Array<{ text?: string }>;
+  reasoningContent?: string | Array<{ text?: string }>;
   function_call?: {
     arguments?: unknown;
   };
@@ -67,6 +70,12 @@ export function extractOpenAICompatibleContentText(payload: unknown): string {
   const choice = (payload as ChatCompletionLike | undefined)?.choices?.[0];
   const message = choice?.delta ?? choice?.message;
   return contentText(message?.content);
+}
+
+export function extractOpenAICompatibleReasoningText(payload: unknown): string {
+  const choice = (payload as ChatCompletionLike | undefined)?.choices?.[0];
+  const message = choice?.delta ?? choice?.message;
+  return contentText(message?.reasoning_content) || contentText(message?.reasoning) || contentText(message?.reasoningContent);
 }
 
 export function extractOpenAICompatibleToolCallDeltas(payload: unknown): OpenAICompatibleToolCallDelta[] {

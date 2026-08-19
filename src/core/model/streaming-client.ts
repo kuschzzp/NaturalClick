@@ -1,14 +1,21 @@
 import {
   extractOpenAICompatibleContentText,
+  extractOpenAICompatibleReasoningText,
   extractOpenAICompatibleToolCallDeltas,
   type OpenAICompatibleToolCall
 } from "./openai-compatible";
 
 export interface StreamProgress {
   chunk: string;
+  reasoningChunk?: string;
+  toolArgumentsChunk?: string;
+  visibleChunk: string;
   accumulatedText: string;
   chunkIndex: number;
   receivedChars: number;
+  visibleReceivedChars: number;
+  toolCallNames?: string[];
+  toolArgumentsChars?: number;
 }
 
 export interface OpenAICompatibleStreamTurn {
@@ -48,6 +55,7 @@ export async function readOpenAICompatibleStreamTurn(
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
+  let visibleReceivedChars = 0;
   let chunkIndex = 0;
   const pendingToolCalls = new Map<string, PendingToolCall>();
 
@@ -64,16 +72,27 @@ export async function readOpenAICompatibleStreamTurn(
       if (data === "[DONE]") return finishedStreamTurn(text, pendingToolCalls);
       try {
         const payload = JSON.parse(data);
-        mergeToolCallDeltas(pendingToolCalls, payload);
+        const toolProgress = mergeToolCallDeltas(pendingToolCalls, payload);
         const chunk = extractOpenAICompatibleContentText(payload);
+        const reasoningChunk = extractOpenAICompatibleReasoningText(payload);
+        const visibleChunk = `${chunk}${reasoningChunk}${toolProgress.argumentsChunk}`;
         if (chunk) {
           text += chunk;
+        }
+        if (visibleChunk || toolProgress.changed) {
           chunkIndex += 1;
+          visibleReceivedChars += visibleChunk.length;
           await onProgress?.({
             chunk,
+            reasoningChunk: reasoningChunk || undefined,
+            toolArgumentsChunk: toolProgress.argumentsChunk || undefined,
+            visibleChunk,
             accumulatedText: text,
             chunkIndex,
-            receivedChars: text.length
+            receivedChars: text.length,
+            visibleReceivedChars,
+            toolCallNames: pendingToolCallNames(pendingToolCalls),
+            toolArgumentsChars: pendingToolArgumentsChars(pendingToolCalls)
           });
         }
       } catch {
@@ -95,7 +114,7 @@ export async function readOpenAICompatibleStreamTurn(
   return finishedStreamTurn(text, pendingToolCalls);
 }
 
-function mergeToolCallDeltas(pending: Map<string, PendingToolCall>, payload: unknown): void {
+function mergeToolCallDeltas(pending: Map<string, PendingToolCall>, payload: unknown): { changed: boolean; argumentsChunk: string } {
   const deltas = extractOpenAICompatibleToolCallDeltas(payload);
   for (const delta of deltas) {
     const key = delta.index !== undefined ? `index:${delta.index}` : delta.id ? `id:${delta.id}` : `fallback:${pending.size}`;
@@ -110,6 +129,18 @@ function mergeToolCallDeltas(pending: Map<string, PendingToolCall>, payload: unk
     current.argumentsText += delta.argumentsText;
     pending.set(key, current);
   }
+  return {
+    changed: deltas.length > 0,
+    argumentsChunk: deltas.map((delta) => delta.argumentsText).join("")
+  };
+}
+
+function pendingToolCallNames(pending: Map<string, PendingToolCall>): string[] {
+  return [...pending.values()].flatMap((call) => call.name?.trim() ? [call.name.trim()] : []);
+}
+
+function pendingToolArgumentsChars(pending: Map<string, PendingToolCall>): number {
+  return [...pending.values()].reduce((count, call) => count + call.argumentsText.length, 0);
 }
 
 function finishedToolCalls(pending: Map<string, PendingToolCall>): OpenAICompatibleToolCall[] {
