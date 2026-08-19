@@ -4,11 +4,12 @@
 
 **A clean-rewrite Chrome MV3 browser operation Agent with a DOM-first, vision-assisted Agent Core.**
 
-NaturalClick turns the Chrome side panel into an inspectable browser-agent workspace. It observes the active page, builds evidence, plans semantic commands, executes local Chrome actions, verifies the result, and keeps a traceable session record.
+NaturalClick turns the Chrome side panel into an inspectable browser-agent workspace. It observes the task-bound page, builds evidence, plans semantic commands, executes local Chrome actions, verifies the result, and keeps a traceable session record.
 
 [简体中文](./README.zh-CN.md) · [License](./LICENSE) · [Installable Extension](./naturalclick-extension) · [Architecture Spec](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [Side Panel Spec](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md) · [Universal Agent Upgrade](./docs/superpowers/specs/2026-07-07-universal-agent-browser-upgrade.md)
 
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
+[![Version](https://img.shields.io/badge/version-0.1.205-111827)](./package.json)
 [![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
 [![Side Panel](https://img.shields.io/badge/UI-Side%20Panel-10B981)](./public/sidepanel.html)
 [![DOM First](https://img.shields.io/badge/Observation-DOM--first-111827)](./src/adapters/content/dom-observer.ts)
@@ -21,7 +22,7 @@ NaturalClick turns the Chrome side panel into an inspectable browser-agent works
 
 ## Project Status
 
-This repository is the first clean-rewrite implementation line for NaturalClick Agent.
+This repository contains the active clean-rewrite implementation line for NaturalClick Agent. The current installable build is `0.1.205`.
 
 The previous implementation proved useful product ideas, especially the conversational side panel, page element boxes, numbered targets, execution logs, and local Chrome extension packaging. The new line keeps those product lessons, but rebuilds the system around a clearer Agent Core:
 
@@ -30,7 +31,9 @@ The previous implementation proved useful product ideas, especially the conversa
 - Semantic commands instead of DOM-index-first planning.
 - Evidence-based observation, binding, execution, and verification.
 - Scoped safety policy instead of repeated confirmation prompts.
-- Current-session memory and traceable execution.
+- Multi-turn conversation memory and traceable per-turn execution.
+- A task-bound Chrome tab that remains stable when the user switches tabs.
+- OpenAI Responses, Chat Completions, and legacy Completions protocol support.
 
 This is not a stealth automation toolkit, CAPTCHA solver, payment bot, or anti-bot bypass project. The goal is transparent, user-controlled browser operation inside Chrome.
 
@@ -61,7 +64,7 @@ flowchart LR
   Runtime --> Events[Event Store]
   Runtime --> Overlay[Page Overlay Adapter]
 
-  DOM --> Page[Active Chrome Page]
+  DOM --> Page[Task-bound Chrome Page]
   Executor --> Page
   Overlay --> Page
 ```
@@ -152,11 +155,11 @@ docs/
   superpowers/plans/            # Implementation plans
 ```
 
-## First-Version Scope
+## Current Scope
 
-The first version focuses on the smallest complete browser-Agent slice:
+The current build provides a complete local browser-Agent slice:
 
-| Area | First-version direction |
+| Area | Current direction |
 |---|---|
 | Browser target | Chrome Manifest V3 extension |
 | Runtime | Event-driven Agent loop with recoverable state |
@@ -168,9 +171,11 @@ The first version focuses on the smallest complete browser-Agent slice:
 | Side panel | Conversational runtime with settings, history, logs, and language switch |
 | Overlay | User-facing target visualization, independent from Agent sensing |
 | Safety | `balanced` by default, scoped consent for risky operations |
-| Memory | Current-session memory, not cross-session long-term memory |
+| Memory | Multi-turn history within the current session, not cross-session long-term memory |
+| Model protocols | Auto negotiation across Responses, Chat Completions, and legacy Completions |
+| Task target | Fixed task tab with controlled migration to Agent-opened child tabs |
 
-Out of scope for the first version:
+Out of scope for the current build:
 
 - CAPTCHA solving or anti-bot evasion.
 - Payment, banking, identity-verification, or high-impact unattended actions.
@@ -187,11 +192,15 @@ Current side panel capabilities include:
 
 - Main conversation page.
 - Top toolbar for copying logs, downloading logs, starting a new session, opening history, and opening settings.
-- Current-session history page.
+- Compact conversation history with confirmation before deletion.
 - Settings page with model configuration, page marker mode, safety mode, and plugin language.
 - English and Chinese UI, defaulting to English.
+- Light theme by default, with light, dark, and system modes.
 - Page marker modes: `Off`, `Focus`, `All Targets`, `Evidence`, and `Vision`.
 - Safety modes: `conservative`, `balanced`, `autonomous`, and `experimental_full_auto`.
+- Multi-turn conversations, in-place retry for a failed turn, and no duplicate failed record after retry.
+- Streaming execution details with separate reasoning, answer, and tool-argument sections when the provider exposes them.
+- Live model stage, protocol, elapsed time, and timeout diagnostics while a request is running.
 
 The old extension's page boxes and numbered markers remain a product requirement, but they are treated as visualization only:
 
@@ -210,19 +219,23 @@ The current upgrade line focuses on general browser-operation reliability instea
 - Model configuration center: provider URL, API key, detected model list, planner model, and optional vision model are saved as structured settings.
 - Debug overlay default-off behavior: page markers are visualization only, and `Off` removes the overlay root before vision screenshots.
 - Diagnostic logs: use the side panel toolbar's copy or download log actions when reporting recognition, model, stop, or execution-speed issues.
+- Task-tab ownership: switching to another Chrome tab does not redirect an active task; Agent-opened child tabs can become the new task target, and closing the target pauses the task for recovery.
+- Planner protocol negotiation: `auto` probes Responses, Chat Completions, and legacy Completions with provider-aware ordering and caches successful choices.
+- Planner resilience: schema validation and one repair attempt, truncated/empty-output recovery, native-tool fallback, and separate first-response, stream-idle, request, and total-budget timeouts.
 
 ## Model Configuration
 
-The first version uses one global OpenAI-compatible provider.
+Each saved model configuration contains an OpenAI-compatible endpoint, credentials, model choices, protocol preference, and capability flags.
 
 Configure it from the side panel settings page:
 
 1. Fill `API`.
 2. Fill `API Key`.
 3. Click `Detect models`.
-4. Let the first detected model fill `Planner model`, or choose another model from the list.
-5. Optionally choose a `Vision model`.
-6. Click `Save settings`.
+4. Choose `Auto detect`, `Responses API`, `Chat Completions`, or `Legacy Completions` as the API protocol.
+5. Let the first detected model fill `Planner model`, or choose another model from the list.
+6. Optionally choose a `Vision model`.
+7. Click `Save settings`.
 
 Rules:
 
@@ -231,6 +244,8 @@ Rules:
 - API keys are used for model detection and later model calls.
 - API keys must not be written into trace logs.
 - Model detection results are a convenience cache, not a source of truth.
+- Existing configurations without a protocol value migrate to `Auto detect`.
+- Auto mode falls back only for protocol/format incompatibility; it does not hide authentication, rate-limit, or server failures.
 
 ## Install
 
@@ -310,6 +325,10 @@ The current test suite covers:
 - Verification and memory updates.
 - Side panel state and rendering.
 - Overlay controller behavior.
+- Planner schema validation and repair behavior.
+- Responses, Chat Completions, and legacy Completions streaming parsers.
+- Planner timeout classification and activity heartbeats.
+- Fixed task-tab selection, migration, and closed-tab recovery.
 
 Run the full verification command before committing:
 
@@ -342,10 +361,10 @@ Hard-blocked or manual-first areas include CAPTCHA, SMS verification, payments, 
 ## Current Limitations
 
 - The project is still in the first clean-rewrite implementation line.
-- The advanced Chatflow Builder is a future surface; the first product surface is the Chrome side panel runtime.
+- The advanced Chatflow Builder is a future surface; the current product surface is the Chrome side panel runtime.
 - Vision is triggered only as an enhancement to observation, binding, or verification.
-- Model provider support is OpenAI-compatible, but provider-specific quirks may still need adapters.
-- Service-worker suspension, tab navigation, and content-script context loss require careful recovery and re-observation.
+- Model provider support is OpenAI-compatible, but provider-specific payload and streaming quirks may still need adapters.
+- Service-worker suspension and content-script context loss can pause a task and require explicit resume/re-observation.
 - Some complex custom controls will need additional capability modules.
 
 ## Roadmap
@@ -357,7 +376,7 @@ Hard-blocked or manual-first areas include CAPTCHA, SMS verification, payments, 
 | Vision | Cropped visual grounding, visual evidence fusion, visual verification tests |
 | Side panel | Evidence inspector, trace drawer, scoped confirmation cards |
 | Builder | Advanced Chatflow Builder as a separate product surface |
-| Model layer | Capability diagnostics, streaming checks, provider compatibility profiles |
+| Model layer | Provider compatibility profiles, richer capability diagnostics, and protocol health checks |
 | Safety | Domain allowlist, clearer sensitive-data handling, stronger hard blocks |
 | Packaging | Release workflow for installable Chrome extension builds |
 

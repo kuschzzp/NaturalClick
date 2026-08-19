@@ -4,11 +4,12 @@
 
 **一个基于 Chrome MV3 的浏览器操作 Agent。Agent Core 采用 DOM 优先、视觉增强的 clean rewrite 架构。**
 
-NaturalClick 把 Chrome 侧边栏变成一个可检查的浏览器 Agent 工作区。它观察当前页面，整理证据，规划语义命令，在本地 Chrome 中执行动作，验证结果，并保留可追踪的会话记录。
+NaturalClick 把 Chrome 侧边栏变成一个可检查的浏览器 Agent 工作区。它观察任务绑定的页面，整理证据，规划语义命令，在本地 Chrome 中执行动作，验证结果，并保留可追踪的会话记录。
 
 [English](./README.md) · [许可证](./LICENSE) · [可安装扩展目录](./naturalclick-extension) · [核心架构设计](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [侧边栏体验设计](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md) · [通用 Agent 升级说明](./docs/superpowers/specs/2026-07-07-universal-agent-browser-upgrade.md)
 
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
+[![Version](https://img.shields.io/badge/version-0.1.205-111827)](./package.json)
 [![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
 [![Side Panel](https://img.shields.io/badge/UI-Side%20Panel-10B981)](./public/sidepanel.html)
 [![DOM First](https://img.shields.io/badge/Observation-DOM--first-111827)](./src/adapters/content/dom-observer.ts)
@@ -21,7 +22,7 @@ NaturalClick 把 Chrome 侧边栏变成一个可检查的浏览器 Agent 工作�
 
 ## 项目状态
 
-这个仓库是 NaturalClick Agent 的第一条 clean rewrite 实现线。
+这个仓库是 NaturalClick Agent 当前持续开发的 clean rewrite 实现线。当前可安装版本为 `0.1.205`。
 
 旧实现验证了一些有价值的产品想法，例如对话式侧边栏、页面元素标框、目标序号、执行日志和本地 Chrome 扩展安装方式。新实现保留这些产品经验，但不继续沿用旧代码结构。新的重点是把 Agent 内核设计清楚：
 
@@ -30,7 +31,9 @@ NaturalClick 把 Chrome 侧边栏变成一个可检查的浏览器 Agent 工作�
 - Planner 输出语义命令，而不是直接输出 DOM 索引。
 - 观察、绑定、执行和验证都围绕证据展开。
 - 安全确认按任务和风险范围授权，不做每个按钮都弹一次确认的体验。
-- 保留当前会话记忆和可追踪执行记录。
+- 保留当前会话内的多轮对话记忆，以及每轮任务的可追踪执行记录。
+- 任务绑定固定 Chrome 标签，用户切换标签不会改变任务目标。
+- 兼容 OpenAI Responses、Chat Completions 和旧版 Completions 协议。
 
 NaturalClick 不是隐蔽自动化工具，不处理 CAPTCHA 绕过，不做支付机器人，也不用于绕开网站安全机制。它的目标是让用户在 Chrome 内拥有一个透明、可控、可调试的浏览器操作 Agent。
 
@@ -61,7 +64,7 @@ flowchart LR
   Runtime --> Events[事件存储]
   Runtime --> Overlay[页面标记适配器]
 
-  DOM --> Page[当前 Chrome 页面]
+  DOM --> Page[任务绑定的 Chrome 页面]
   Executor --> Page
   Overlay --> Page
 ```
@@ -152,11 +155,11 @@ docs/
   superpowers/plans/            # 实现计划
 ```
 
-## 第一版本范围
+## 当前范围
 
-第一版本只做一个完整但克制的浏览器 Agent 垂直切片。
+当前版本提供一个完整但克制的本地浏览器 Agent 垂直切片。
 
-| 方向 | 第一版本设计 |
+| 方向 | 当前设计 |
 |---|---|
 | 浏览器目标 | Chrome Manifest V3 扩展 |
 | 运行时 | 事件驱动 Agent 循环，状态可恢复 |
@@ -168,9 +171,11 @@ docs/
 | 侧边栏 | 对话式运行时，包含设置、历史、日志和语言切换 |
 | 页面标记 | 给用户看的目标可视化，不等同于 Agent 感知能力 |
 | 安全 | 默认 `balanced`，对风险动作做范围化授权 |
-| 记忆 | 当前会话记忆，不做跨会话长期记忆 |
+| 记忆 | 当前会话内的多轮历史，不做跨会话长期记忆 |
+| 模型协议 | 自动协商 Responses、Chat Completions 和旧版 Completions |
+| 任务页面 | 固定任务标签，并受控迁移到 Agent 新开的子标签 |
 
-第一版本不做：
+当前版本不做：
 
 - CAPTCHA 识别或反自动化绕过。
 - 支付、银行、身份验证，或无人值守的高影响操作。
@@ -187,11 +192,15 @@ docs/
 
 - 主对话页。
 - 顶部工具栏：复制执行日志、下载执行日志、新建会话、历史会话、设置。
-- 当前会话历史页。
+- 紧凑的历史会话页，删除前使用确认弹窗。
 - 设置页：模型配置、页面标记模式、安全模式、插件语言。
 - 中英双语界面，默认英文。
+- 默认白色主题，并支持白色、深色和跟随系统。
 - 页面标记模式：`Off`、`Focus`、`All Targets`、`Evidence`、`Vision`。
 - 安全模式：`conservative`、`balanced`、`autonomous`、`experimental_full_auto`。
+- 一个会话内支持多轮对话；失败任务在原位置重试，不额外保留重复失败记录。
+- 执行明细支持流式展示，并在 Provider 提供数据时区分 reasoning、正文和工具参数。
+- 模型请求运行时持续展示阶段、协议、耗时和超时诊断。
 
 旧扩展里的页面元素标框和序号仍然是产品要求，但它只负责让用户理解 Agent 看到了什么、准备操作什么：
 
@@ -210,19 +219,23 @@ Overlay 是用户可视化。
 - 模型配置中心：Provider URL、API Key、检测到的模型列表、Planner model、可选 Vision model 都会作为结构化设置保存。
 - Debug Overlay 默认不干扰：页面标记只用于可视化，`Off` 会移除 overlay root，视觉截图前也应清理可见标记。
 - 诊断日志：遇到识别、模型、停止或执行速度问题时，可使用侧边栏顶部工具栏复制或下载执行日志。
+- 任务标签管理：切换 Chrome 标签不会转移正在执行的任务；Agent 新开的子标签可以成为新目标；目标标签关闭后任务暂停，等待用户恢复。
+- Planner 协议协商：`auto` 会按 Provider 特征探测 Responses、Chat Completions 和旧版 Completions，并缓存成功协议。
+- Planner 恢复能力：包含 Schema 校验与一次修复、截断或空输出重试、原生工具降级，以及首响应、流空闲、单请求和总预算四类超时。
 
 ## 模型配置
 
-第一版本使用一个全局 OpenAI-compatible Provider。
+每个模型配置包含 OpenAI-compatible 接口地址、凭证、模型选择、协议偏好和能力开关。
 
 在侧边栏设置页配置：
 
 1. 填写 `API`。
 2. 填写 `API Key`。
 3. 点击 `Detect models`。
-4. 第一个检测到的模型会自动填入 `Planner model`，用户也可以从下拉框改选。
-5. 可选配置 `Vision model`。
-6. 点击 `Save settings`。
+4. API 协议选择 `Auto detect`、`Responses API`、`Chat Completions` 或 `Legacy Completions`。
+5. 第一个检测到的模型会自动填入 `Planner model`，用户也可以从下拉框改选。
+6. 可选配置 `Vision model`。
+7. 点击 `Save settings`。
 
 规则：
 
@@ -231,6 +244,8 @@ Overlay 是用户可视化。
 - API Key 只用于模型检测和后续模型调用。
 - API Key 不应写入 trace 日志。
 - 模型检测结果只是便捷缓存，不是事实来源。
+- 没有协议字段的旧配置会迁移为 `Auto detect`。
+- 自动模式只在协议或格式不兼容时回退，不会掩盖鉴权、限流或服务端错误。
 
 ## 安装
 
@@ -308,6 +323,10 @@ npm run test:all
 - 验证和记忆更新。
 - 侧边栏状态和渲染。
 - Overlay controller 行为。
+- Planner Schema 校验与修复行为。
+- Responses、Chat Completions 和旧版 Completions 流式解析。
+- Planner 超时分类和活动心跳。
+- 固定任务标签的选择、迁移与关闭恢复。
 
 提交前运行完整验证：
 
@@ -340,10 +359,10 @@ CAPTCHA、短信验证、支付、银行、身份认证、破坏性账号变更�
 ## 当前限制
 
 - 项目仍处于第一条 clean rewrite 实现线。
-- Advanced Chatflow Builder 是后续产品面；第一版本主界面是 Chrome 侧边栏运行时。
+- Advanced Chatflow Builder 是后续产品面；当前主界面是 Chrome 侧边栏运行时。
 - Vision 只在观察、绑定或验证需要时触发。
-- 模型 Provider 以 OpenAI-compatible 为目标，但不同 Provider 的兼容细节仍可能需要适配。
-- Service worker 挂起、标签页导航和 content script 上下文丢失，需要依赖恢复和重新观察。
+- 模型 Provider 以 OpenAI-compatible 为目标，但不同 Provider 的 payload 和流式实现差异仍可能需要适配。
+- Service worker 挂起和 content script 上下文丢失可能暂停任务，需要显式恢复并重新观察。
 - 复杂自定义控件还需要更多 capability 模块支持。
 
 ## 路线图
@@ -355,7 +374,7 @@ CAPTCHA、短信验证、支付、银行、身份认证、破坏性账号变更�
 | Vision | 裁剪视觉 grounding、视觉证据融合、视觉验证测试 |
 | Side panel | Evidence inspector、trace drawer、范围化确认卡片 |
 | Builder | 独立的 Advanced Chatflow Builder 产品面 |
-| Model layer | 能力诊断、streaming 检查、Provider 兼容配置 |
+| Model layer | Provider 兼容配置、更完整的能力诊断和协议健康检查 |
 | Safety | 域名 allowlist、更清晰的敏感数据处理、更强 hard block |
 | Packaging | 可安装 Chrome 扩展的发布流程 |
 
