@@ -653,9 +653,17 @@ function observationDetail(payload: Record<string, unknown>, locale?: SidepanelL
 
 export function mapEventToTimelineItem(event: AgentEvent, locale?: SidepanelLocale): TimelineItem {
   const issue = classifyRuntimeIssue(event, locale);
+  const resumedBudgetMultiplier =
+    event.type === "RuntimeResumed" && typeof event.payload.budgetMultiplier === "number" && event.payload.budgetMultiplier > 1
+      ? event.payload.budgetMultiplier
+      : undefined;
   const detail =
     issue
       ? formatRuntimeIssue(issue, locale)
+      : resumedBudgetMultiplier
+        ? locale === "zh-CN"
+          ? `已继续执行：本会话的步数、时长、观察和模型调用预算已提升至 ${resumedBudgetMultiplier}×。`
+          : `Task resumed: this session's step, duration, observation, and model-call budgets are now ${resumedBudgetMultiplier}×.`
       : event.type === "ObservationReceived"
       ? observationDetail(event.payload, locale) ??
         stringPayload(event.payload, [

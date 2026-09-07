@@ -31,6 +31,16 @@ describe("runtime issue copy", () => {
     expect(formatRuntimeIssue(issue!, "zh-CN")).toContain("关闭页面标记");
   });
 
+  it("explains that continuing a resource-budget suspension doubles the task budget", () => {
+    const issue = classifyRuntimeIssue(
+      event("RuntimeSuspended", { reason: "max_task_duration", budgetMultiplier: 1, nextBudgetMultiplier: 2 }),
+      "zh-CN"
+    );
+
+    expect(formatRuntimeIssue(issue!, "zh-CN")).toContain("继续执行");
+    expect(formatRuntimeIssue(issue!, "zh-CN")).toContain("2×");
+  });
+
   it.each([
     ["planner_output_truncated", "模型输出被截断", "输出预算"],
     ["planner_empty_output", "模型返回空内容", "非流式"],

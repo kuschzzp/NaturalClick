@@ -535,7 +535,7 @@ describe("planner turn contracts", () => {
       type: "NavigateTo",
       targetGoal: "Navigate to the login page of the target website",
       inputs: {
-        url: "http://116.205.97.39:8201/#/login"
+        url: "https://workspace.example.test/#/login"
       },
       expectedOutcome: "The browser loads the login page.",
       successCriteria: ["page_changed"],
@@ -551,7 +551,7 @@ describe("planner turn contracts", () => {
           type: "NavigateTo",
           targetGoal: "Navigate to the login page of the target website",
           inputs: {
-            url: "http://116.205.97.39:8201/#/login"
+            url: "https://workspace.example.test/#/login"
           }
         });
         expect(result.value.decision.reasoningSummary).toBe("Open the target URL first.");

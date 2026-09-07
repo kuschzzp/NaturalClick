@@ -123,7 +123,7 @@ describe("runtime fast paths", () => {
   it("does not treat a bare domain mention as navigation without open intent", () => {
     const decision = detectFastPath({
       taskText: "把 example.com 填入输入框",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [],
       actionMemory: []
     });
@@ -374,7 +374,7 @@ describe("runtime fast paths", () => {
   it("does not turn app-local search controls into web search navigation", () => {
     const decision = detectFastPath({
       taskText: "搜索客户",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [
         control({
           semanticId: "customer_search",
@@ -1058,7 +1058,7 @@ describe("runtime fast paths", () => {
   it("clicks an exact visible menu item without planner call", () => {
     const decision = detectFastPath({
       taskText: "点击客户管理",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [
         control({
           semanticId: "control_1_menuitem_customer",
@@ -1111,7 +1111,7 @@ describe("runtime fast paths", () => {
   it("activates a unique semantic navigation match without planner call", () => {
     const decision = detectFastPath({
       taskText: "进入客户列表页面",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [
         control({
           semanticId: "side_customer_management",
@@ -1147,7 +1147,7 @@ describe("runtime fast paths", () => {
   it("requires expandable menu targets to expand instead of accepting pre-click visibility", () => {
     const decision = detectFastPath({
       taskText: "点击客户管理",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [
         control({
           semanticId: "customer_menu",
@@ -1176,7 +1176,7 @@ describe("runtime fast paths", () => {
   it("expands a unique visible expandable control without planner call", () => {
     const decision = detectFastPath({
       taskText: "展开客户管理",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [
         control({
           semanticId: "customer_menu",
@@ -1218,7 +1218,7 @@ describe("runtime fast paths", () => {
   it("collapses a unique visible expandable control without planner call", () => {
     const decision = detectFastPath({
       taskText: "收起客户管理菜单",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [
         control({
           semanticId: "customer_menu",
@@ -1260,7 +1260,7 @@ describe("runtime fast paths", () => {
     expect(
       detectFastPath({
         taskText: "展开客户管理",
-        pageUrl: "https://crm.example.test/",
+        pageUrl: "https://workspace.example.test/",
         controls: [
           control({
             semanticId: "customer_menu",
@@ -1278,7 +1278,7 @@ describe("runtime fast paths", () => {
     expect(
       detectFastPath({
         taskText: "收起客户管理",
-        pageUrl: "https://crm.example.test/",
+        pageUrl: "https://workspace.example.test/",
         controls: [
           control({
             semanticId: "customer_menu",
@@ -1298,7 +1298,7 @@ describe("runtime fast paths", () => {
     expect(
       detectFastPath({
         taskText: "展开客户管理",
-        pageUrl: "https://crm.example.test/",
+        pageUrl: "https://workspace.example.test/",
         controls: [
           control({ semanticId: "customer_menu_top", role: "menuitem", label: "客户管理", accessibleName: "客户管理", expandedState: "collapsed" }),
           control({ semanticId: "customer_menu_side", role: "menuitem", label: "客户管理", accessibleName: "客户管理", expandedState: "collapsed" })
@@ -1310,7 +1310,7 @@ describe("runtime fast paths", () => {
     expect(
       detectFastPath({
         taskText: "展开客户管理",
-        pageUrl: "https://crm.example.test/",
+        pageUrl: "https://workspace.example.test/",
         controls: [
           control({ semanticId: "customer_menu", role: "menuitem", label: "客户管理", accessibleName: "客户管理", expandedState: "unknown" })
         ],
@@ -1486,7 +1486,7 @@ describe("runtime fast paths", () => {
   it("does not use semantic navigation fast path when navigation matches are ambiguous", () => {
     const decision = detectFastPath({
       taskText: "进入客户页面",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [
         control({ semanticId: "side_customer_management", role: "menuitem", label: "客户管理", accessibleName: "客户管理" }),
         control({ semanticId: "top_customer_center", role: "menuitem", label: "客户中心", accessibleName: "客户中心" })
@@ -1797,7 +1797,7 @@ describe("runtime fast paths", () => {
   it("keeps control fast paths available after unrelated action memory exists", () => {
     const decision = detectFastPath({
       taskText: "点击客户管理",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [control({ semanticId: "customer_menu", role: "menuitem", label: "客户管理", accessibleName: "客户管理" })],
       actionMemory: [
         {
@@ -1822,7 +1822,7 @@ describe("runtime fast paths", () => {
   it("does not repeat the same successful fast-path control action", () => {
     const decision = detectFastPath({
       taskText: "点击客户管理",
-      pageUrl: "https://crm.example.test/",
+      pageUrl: "https://workspace.example.test/",
       controls: [control({ semanticId: "customer_menu", role: "menuitem", label: "客户管理", accessibleName: "客户管理" })],
       actionMemory: [
         {

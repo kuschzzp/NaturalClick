@@ -93,6 +93,56 @@ export interface SidepanelHandlers {
 type Translator = ReturnType<typeof createTranslator>;
 const transientDocumentListeners = new WeakMap<HTMLElement, () => void>();
 const renderedRoots = new WeakSet<HTMLElement>();
+const composerRenderSignatures = new WeakMap<HTMLElement, string>();
+
+function composerRenderSignature(state: SidepanelState, viewName: string): string {
+  const modelSettings = state.modelSettings ?? defaultModelSettings();
+  const capabilitySettings = state.capabilitySettings ?? defaultCapabilitySettings();
+  return JSON.stringify({
+    viewName,
+    locale: normalizeLocale(state.locale),
+    composerInput: state.composerInput ?? "",
+    taskStatus: state.activeTask?.status,
+    toolMenuOpen: Boolean(state.toolMenuOpen),
+    modelPickerOpen: Boolean(state.modelPickerOpen),
+    modelPickerQuery: state.modelPickerQuery ?? "",
+    modelSettings: {
+      providerBaseUrl: modelSettings.providerBaseUrl,
+      hasApiKey: Boolean(modelSettings.apiKey.trim()),
+      plannerModel: modelSettings.plannerModel,
+      visionModel: modelSettings.visionModel ?? ""
+    },
+    detectedModels: state.detectedModels ?? [],
+    modelDetectionStatus: state.modelDetectionStatus ?? "idle",
+    overlayMode: state.overlayMode,
+    capabilitySettings: {
+      slashCommandsEnabled: capabilitySettings.skills.slashCommandsEnabled,
+      recordedWorkflowsEnabled: capabilitySettings.skills.recordedWorkflowsEnabled,
+      searchProvider: capabilitySettings.search.provider
+    },
+    skills: (state.skills ?? []).map((skill) => ({ id: skill.id, name: skill.name, description: skill.description })),
+    skillsLoading: Boolean(state.skillsLoading),
+    skillsError: state.skillsError,
+    pendingInstructions: state.pendingInstructions ?? [],
+    pendingAttachments: state.pendingAttachments ?? [],
+    generatedArtifacts: state.generatedArtifacts ?? []
+  });
+}
+
+function existingShell(root: HTMLElement): HTMLElement | undefined {
+  return Array.from(root.children).find((child): child is HTMLElement => child instanceof HTMLElement && child.classList.contains("nc-shell"));
+}
+
+function canPatchChatContent(root: HTMLElement, state: SidepanelState, viewName: string, signature: string): boolean {
+  return Boolean(
+    viewName === "chat" &&
+      !state.pendingConfirmation &&
+      composerRenderSignatures.get(root) === signature &&
+      existingShell(root)?.querySelector(":scope > .nc-app-header") &&
+      existingShell(root)?.querySelector(":scope > .nc-chat-view") &&
+      existingShell(root)?.querySelector(":scope > .nc-composer")
+  );
+}
 
 function restoreScrollAfterLayout(root: HTMLElement, element: HTMLElement | null, pinned: boolean, previousScrollTop: number): void {
   if (!element) return;
@@ -2344,6 +2394,8 @@ export function renderSidepanel(root: HTMLElement, input: SidepanelState, handle
   const state = withDerivedMode(input);
   const t = createTranslator(state.locale);
   const viewName = state.view ?? "chat";
+  const nextComposerSignature = composerRenderSignature(state, viewName);
+  const patchChatContent = canPatchChatContent(root, state, viewName, nextComposerSignature);
   const previousPageView = root.querySelector<HTMLElement>(".nc-page-view");
   const previousPageScrollTop = previousPageView?.scrollTop ?? 0;
   const previousChatStream = root.querySelector<HTMLElement>(".nc-chat-stream");
@@ -2369,25 +2421,32 @@ export function renderSidepanel(root: HTMLElement, input: SidepanelState, handle
           direction: activeTextControl.selectionDirection
         }
       : undefined;
-  const rerenderClass = renderedRoots.has(root) ? " nc-shell--rerender" : "";
-  const shell = el("section", `nc-shell nc-shell--${state.mode} nc-shell--view-${viewName}${rerenderClass}`);
-  shell.append(renderTopBar(state, handlers, t));
-
-  if (viewName === "history") {
-    shell.append(renderHistoryView(state, handlers, t));
-  } else if (viewName === "history-detail") {
-    shell.append(renderHistoryDetailView(state, handlers, t));
-  } else if (viewName === "settings") {
-    shell.append(renderSettingsView(state, handlers, t));
-  } else if (viewName === "schedules") {
-    shell.append(renderSchedulesView(state, handlers, t));
+  if (patchChatContent) {
+    const shell = existingShell(root)!;
+    shell.classList.add("nc-shell--rerender");
+    shell.querySelector(":scope > .nc-app-header")?.replaceWith(renderTopBar(state, handlers, t));
+    shell.querySelector(":scope > .nc-chat-view")?.replaceWith(renderChatView(state, handlers, t));
   } else {
-    shell.append(renderChatView(state, handlers, t), renderComposer(state, handlers, t));
-  }
-  if (state.pendingConfirmation) shell.append(renderPendingConfirmation(state, handlers, t));
+    const rerenderClass = renderedRoots.has(root) ? " nc-shell--rerender" : "";
+    const shell = el("section", `nc-shell nc-shell--${state.mode} nc-shell--view-${viewName}${rerenderClass}`);
+    shell.append(renderTopBar(state, handlers, t));
 
-  root.replaceChildren(shell);
+    if (viewName === "history") {
+      shell.append(renderHistoryView(state, handlers, t));
+    } else if (viewName === "history-detail") {
+      shell.append(renderHistoryDetailView(state, handlers, t));
+    } else if (viewName === "settings") {
+      shell.append(renderSettingsView(state, handlers, t));
+    } else if (viewName === "schedules") {
+      shell.append(renderSchedulesView(state, handlers, t));
+    } else {
+      shell.append(renderChatView(state, handlers, t), renderComposer(state, handlers, t));
+    }
+    if (state.pendingConfirmation) shell.append(renderPendingConfirmation(state, handlers, t));
+    root.replaceChildren(shell);
+  }
   renderedRoots.add(root);
+  composerRenderSignatures.set(root, nextComposerSignature);
   const listenerCleanups: Array<() => void> = [];
   if (state.toolMenuOpen || state.modelPickerOpen) {
     const ownerDocument = root.ownerDocument;

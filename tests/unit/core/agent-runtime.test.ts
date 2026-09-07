@@ -832,18 +832,18 @@ describe("AgentRuntime", () => {
     const before: PageModel = {
       ...page,
       pageIdentity: {
-        url: "https://www.qianwen.com/chat/demo",
-        title: "千问-阿里 AI 助手",
-        origin: "https://www.qianwen.com",
+        url: "https://workspace.example.test/chat/demo",
+        title: "业务助手",
+        origin: "https://workspace.example.test",
         path: "/chat/demo"
       }
     };
     const after: PageModel = {
       ...page,
       pageIdentity: {
-        url: "http://116.205.97.39:8201/#/login",
-        title: "登录-北方安防CRM管理系统",
-        origin: "http://116.205.97.39:8201",
+        url: "https://workspace.example.test/#/login",
+        title: "登录-业务管理系统",
+        origin: "https://workspace.example.test",
         path: "/#/login"
       }
     };
@@ -860,7 +860,7 @@ describe("AgentRuntime", () => {
         type: "NavigateTo",
         targetGoal: "Navigate to the login page of the target website",
         inputs: {
-          url: "http://116.205.97.39:8201/#/login"
+          url: "https://workspace.example.test/#/login"
         },
         expectedOutcome: "The browser loads the login page.",
         successCriteria: ["page_changed"],
@@ -873,15 +873,15 @@ describe("AgentRuntime", () => {
       }
     });
 
-    await runtime.startTask("进入 CRM 登录页");
+    await runtime.startTask("进入业务系统登录页");
     const result = await runtime.runNextStep();
 
     const events = await store.loadAfter("session-direct-navigate", "task-direct-navigate");
     expect(result.status).toBe("continue");
-    expect(executed).toEqual([{ type: "navigate", url: "http://116.205.97.39:8201/#/login" }]);
+    expect(executed).toEqual([{ type: "navigate", url: "https://workspace.example.test/#/login" }]);
     expect(events.find((event) => event.type === "CommandIssued")?.payload.primitive).toEqual({
       type: "navigate",
-      url: "http://116.205.97.39:8201/#/login"
+      url: "https://workspace.example.test/#/login"
     });
     expect(events.find((event) => event.type === "ModelContractViolation")).toBeUndefined();
   });

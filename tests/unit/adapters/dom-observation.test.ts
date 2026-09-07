@@ -204,7 +204,7 @@ describe("dom observer", () => {
   it("promotes sidebar list submenu items to bindable controls", () => {
     document.body.innerHTML = `
       <aside class="app-sidebar">
-        <ul class="crm-menu">
+        <ul class="business-menu">
           <li id="customer-group">客户管理
             <ul>
               <li id="lead-menu">线索</li>
@@ -312,7 +312,7 @@ describe("dom observer", () => {
   it("omits collapsed zero-size sidebar submenu items from default controls", () => {
     document.body.innerHTML = `
       <aside class="app-sidebar">
-        <ul class="crm-menu">
+        <ul class="business-menu">
           <li id="customer-group">客户管理
             <ul>
               <li id="customer-menu">客户</li>

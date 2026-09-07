@@ -9,7 +9,7 @@ NaturalClick turns the Chrome side panel into an inspectable browser-agent works
 [简体中文](./README.zh-CN.md) · [License](./LICENSE) · [Installable Extension](./naturalclick-extension) · [Architecture Spec](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [Side Panel Spec](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md) · [Universal Agent Upgrade](./docs/superpowers/specs/2026-07-07-universal-agent-browser-upgrade.md)
 
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
-[![Version](https://img.shields.io/badge/version-0.1.205-111827)](./package.json)
+[![Version](https://img.shields.io/badge/version-0.1.209-111827)](./package.json)
 [![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
 [![Side Panel](https://img.shields.io/badge/UI-Side%20Panel-10B981)](./public/sidepanel.html)
 [![DOM First](https://img.shields.io/badge/Observation-DOM--first-111827)](./src/adapters/content/dom-observer.ts)
@@ -22,7 +22,7 @@ NaturalClick turns the Chrome side panel into an inspectable browser-agent works
 
 ## Project Status
 
-This repository contains the active clean-rewrite implementation line for NaturalClick Agent. The current installable build is `0.1.205`.
+This repository contains the active clean-rewrite implementation line for NaturalClick Agent. The current installable build is `0.1.209`.
 
 The previous implementation proved useful product ideas, especially the conversational side panel, page element boxes, numbered targets, execution logs, and local Chrome extension packaging. The new line keeps those product lessons, but rebuilds the system around a clearer Agent Core:
 
@@ -222,6 +222,8 @@ The current upgrade line focuses on general browser-operation reliability instea
 - Task-tab ownership: switching to another Chrome tab does not redirect an active task; Agent-opened child tabs can become the new task target, and closing the target pauses the task for recovery.
 - Planner protocol negotiation: `auto` probes Responses, Chat Completions, and legacy Completions with provider-aware ordering and caches successful choices.
 - Planner resilience: schema validation and one repair attempt, truncated/empty-output recovery, native-tool fallback, and separate first-response, stream-idle, request, and total-budget timeouts.
+- Runtime-budget continuation: when a task pauses after reaching its step, duration, model-call, or observation budget, selecting `Continue` resumes the current session with all four budgets doubled. Each later budget-related continuation doubles them again.
+- Streaming composer stability: model-output updates refresh only the execution details, keeping the composer and an open model picker mounted without focus loss or replayed entry animation.
 
 ## Model Configuration
 
@@ -310,25 +312,21 @@ Development rules:
 
 ## Testing
 
+The unit suite is consolidated into 19 behavior-oriented files and uses no
+real third-party business-application addresses in its fixtures or scenarios.
+
 The current test suite covers:
 
 - Manifest shape.
-- Event store behavior.
-- Agent runtime state transitions.
-- Command binding.
-- Fast-path performance guardrails.
-- Context assembly and compression.
-- Observation and evidence handling.
-- Page Atlas fixture recognition.
+- Agent runtime control flow and representative fast paths.
+- Execution budgets, suspension recovery, and continued-task expansion.
+- Browser-action, Chrome-persistence, DOM-observation, model-client, and
+  overlay adapters.
+- Model configuration, planner contracts, and streaming parsers.
+- Page Atlas observation.
 - Policy and consent behavior.
 - Vision result normalization.
-- Verification and memory updates.
-- Side panel state and rendering.
-- Overlay controller behavior.
-- Planner schema validation and repair behavior.
-- Responses, Chat Completions, and legacy Completions streaming parsers.
-- Planner timeout classification and activity heartbeats.
-- Fixed task-tab selection, migration, and closed-tab recovery.
+- Side-panel configuration, rendering, runtime feedback, and visual preview.
 
 Run the full verification command before committing:
 

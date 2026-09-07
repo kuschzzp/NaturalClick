@@ -67,9 +67,43 @@ export type LimitReason =
   | "max_same_command_retries"
   | "max_observation_rounds";
 
+export type ContinuableLimitReason = "max_steps" | "max_task_duration" | "max_model_calls" | "max_observation_rounds";
+
 export interface LimitStatus {
   reached: boolean;
   reason?: LimitReason;
+}
+
+const MAX_BUDGET_VALUE = Number.MAX_SAFE_INTEGER;
+
+export function isContinuableLimitReason(reason: unknown): reason is ContinuableLimitReason {
+  return reason === "max_steps" || reason === "max_task_duration" || reason === "max_model_calls" || reason === "max_observation_rounds";
+}
+
+function budgetMultiplier(value: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
+}
+
+function expandLimit(value: number, multiplier: number): number {
+  return Math.min(MAX_BUDGET_VALUE, value * multiplier);
+}
+
+export function applyContinuationBudgetMultiplier(settings: RuntimeSettings, multiplier: number): RuntimeSettings {
+  const factor = budgetMultiplier(multiplier);
+  if (factor === 1) return settings;
+  return {
+    ...settings,
+    execution: {
+      ...settings.execution,
+      maxStepsPerTask: expandLimit(settings.execution.maxStepsPerTask, factor),
+      maxTaskDurationMs: expandLimit(settings.execution.maxTaskDurationMs, factor),
+      maxModelCallsPerTask: expandLimit(settings.execution.maxModelCallsPerTask, factor)
+    },
+    observation: {
+      ...settings.observation,
+      maxObservationRoundsPerTask: expandLimit(settings.observation.maxObservationRoundsPerTask, factor)
+    }
+  };
 }
 
 export const executionPresets: Record<Exclude<ExecutionPreset, "custom">, ExecutionBudget> = {

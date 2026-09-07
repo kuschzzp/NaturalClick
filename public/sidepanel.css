@@ -2416,9 +2416,10 @@ body {
 }
 
 .nc-model-picker-wrap {
-  flex: 1 1 190px;
-  max-width: min(260px, 54vw);
-  min-width: 118px;
+  flex: 0 1 auto;
+  width: fit-content;
+  max-width: min(220px, calc(100vw - 180px));
+  min-width: 0;
 }
 
 .nc-composer-tool--active,
@@ -2510,13 +2511,14 @@ body {
 
 .nc-model-picker-wrap .nc-composer-meta {
   display: inline-flex;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   min-width: 0;
 }
 
 .nc-model-picker-button {
-  width: 100%;
-  max-width: none;
+  width: auto;
+  max-width: 100%;
   min-height: 26px;
   border: 0;
   border-radius: var(--radius-chip);
@@ -4416,16 +4418,6 @@ body,
     display: none;
   }
 
-  .nc-model-picker-wrap {
-    flex-basis: 164px;
-    max-width: min(220px, 58vw);
-    min-width: 112px;
-  }
-
-  .nc-model-picker-button {
-    max-width: 100%;
-  }
-
   .nc-provider-grid {
     grid-template-columns: 1fr;
   }
@@ -5413,16 +5405,6 @@ body,
     grid-template-columns: 1fr;
   }
 
-  .nc-model-picker-wrap {
-    flex-basis: 220px;
-    max-width: min(240px, calc(100vw - 190px));
-    min-width: 108px;
-  }
-
-  .nc-model-picker-button {
-    max-width: 100%;
-  }
-
   .nc-settings-workbench {
     gap: 10px;
     padding: 10px 12px 12px;
@@ -5971,10 +5953,6 @@ summary.nc-run-model-stream__section-heading::after {
 
 .nc-composer__actions {
   padding: 6px 8px 8px;
-}
-
-.nc-model-picker-wrap {
-  max-width: min(310px, 68vw);
 }
 
 .nc-page-view,

@@ -1,4 +1,5 @@
 import type { AgentEvent } from "../core/events/events";
+import { isContinuableLimitReason } from "../core/runtime/execution-budget";
 import type { SidepanelLocale } from "./i18n";
 
 export type RuntimeIssueKind =
@@ -17,6 +18,8 @@ export interface RuntimeIssue {
   label: string;
   suggestion: string;
   reason?: string;
+  budgetMultiplier?: number;
+  nextBudgetMultiplier?: number;
 }
 
 function stringPayload(payload: Record<string, unknown>, key: string): string | undefined {
@@ -28,6 +31,11 @@ function nestedString(value: unknown, key: string): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const item = (value as Record<string, unknown>)[key];
   return typeof item === "string" && item.trim() ? item : undefined;
+}
+
+function numericPayload(payload: Record<string, unknown>, key: string): number | undefined {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 ? value : undefined;
 }
 
 function plannerReasonCopy(reason: string | undefined, locale?: SidepanelLocale): Pick<RuntimeIssue, "label" | "suggestion"> | undefined {
@@ -246,10 +254,26 @@ export function classifyRuntimeIssue(event: AgentEvent, locale?: SidepanelLocale
 
   kind ??= kindFromReason(reason);
   if (!kind) return undefined;
-  return { kind, reason, ...issueCopy(kind, locale, reason) };
+  return {
+    kind,
+    reason,
+    ...(event.type === "RuntimeSuspended"
+      ? {
+          budgetMultiplier: numericPayload(event.payload, "budgetMultiplier"),
+          nextBudgetMultiplier: numericPayload(event.payload, "nextBudgetMultiplier")
+        }
+      : {}),
+    ...issueCopy(kind, locale, reason)
+  };
 }
 
 export function formatRuntimeIssue(issue: RuntimeIssue, locale?: SidepanelLocale): string {
+  const continuation =
+    issue.kind === "runtime_budget" && isContinuableLimitReason(issue.reason) && issue.nextBudgetMultiplier
+      ? locale === "zh-CN"
+        ? `点击继续执行后，本会话的步数、时长、观察和模型调用预算将提升至 ${issue.nextBudgetMultiplier}×。`
+        : `Continue to raise this session's step, duration, observation, and model-call budgets to ${issue.nextBudgetMultiplier}×.`
+      : undefined;
   const reason = issue.reason ? (locale === "zh-CN" ? `原因：${issue.reason}` : `Reason: ${issue.reason}`) : undefined;
-  return [issue.label, issue.suggestion, reason].filter(Boolean).join(" · ");
+  return [issue.label, issue.suggestion, continuation, reason].filter(Boolean).join(" · ");
 }

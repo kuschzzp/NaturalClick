@@ -1,5 +1,6 @@
 import type { AgentEvent } from "../events/events";
 import { commandActionKeyFromUnknown } from "./action-key";
+import { isContinuableLimitReason } from "./execution-budget";
 
 export interface RestoredExecutionCounters {
   stepCount: number;
@@ -47,14 +48,69 @@ function eventStatus(event: AgentEvent): "failed" | "success" | undefined {
   return undefined;
 }
 
+function isTerminalEvent(event: AgentEvent): boolean {
+  return event.type === "TaskCompleted" || event.type === "TaskFailed" || event.type === "TaskStopped";
+}
+
 function activeElapsedMs(events: AgentEvent[]): number {
-  const startedAt = events.find((event) => event.type === "TaskStarted")?.timestamp;
-  if (typeof startedAt !== "number") return 0;
-  const lastActive = [...events]
-    .reverse()
-    .find((event) => event.type !== "RuntimeSuspended" || event.payload.reason !== "background_recovered_without_controller");
-  if (typeof lastActive?.timestamp !== "number") return 0;
-  return Math.max(0, lastActive.timestamp - startedAt);
+  let activeSince: number | undefined;
+  let lastActiveTimestamp: number | undefined;
+  let elapsedMs = 0;
+
+  for (const event of events) {
+    if (typeof event.timestamp !== "number") continue;
+    if (event.type === "TaskStarted" && activeSince === undefined) {
+      activeSince = event.timestamp;
+      lastActiveTimestamp = event.timestamp;
+      continue;
+    }
+    if (activeSince === undefined) {
+      if (event.type === "RuntimeResumed") {
+        activeSince = event.timestamp;
+        lastActiveTimestamp = event.timestamp;
+      }
+      continue;
+    }
+
+    if (event.type === "RuntimeSuspended") {
+      const suspendedAt =
+        event.payload.reason === "background_recovered_without_controller" ? lastActiveTimestamp ?? event.timestamp : event.timestamp;
+      elapsedMs += Math.max(0, suspendedAt - activeSince);
+      activeSince = undefined;
+      continue;
+    }
+
+    lastActiveTimestamp = event.timestamp;
+    if (isTerminalEvent(event)) {
+      elapsedMs += Math.max(0, event.timestamp - activeSince);
+      activeSince = undefined;
+    }
+  }
+
+  if (activeSince !== undefined && lastActiveTimestamp !== undefined) {
+    elapsedMs += Math.max(0, lastActiveTimestamp - activeSince);
+  }
+  return elapsedMs;
+}
+
+function positiveMultiplier(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
+}
+
+export function nextContinuationBudgetMultiplier(events: AgentEvent[]): number {
+  const latest = events.at(-1);
+  const reason = latest?.payload.reason;
+  const currentMultiplier = positiveMultiplier(
+    [...events]
+      .reverse()
+      .find(
+        (event) =>
+          (event.type === "RuntimeResumed" || event.type === "RuntimeSuspended") &&
+          typeof event.payload.budgetMultiplier === "number"
+      )?.payload.budgetMultiplier
+  );
+  if (latest?.type !== "RuntimeSuspended" || !isContinuableLimitReason(reason)) return currentMultiplier;
+  return Math.min(Number.MAX_SAFE_INTEGER, currentMultiplier * 2);
 }
 
 function consecutiveFailedSteps(events: AgentEvent[]): number {

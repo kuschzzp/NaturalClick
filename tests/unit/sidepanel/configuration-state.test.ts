@@ -444,6 +444,12 @@ describe("sidepanel state", () => {
     expect(item.detail).toContain("点击继续");
   });
 
+  it("shows the applied continuation multiplier after resuming a budget-limited task", () => {
+    const item = mapEventToTimelineItem(makeEvent("RuntimeResumed", { reason: "user_requested", budgetMultiplier: 4 }), "zh-CN");
+
+    expect(item.detail).toContain("4×");
+  });
+
   it("summarizes smart observation retrieval details in Chinese", () => {
     const item = mapEventToTimelineItem(
       makeEvent("ObservationReceived", {

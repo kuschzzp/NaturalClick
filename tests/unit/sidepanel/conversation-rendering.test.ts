@@ -271,6 +271,44 @@ describe("sidepanel render", () => {
     root.remove();
   });
 
+  it("keeps the composer and open model picker mounted while streamed model details update", () => {
+    const root = document.createElement("main");
+    document.body.append(root);
+    const state = baseState({
+      composerInput: "完成后导出结果",
+      activeTask: { taskId: "task-1", status: "running", currentAction: "模型正在输出" },
+      modelPickerOpen: true,
+      modelSettings: {
+        providerBaseUrl: "https://api.example.com/v1",
+        apiKey: "sk-test",
+        plannerModel: "qwen-max",
+        visionModel: "",
+        apiKeyRef: "naturalclick:model-api-key"
+      },
+      detectedModels: ["qwen-max", "qwen-coder-plus"],
+      timeline: [
+        { id: "start", title: "任务开始", detail: "查询天气", eventType: "TaskStarted" },
+        { id: "model", title: "模型调用开始", eventType: "ModelCallStarted" }
+      ],
+      modelStream: { title: "模型正在输出", text: "第一段", isStreaming: true, model: "qwen-max" }
+    });
+
+    renderSidepanel(root, state);
+    const composer = root.querySelector<HTMLElement>(".nc-composer");
+    const picker = root.querySelector<HTMLElement>(".nc-model-popover");
+    const search = root.querySelector<HTMLInputElement>(".nc-model-popover__search-input");
+    search?.focus();
+    search?.setSelectionRange(0, 0);
+
+    renderSidepanel(root, { ...state, modelStream: { ...state.modelStream!, text: "第一段\n第二段" } });
+
+    expect(root.querySelector(".nc-composer")).toBe(composer);
+    expect(root.querySelector(".nc-model-popover")).toBe(picker);
+    expect(document.activeElement).toBe(search);
+    expect(root.querySelector(".nc-run-model-stream__answer-text")?.textContent).toContain("第二段");
+    root.remove();
+  });
+
   it("routes model picker management directly to the model config editor", () => {
     const root = document.createElement("main");
     const onOpenModelConfigEditor = vi.fn();

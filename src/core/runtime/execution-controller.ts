@@ -1,7 +1,7 @@
 import type { AgentEvent } from "../events/events";
 import type { AgentStepResult, StartTaskContext } from "./agent-runtime";
 import type { RuntimeSettings, RuntimeSettingsInput } from "./execution-budget";
-import { limitStatus, resolveRuntimeSettings } from "./execution-budget";
+import { applyContinuationBudgetMultiplier, isContinuableLimitReason, limitStatus, resolveRuntimeSettings } from "./execution-budget";
 import type { RestoredExecutionCounters } from "./execution-recovery";
 import { createEventId, createStepId } from "../../shared/ids";
 
@@ -27,6 +27,7 @@ export interface ExecutionControllerPorts {
   runtime: ExecutionRuntime;
   appendEvent(event: AgentEvent): Promise<void>;
   settings?: RuntimeSettingsInput;
+  continuationBudgetMultiplier?: number;
   now?: () => number;
 }
 
@@ -61,6 +62,7 @@ export class ExecutionController {
   readonly settings: RuntimeSettings;
   private readonly ports: ExecutionControllerPorts;
   private readonly now: () => number;
+  private readonly continuationBudgetMultiplier: number;
   private stopped = false;
   private startedAt = 0;
   private stepCount = 0;
@@ -74,7 +76,11 @@ export class ExecutionController {
 
   constructor(ports: ExecutionControllerPorts) {
     this.ports = ports;
-    this.settings = resolveRuntimeSettings(ports.settings);
+    this.continuationBudgetMultiplier =
+      typeof ports.continuationBudgetMultiplier === "number" && Number.isFinite(ports.continuationBudgetMultiplier) && ports.continuationBudgetMultiplier >= 1
+        ? Math.floor(ports.continuationBudgetMultiplier)
+        : 1;
+    this.settings = applyContinuationBudgetMultiplier(resolveRuntimeSettings(ports.settings), this.continuationBudgetMultiplier);
     this.now = ports.now ?? (() => Date.now());
   }
 
@@ -107,7 +113,15 @@ export class ExecutionController {
     }
     this.resetCounters(restoredCounters);
     await this.ports.runtime.resumeTask(taskText);
-    await this.append("RuntimeResumed", { reason: "user_requested", ...payload }, "user");
+    await this.append(
+      "RuntimeResumed",
+      {
+        reason: "user_requested",
+        ...(this.continuationBudgetMultiplier > 1 ? { budgetMultiplier: this.continuationBudgetMultiplier } : {}),
+        ...payload
+      },
+      "user"
+    );
     return this.runUntilPaused();
   }
 
@@ -149,6 +163,7 @@ export class ExecutionController {
         this.settings
       );
       if (limit.reached) {
+        const canContinueWithExpandedBudget = isContinuableLimitReason(limit.reason);
         await this.append(
           "RuntimeSuspended",
           {
@@ -161,7 +176,13 @@ export class ExecutionController {
               observationRoundCount: this.observationRoundCount,
               consecutiveFailures: this.consecutiveFailures,
               sameCommandRetries: this.sameCommandRetries
-            }
+            },
+            ...(canContinueWithExpandedBudget
+              ? {
+                  budgetMultiplier: this.continuationBudgetMultiplier,
+                  nextBudgetMultiplier: Math.min(Number.MAX_SAFE_INTEGER, this.continuationBudgetMultiplier * 2)
+                }
+              : {})
           },
           "user"
         );

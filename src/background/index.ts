@@ -27,8 +27,8 @@ import type { ConsentScope } from "../core/policy/consent";
 import type { SafetyMode } from "../core/policy/policy";
 import { AgentRuntime, type ActionMemoryItem, type ConversationHistoryItem, type ObservePageRuntimeOptions, type PlannerInput, type PlannerPortMetrics, type PlannerPortResult } from "../core/runtime/agent-runtime";
 import { ExecutionController } from "../core/runtime/execution-controller";
-import type { ObservationBudget } from "../core/runtime/execution-budget";
-import { restoreExecutionCounters } from "../core/runtime/execution-recovery";
+import { applyContinuationBudgetMultiplier, resolveRuntimeSettings, type ObservationBudget } from "../core/runtime/execution-budget";
+import { nextContinuationBudgetMultiplier, restoreExecutionCounters } from "../core/runtime/execution-recovery";
 import {
   DEFAULT_MAX_PLANNER_NATIVE_TOOL_ROUNDS,
   executePlannerNativeToolCallsWithCache,
@@ -1899,6 +1899,8 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
 
     const initialActionMemory = restoredActionMemory(events);
     const restoredCounters = restoreExecutionCounters(events);
+    const continuationBudgetMultiplier = nextContinuationBudgetMultiplier(events);
+    const resumedRuntimeSettings = applyContinuationBudgetMultiplier(resolveRuntimeSettings(message.runtimeSettings), continuationBudgetMultiplier);
     activeConsentScope = restoredConsentScope(events);
     currentOverlayTargetId = undefined;
     activeCapabilitySettings = resolveCapabilitySettings(message.capabilitySettings ?? activeCapabilitySettings);
@@ -1906,7 +1908,7 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
     const runtime = buildRuntime(
       message.modelSettings,
       runtimeSafetyMode(message.safetyMode),
-      message.runtimeSettings?.observationBudget,
+      resumedRuntimeSettings.observation,
       initialActionMemory,
       (activeRunAbortController = new AbortController()).signal
     );
@@ -1915,7 +1917,8 @@ async function handleMessage(message: NaturalClickRequest): Promise<NaturalClick
       taskId: restored.taskId,
       runtime,
       appendEvent,
-      settings: message.runtimeSettings
+      settings: message.runtimeSettings,
+      continuationBudgetMultiplier
     });
     try {
       await activeController.resumeTask(taskText, {

@@ -9,7 +9,7 @@ NaturalClick 把 Chrome 侧边栏变成一个可检查的浏览器 Agent 工作�
 [English](./README.md) · [许可证](./LICENSE) · [可安装扩展目录](./naturalclick-extension) · [核心架构设计](./docs/superpowers/specs/2026-06-26-agent-core-architecture-design.md) · [侧边栏体验设计](./docs/superpowers/specs/2026-06-26-sidepanel-experience-design.md) · [通用 Agent 升级说明](./docs/superpowers/specs/2026-07-07-universal-agent-browser-upgrade.md)
 
 [![Chrome MV3](https://img.shields.io/badge/Chrome-MV3-4285F4)](./public/manifest.json)
-[![Version](https://img.shields.io/badge/version-0.1.205-111827)](./package.json)
+[![Version](https://img.shields.io/badge/version-0.1.209-111827)](./package.json)
 [![TypeScript](https://img.shields.io/badge/Core-TypeScript-3178C6)](./src)
 [![Side Panel](https://img.shields.io/badge/UI-Side%20Panel-10B981)](./public/sidepanel.html)
 [![DOM First](https://img.shields.io/badge/Observation-DOM--first-111827)](./src/adapters/content/dom-observer.ts)
@@ -22,7 +22,7 @@ NaturalClick 把 Chrome 侧边栏变成一个可检查的浏览器 Agent 工作�
 
 ## 项目状态
 
-这个仓库是 NaturalClick Agent 当前持续开发的 clean rewrite 实现线。当前可安装版本为 `0.1.205`。
+这个仓库是 NaturalClick Agent 当前持续开发的 clean rewrite 实现线。当前可安装版本为 `0.1.209`。
 
 旧实现验证了一些有价值的产品想法，例如对话式侧边栏、页面元素标框、目标序号、执行日志和本地 Chrome 扩展安装方式。新实现保留这些产品经验，但不继续沿用旧代码结构。新的重点是把 Agent 内核设计清楚：
 
@@ -222,6 +222,8 @@ Overlay 是用户可视化。
 - 任务标签管理：切换 Chrome 标签不会转移正在执行的任务；Agent 新开的子标签可以成为新目标；目标标签关闭后任务暂停，等待用户恢复。
 - Planner 协议协商：`auto` 会按 Provider 特征探测 Responses、Chat Completions 和旧版 Completions，并缓存成功协议。
 - Planner 恢复能力：包含 Schema 校验与一次修复、截断或空输出重试、原生工具降级，以及首响应、流空闲、单请求和总预算四类超时。
+- 运行预算续执行：任务触达步数、时长、模型调用或观察预算而挂起时，点击“继续执行”会在当前会话内将这四项预算全部扩大一倍；之后每次因预算挂起再继续，都会在上一次基础上再翻一倍。
+- 流式输出稳定性：模型输出更新时只刷新执行明细，输入框和已打开的模型选择框保持原节点、焦点与动画状态，不再闪动。
 
 ## 模型配置
 
@@ -308,25 +310,19 @@ npm run test:all
 
 ## 测试
 
+单元测试已按行为收敛为 19 个文件；fixture 和测试场景不包含真实的第三方业务系统地址。
+
 当前测试覆盖：
 
 - Manifest 结构。
-- Event store 行为。
-- Agent runtime 状态流转。
-- 命令绑定。
-- fast path 性能护栏。
-- 上下文组装和压缩。
-- 观察和证据处理。
-- Page Atlas fixture 识别。
+- Agent runtime 控制流和代表性的 fast path。
+- 执行预算、挂起恢复和续执行扩容。
+- 浏览器动作、Chrome 持久化、DOM 观察、模型客户端和 overlay 适配器。
+- 模型配置、Planner 协议与流式解析。
+- Page Atlas 观察。
 - Policy 与 consent 行为。
 - Vision 结果归一化。
-- 验证和记忆更新。
-- 侧边栏状态和渲染。
-- Overlay controller 行为。
-- Planner Schema 校验与修复行为。
-- Responses、Chat Completions 和旧版 Completions 流式解析。
-- Planner 超时分类和活动心跳。
-- 固定任务标签的选择、迁移与关闭恢复。
+- 侧边栏配置、渲染、运行反馈和视觉预览。
 
 提交前运行完整验证：
 
